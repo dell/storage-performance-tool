@@ -66,6 +66,7 @@ public class WorkerJsonMetricsIntegrationTest {
 		config.val("run-comment", "worker-node");
 		config.val("run-port", jsonPort);
 		config.val("run-id", 42L);
+		config.val("run-node", true);
 
 		// Start JSON servlet bound to this metrics manager
 		jsonServer = new Server(jsonPort);

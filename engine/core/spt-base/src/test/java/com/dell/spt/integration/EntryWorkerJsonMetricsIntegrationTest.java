@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.control.FleetMetricsHandler;
 import com.dell.spt.base.control.NodeMetricsHandler;
 import com.dell.spt.base.item.op.OpType;
@@ -87,6 +88,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerConfig.val("run-comment", "worker-node");
 		workerConfig.val("run-port", workerJsonPort);
 		workerConfig.val("run-id", 77L);
+		workerConfig.val("run-node", true);
 		workerConfig.val("server-metrics-expose_fleet", true);
 		entryConfig = TestConfigBuilder.config();
 		entryConfig.val("run-comment", "entry-node");
@@ -129,7 +131,10 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		entryContext.setContextPath("/");
 		entryJsonServer.setHandler(entryContext);
 		entryContext.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
-		entryContext.addServlet(new ServletHolder(new NodeMetricsHandler(entryMgr, entryConfig)), "/metrics/json");
+		// The entry accepted run 77 through POST /run; the worker's /status stays idle.
+		final ApiStatus entryStatus = new ApiStatus();
+		entryStatus.setRunning("step-agg-1", 77L);
+		entryContext.addServlet(new ServletHolder(new NodeMetricsHandler(entryMgr, entryConfig, entryStatus)), "/metrics/json");
 		entryContext.addServlet(new ServletHolder(new FleetMetricsHandler(entryMgr, entryConfig)), "/metrics/fleet/json");
 		entryContext.addServlet(new ServletHolder(new FleetMetricsHandler(entryMgr, entryConfig)), "/metrics/cluster/json");
 		entryJsonServer.start();

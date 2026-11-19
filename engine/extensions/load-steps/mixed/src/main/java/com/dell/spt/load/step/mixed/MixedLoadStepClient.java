@@ -20,6 +20,7 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -41,6 +43,9 @@ import java.util.stream.Stream;
 })
 public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepClient>
 				implements CompositeCheckedOperations {
+
+	/** The item output file {@link #init()} chose because none was given; {@code null} until then. */
+	private volatile String defaultItemOutputFile;
 
 	public MixedLoadStepClient(
 					final Config config,
@@ -91,7 +96,25 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 
 	@Override
 	protected MixedLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
-		return new MixedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+		return new MixedLoadStepClient(
+						withoutDefaultItemOutputFile(config),
+						extensions,
+						ctxConfigs == null ? null : ctxConfigs.stream().map(this::withoutDefaultItemOutputFile).collect(Collectors.toList()),
+						metricsMgr);
+	}
+
+	/**
+	 * The configuration without the item output file this step's {@link #init()} chose, so that a copy
+	 * chooses its own in its own folder. A file given by the user, or by the copy's arguments, stays.
+	 */
+	private Config withoutDefaultItemOutputFile(final Config config) {
+		final String chosen = defaultItemOutputFile;
+		if (chosen == null || !chosen.equals(config.stringVal("item-output-file"))) {
+			return config;
+		}
+		final Config copy = new BasicConfig(config);
+		copy.val("item-output-file", null);
+		return copy;
 	}
 
 	@Override
@@ -112,9 +135,9 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		// them all to this one once the slices close.
 		final String itemOutputFile = config.stringVal("item-output-file");
 		if (putWeight > 0 && (itemOutputFile == null || itemOutputFile.isEmpty())) {
-			config.val(
-							"item-output-file",
-							MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString());
+			final String chosen = MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString();
+			config.val("item-output-file", chosen);
+			defaultItemOutputFile = chosen;
 		}
 
 		final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");

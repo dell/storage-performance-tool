@@ -251,6 +251,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						reconciled);
 	}
 
+	/** A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at close. */
+	@Override
+	protected final void onStartRefusedAtJvmExit() {
+		startRefused = true;
+	}
+
 	@Override
 	protected void doStartWrapped() {
 		// A step that runs again reads its meters afresh.

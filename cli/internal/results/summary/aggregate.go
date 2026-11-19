@@ -437,6 +437,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals := RunTotals{}
 	warnings := make([]string, 0)
 	steadyAbsent := steadyAbsentReason(data.EngineInfo)
+	labelUses := stepLabelUses(data)
 
 	for idx, stepID := range data.StepOrder {
 		stepData := data.Steps[stepID]
@@ -507,6 +508,14 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.MissingPhases = append(totals.MissingPhases, label)
 			warnings = append(warnings, fmt.Sprintf("%s metrics unavailable (status: %s)", label, statusLabel))
 		}
+		label := stepWarningLabel(stepData.StepID)
+		if labelUses[label] > 1 {
+			// Identical warnings are merged later, and a shared label does not say which step it is.
+			label = fmt.Sprintf("%s (%s)", label, stepData.StepID)
+		}
+		if warning := unresolvedOperationsWarning(label, stepData); warning != "" {
+			warnings = append(warnings, warning)
+		}
 
 		steps = append(steps, summary)
 	}
@@ -522,6 +531,21 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
+}
+
+func stepWarningLabel(stepID string) string {
+	return nonEmpty(phaseLabelFromStep(stepID), stepID)
+}
+
+// stepLabelUses counts the steps that each warning label would name.
+func stepLabelUses(data *RunData) map[string]int {
+	uses := make(map[string]int, len(data.StepOrder))
+	for _, stepID := range data.StepOrder {
+		if stepData := data.Steps[stepID]; stepData != nil {
+			uses[stepWarningLabel(stepData.StepID)]++
+		}
+	}
+	return uses
 }
 
 // AllFailedPhase is a phase, or one operation of a mixed phase, that measured nothing because its
