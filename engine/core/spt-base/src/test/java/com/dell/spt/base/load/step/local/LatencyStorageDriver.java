@@ -374,6 +374,7 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 		}
 		op.finishRequest();
 		if (index >= tailFromDispatch) {
+			// The slow tail sets its own status and skips completionStatus and the gate; no caller combines them.
 			final var unused = completer.schedule(() -> completeTail(op), tailLatencyNanos, TimeUnit.NANOSECONDS);
 		} else if (index < slowFirstCount) {
 			final List<O> wave;
