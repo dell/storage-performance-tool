@@ -155,6 +155,56 @@ final class LoadStepContextSplitReadTimingTest {
 		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
 	}
 
+	/**
+	 * The driver's mark decides, not the timestamps: a parent marked requestless adds no sample even
+	 * with a first-byte stamp of its own.
+	 */
+	@ParameterizedTest(name = "batch={0}")
+	@ValueSource(booleans = {false, true
+	})
+	void aParentMarkedRequestlessAddsNoSampleEvenWithAFirstByte(final boolean batch) {
+		final var read = new Published(OpType.READ, "marked").readsTheObject().marksRequestless();
+		for (var part = 0; part < PARTS; part++) {
+			read.partSucceeds(part);
+		}
+		read.ends(Status.SUCC);
+		assertTrue(((DataOperationImpl<?>) read.last()).respDataTimeStart() > 0, "the parent has a first byte");
+
+		put(context(), batch, read);
+
+		final var snapshot = metrics.terminalSnapshot();
+		assertEquals(1, snapshot.successSnapshot().count());
+		assertEquals(PARTS, ranges.count);
+		ranges.assertHeldBy(snapshot.durationSnapshot(), snapshot.latencySnapshot());
+		assertEquals(PARTS, snapshot.ttfbSnapshot().count(), "only the ranges' first bytes");
+		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
+	}
+
+	/**
+	 * A parent the driver did not mark keeps its sample even with no first byte: {@code fs} reading a
+	 * file listed larger than the threshold that turns out empty did I/O of its own.
+	 */
+	@ParameterizedTest(name = "batch={0}")
+	@ValueSource(booleans = {false, true
+	})
+	void anUnmarkedParentWithNoFirstByteKeepsItsSample(final boolean batch) {
+		final var read = new Published(OpType.READ, "end-of-file").startsAtEndOfFile();
+		for (var part = 0; part < PARTS; part++) {
+			read.partSucceeds(part);
+		}
+		read.ends(Status.SUCC);
+		ranges.add(read.last());
+
+		put(context(), batch, read);
+
+		final var snapshot = metrics.terminalSnapshot();
+		assertEquals(1, snapshot.successSnapshot().count());
+		assertEquals(PARTS + 1, ranges.count);
+		ranges.assertHeldBy(snapshot.durationSnapshot(), snapshot.latencySnapshot());
+		assertEquals(PARTS, snapshot.ttfbSnapshot().count(), "the parent has no first byte");
+		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
+	}
+
 	/** The rule is for reads: an upload's finished parent is its completion request, which keeps its sample. */
 	@ParameterizedTest(name = "batch={0}")
 	@ValueSource(booleans = {false, true
@@ -351,20 +401,41 @@ final class LoadStepContextSplitReadTimingTest {
 
 		/**
 		 * The initial pass. A split read's sends no request, as on {@code s3} and {@code s3-aws}: it
-		 * has request and response times and no data response. An upload's is its initiation request.
+		 * has request and response times and no data response, and the driver marks it requestless.
+		 * An upload's is its initiation request.
 		 */
 		Published starts() {
 			if (OpType.READ.equals(operation.type())) {
-				operation.startRequest();
-				pause();
-				operation.finishRequest();
-				pause();
-				operation.startResponse();
-				operation.status(Status.SUCC);
+				passesWithoutData();
+				operation.markRequestless();
 			} else {
 				respond(operation, Status.SUCC);
 			}
 			return publishOperation();
+		}
+
+		/**
+		 * An initial pass with the same times and no mark: a driver that did I/O of its own and saw no
+		 * byte, as {@code fs} does reading a file that is empty although it was listed larger.
+		 */
+		Published startsAtEndOfFile() {
+			passesWithoutData();
+			return publishOperation();
+		}
+
+		/** The driver marks the parent requestless after a pass that has a first-byte stamp. */
+		Published marksRequestless() {
+			operation.markRequestless();
+			return this;
+		}
+
+		private void passesWithoutData() {
+			operation.startRequest();
+			pause();
+			operation.finishRequest();
+			pause();
+			operation.startResponse();
+			operation.status(Status.SUCC);
 		}
 
 		/** An initial pass that reads the whole object itself, as {@code fs} does, before the ranges run. */

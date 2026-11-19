@@ -41,4 +41,20 @@ public interface CompositeOperation<I extends Item> extends Operation<I> {
 	 * starts again from its initiation instead of resuming or finalizing the failed attempt.
 	 */
 	default void resetSubOperations() {}
+
+	/**
+	 * Whether the driver ran this attempt as its sub-operations alone: it sent no request and did no I/O
+	 * for the operation's own passes, so its sub-operations' timings are the only request timings it has.
+	 * The driver says so with {@link #markRequestless()}; a reset of the operation, or of its
+	 * sub-operations, clears it.
+	 */
+	default boolean requestless() {
+		return false;
+	}
+
+	/**
+	 * Called by a driver that issues this attempt's sub-operations as its only requests, as the {@code
+	 * s3}, {@code s3-rdma} and {@code s3-aws} drivers do for a read split by the size threshold.
+	 */
+	default void markRequestless() {}
 }

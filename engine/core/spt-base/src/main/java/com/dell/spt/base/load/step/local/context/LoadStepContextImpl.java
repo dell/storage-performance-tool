@@ -554,23 +554,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Whether a finished composite result is a split read that read nothing itself: its ranges ran as
-	 * operations of their own, each with its own timing samples, and the parent never started a data
-	 * response. A driver that reads the object in the parent's own pass, as {@code fs} does, starts
-	 * one, and that read keeps its sample.
-	 */
-	private static boolean isRequestlessSplitRead(final Operation<?> opResult) {
-		return OpType.READ.equals(opResult.type())
-						&& opResult instanceof DataOperation<?> dataOp
-						&& dataOp.respDataTimeStart() == 0;
-	}
-
-	/**
-	 * Counts a finished split read that read nothing itself (see {@link #isRequestlessSplitRead}). Its
-	 * ranges add their own duration, latency and time-to-first-byte samples, so it adds none. Its time
+	 * Counts a finished composite whose driver marked it {@link CompositeOperation#requestless()}: a read
+	 * split by the size threshold on {@code s3}, {@code s3-rdma} or {@code s3-aws}. Its ranges ran as
+	 * operations of their own, each recording its own timings, so it adds none. A composite that did
+	 * I/O of its own, as an {@code fs} split read does, is not marked and keeps its sample. Its time
 	 * from start to finalization stays on the operation, for the operation trace.
 	 */
-	private void markSplitReadSucc(final O opResult, final long bytes) {
+	private void markRequestlessSucc(final O opResult, final long bytes) {
 		markSucc(opResult, bytes, 0L, 0L, 0L);
 	}
 
@@ -963,8 +953,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				outputTimingMetrics(opResult);
 				if (opResult instanceof ListOperation) {
 					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency, timeToFirstByte);
-				} else if (composite && isRequestlessSplitRead(opResult)) {
-					markSplitReadSucc(opResult, countBytesDone);
+				} else if (composite && ((CompositeOperation<?>) opResult).requestless()) {
+					markRequestlessSucc(opResult, countBytesDone);
 				} else {
 					markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				}
@@ -1096,8 +1086,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					outputTimingMetrics(opResult);
 					if (listOpResult != null) {
 						markListSuccess(listOpResult, reqDuration, respLatency, timeToFirstByte);
-					} else if (composite && isRequestlessSplitRead(opResult)) {
-						markSplitReadSucc(opResult, countBytesDone);
+					} else if (composite && ((CompositeOperation<?>) opResult).requestless()) {
+						markRequestlessSucc(opResult, countBytesDone);
 					} else {
 						markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 					}

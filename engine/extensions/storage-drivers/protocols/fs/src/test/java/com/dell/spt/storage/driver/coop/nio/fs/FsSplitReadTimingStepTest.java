@@ -37,8 +37,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * An {@code fs} read split by the size threshold reads the whole file in the parent's own pass, then
- * reads its ranges. The parent's read is a real one, with a first byte, so the step keeps its timing
- * sample next to its ranges'. Only a parent that read nothing itself adds none.
+ * reads its ranges. The parent's read is a real one, so the step keeps its timing sample next to its
+ * ranges', with or without a first byte: the driver never marks it requestless.
  */
 final class FsSplitReadTimingStepTest {
 
@@ -56,9 +56,6 @@ final class FsSplitReadTimingStepTest {
 	@BeforeEach
 	void setUp() throws Exception {
 		dir = Files.createTempDirectory("fs-split-read-");
-		for (var object = 0; object < OBJECTS; object++) {
-			Files.write(dir.resolve(name(object)), new byte[(int) OBJECT_SIZE]);
-		}
 		config = TestConfigBuilder.config();
 		config.val("load-batch-size", 16);
 		config.val("storage-driver-limit-concurrency", 4);
@@ -100,15 +97,29 @@ final class FsSplitReadTimingStepTest {
 
 	@Test
 	void aSplitReadThatReadsTheFileItselfKeepsItsSample() throws Exception {
-		assertParentAndRangeSamples(false);
+		assertParentAndRangeSamples(false, OBJECT_SIZE);
 	}
 
 	@Test
 	void aSplitReadThatReadsTheFileItselfKeepsItsSampleWithBatchedResults() throws Exception {
-		assertParentAndRangeSamples(true);
+		assertParentAndRangeSamples(true, OBJECT_SIZE);
 	}
 
-	private void assertParentAndRangeSamples(final boolean batch) throws Exception {
+	/** A file listed at its size and found empty: the parent's read reaches the end at once and succeeds. */
+	@Test
+	void aSplitReadOfAnEmptyFileKeepsItsSample() throws Exception {
+		assertParentAndRangeSamples(false, 0);
+	}
+
+	@Test
+	void aSplitReadOfAnEmptyFileKeepsItsSampleWithBatchedResults() throws Exception {
+		assertParentAndRangeSamples(true, 0);
+	}
+
+	private void assertParentAndRangeSamples(final boolean batch, final long fileSize) throws Exception {
+		for (var object = 0; object < OBJECTS; object++) {
+			Files.write(dir.resolve(name(object)), new byte[(int) fileSize]);
+		}
 		final var samples = new Samples();
 		try (var driver = new FileStorageDriver<DataItemImpl, Operation<DataItemImpl>>(
 						"test-fs", dataInput, config.configVal("storage"), false, config.intVal("load-batch-size"))) {
@@ -131,11 +142,13 @@ final class FsSplitReadTimingStepTest {
 		assertEquals(OBJECTS, snapshot.successSnapshot().count(), "objects read");
 		assertEquals(0, snapshot.failsSnapshot().count(), "failed reads");
 		assertEquals(OBJECTS, samples.parents, "finished parents");
-		assertEquals(OBJECTS, samples.parentsThatRead, "parents that read the file themselves");
+		assertEquals(0, samples.markedRequestless, "parents the driver marked requestless");
+		// a nonempty file stamps the parent's first byte; an empty one reaches the end with none
+		assertEquals(fileSize > 0 ? OBJECTS : 0, samples.parentsThatRead, "parents with a first byte");
 		assertEquals(OBJECTS * (OBJECT_SIZE / THRESHOLD), samples.ranges, "ranges read");
 		samples.assertHeldBy(snapshot.durationSnapshot(), snapshot.latencySnapshot());
+		// the meter takes a first byte that is positive and within the duration, which the results show
 		assertEquals(samples.firstBytes, snapshot.ttfbSnapshot().count(), "first-byte samples");
-		assertEquals(OBJECTS + samples.ranges, samples.firstBytes, "a first byte for each parent and range");
 	}
 
 	private static String name(final int object) {
@@ -180,6 +193,7 @@ final class FsSplitReadTimingStepTest {
 
 		private long parents;
 		private long parentsThatRead;
+		private long markedRequestless;
 		private long ranges;
 		private long firstBytes;
 		private long count;
@@ -202,6 +216,9 @@ final class FsSplitReadTimingStepTest {
 				parents++;
 				if (((DataOperation<?>) result).respDataTimeStart() > 0) {
 					parentsThatRead++;
+				}
+				if (parent.requestless()) {
+					markedRequestless++;
 				}
 			} else if (result instanceof PartialOperation) {
 				ranges++;

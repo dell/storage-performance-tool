@@ -1199,6 +1199,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			op.finishResponse();
 		} else {
 			op.startResponse();
+			// Its parts are this attempt's only requests: the step takes their timings only.
+			op.markRequestless();
 		}
 		return CompletableFuture.completedFuture(null);
 	}

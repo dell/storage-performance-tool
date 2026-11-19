@@ -2285,6 +2285,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				concurrencyThrottle.release();
 				op.status(Operation.Status.SUCC);
 				op.startResponse();
+				// Its ranges are this attempt's only requests: the step takes their timings only.
+				compositeReadOp.markRequestless();
 				complete(null, op);
 				return true;
 			} else {

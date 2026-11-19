@@ -23,6 +23,7 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 	private final Map<String, String> contextData = new ConcurrentHashMap<>();
 	private final List<PartialDataOperation<I>> subTasks = new ArrayList<>();
 	private final AtomicInteger subTaskYieldIndex = new AtomicInteger(0);
+	private volatile boolean requestless;
 
 	public CompositeDataOperationImpl() {
 		super();
@@ -46,6 +47,23 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 		super(other);
 		this.sizeThreshold = other.sizeThreshold;
 		this.pendingSubTasksCount.set(other.pendingSubTasksCount.get());
+		this.requestless = other.requestless;
+	}
+
+	@Override
+	public void reset() throws IllegalArgumentException {
+		super.reset();
+		requestless = false;
+	}
+
+	@Override
+	public final boolean requestless() {
+		return requestless;
+	}
+
+	@Override
+	public final void markRequestless() {
+		requestless = true;
 	}
 
 	@Override
@@ -133,6 +151,7 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 		subTaskYieldIndex.set(0);
 		contextData.clear();
 		pendingSubTasksCount.set(-1);
+		requestless = false;
 	}
 
 	@Override
