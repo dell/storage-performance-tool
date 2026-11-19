@@ -314,6 +314,36 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void anIdInAnAppendedMapMarksItsContextIdAsSet() {
+		testConfig.val("load-step-id", "none-initial");
+		testConfig.val(STEP_ID_GENERATED, true);
+		ctxConfigs = null;
+		final var client = noopClientWithLocalSlice(mock(LoadStep.class));
+
+		final var copy = client.append(stepIdArgs("context-id")).append(Map.of());
+
+		assertEquals("context-id", copy.getCtxConfigs().get(0).stringVal("load-step-id"));
+		assertFalse(copy.getCtxConfigs().get(0).boolVal(STEP_ID_GENERATED), "the context's id is set");
+		assertEquals("none-initial", copy.getCtxConfigs().get(1).stringVal("load-step-id"));
+		assertTrue(copy.getCtxConfigs().get(1).boolVal(STEP_ID_GENERATED), "as copied from the base");
+		assertTrue(copy.getEffectiveConfig().boolVal(STEP_ID_GENERATED), "the base still generates its id");
+		assertEquals("none-initial", copy.loadStepId());
+	}
+
+	@Test
+	void anAppendedMapWithoutAnIdLeavesTheBaseFlag() {
+		testConfig.val("load-step-id", "set-id");
+		testConfig.val(STEP_ID_GENERATED, false);
+		ctxConfigs = null;
+		final var client = noopClientWithLocalSlice(mock(LoadStep.class));
+
+		final var copy = client.append(Map.of());
+
+		assertFalse(copy.getCtxConfigs().get(0).boolVal(STEP_ID_GENERATED));
+		assertEquals("set-id", copy.getCtxConfigs().get(0).stringVal("load-step-id"));
+	}
+
+	@Test
 	void aSliceThatFailsToStartFailsTheRun() throws Exception {
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.start()).thenThrow(new IllegalStateException("No item input available"));
