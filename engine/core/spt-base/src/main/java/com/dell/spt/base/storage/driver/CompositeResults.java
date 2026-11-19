@@ -14,9 +14,10 @@ public enum CompositeResults {
 
 	/**
 	 * After a composite CREATE's or READ's successful, unfinished result (a multipart upload's
-	 * initiation), the driver publishes its parts' results and then one more result for the
-	 * composite. A composite of another type, which only an operations builder outside the engine
-	 * makes, has one result.
+	 * initiation), the driver publishes its parts' results and one more result for the composite.
+	 * A split READ's result can come before the result of a range that ended at the same moment, so
+	 * do not rely on the order. A composite of another type, which only an operations builder
+	 * outside the engine makes, has one result.
 	 */
 	IN_PARTS,
 

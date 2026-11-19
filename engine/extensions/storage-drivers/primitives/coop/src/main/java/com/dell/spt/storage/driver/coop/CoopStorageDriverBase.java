@@ -387,7 +387,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/**
 	 * A cooperative driver enqueues a successful, unfinished composite's parts in
-	 * {@link #handleCompleted}, and then the composite once more to finalize it.
+	 * {@link #handleCompleted}, and then finalizes the composite: it enqueues it once more, or for a
+	 * read may end it at its last range, see {@link #finishCompositeRead}.
 	 */
 	@Override
 	public final CompositeResults compositeResults() {
