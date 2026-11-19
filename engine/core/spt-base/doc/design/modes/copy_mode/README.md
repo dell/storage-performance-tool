@@ -23,8 +23,9 @@ sent while copying the objects so these requests may be significantly faster tha
    pipeline sub-step after the first, which copies the results of the sub-step before it. A mixed step is not
    checked: its listed input is only its GET and STAT pool, and its PUTs name new objects, never a listed one.
    Target-bucket setup runs before the check, as it always did, so a refused S3 step still sends one `HEAD` for the
-   output bucket and creates it if it is missing, and a weighted step lists its base configuration's input path
-   once before its contexts are checked; no object is written.
+   output bucket and creates it if it is missing, and a weighted or pipeline step lists the input path of each
+   configuration before the one refused (its base, and in a weighted step every earlier context); no object is
+   written.
    * Storage drivers other than `fs` compare the two paths without their leading and trailing slashes (`/src`,
      `src` and `/src/` are the same path).
      * An output path equal to the input path copies every object onto itself, so the step fails at start (exit 1).
