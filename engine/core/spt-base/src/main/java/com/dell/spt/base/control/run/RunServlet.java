@@ -39,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -67,6 +68,10 @@ public class RunServlet extends HttpServlet {
 	private final SingleTaskExecutor scenarioExecutor;
 	private final LoadStepManagerService scenarioStepSvc;
 	private final ApiStatus apiStatus;
+	/** Makes the busy test and everything a start changes one step: a refused request changes nothing. */
+	private final ReentrantLock runStartLock = new ReentrantLock();
+	/** Outlives the executor slot, which a stop clears before the stopped run's cleanup returns. */
+	private volatile StatusAwareRun lastAcceptedRun;
 
 	public RunServlet(
 					final ClassLoader clsLoader,
@@ -119,10 +124,30 @@ public class RunServlet extends HttpServlet {
 			scenarioPart = null;
 		}
 		try {
+			// Read outside the lock, so that a slow upload does not hold up other requests
 			final var config = mergeIncomingWithLocalConfig(defaultsPart, resp, aggregatedConfigWithArgs);
 			final var scenario = getIncomingScenarioOrDefault(scenarioPart, appHomePath);
 			if (config.longVal("run-id") == 0) {
 				config.val("run-id", System.currentTimeMillis());
+			}
+			startRunUnlessBusy(config, scenario, resp);
+		} catch (final NoSuchMethodException | RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "Failed to run a scenario with the request {}", req);
+			setBadRequestResponse(resp, e);
+		}
+	}
+
+	/**
+	 * Starts the run, or answers 409 with nothing changed: the script engine is shared with the run in
+	 * progress, whose later steps read its bindings.
+	 */
+	private void startRunUnlessBusy(final Config config, final String scenario, final HttpServletResponse resp)
+					throws RemoteException {
+		runStartLock.lock();
+		try {
+			if (activeTask() != null || scenarioStepSvc.getStepService() != null) {
+				resp.setStatus(HttpServletResponse.SC_CONFLICT);
+				return;
 			}
 			// expose the base configuration and the step types
 			ScenarioUtil.configure(scriptEngine, extensions, config, metricsMgr);
@@ -135,15 +160,30 @@ public class RunServlet extends HttpServlet {
 			final var statusAwareRun = new StatusAwareRun(run, apiStatus);
 			try {
 				scenarioExecutor.execute(statusAwareRun);
+				lastAcceptedRun = statusAwareRun;
 				resp.setStatus(HttpServletResponse.SC_ACCEPTED);
 				setRunTimestampHeader(statusAwareRun, resp);
 			} catch (final RejectedExecutionException e) {
+				// Only this method starts a task and it found the slot free, so this should not happen
+				Loggers.ERR.warn("The scenario executor refused run {} on a node found idle", runId);
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			}
-		} catch (final NoSuchMethodException | RuntimeException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to run a scenario with the request {}", req);
-			setBadRequestResponse(resp, e);
+		} finally {
+			runStartLock.unlock();
 		}
+	}
+
+	/**
+	 * The task in the executor slot or, once a stop has cleared the slot, the accepted run until its
+	 * cleanup has returned and its terminal status is published.
+	 */
+	private Runnable activeTask() {
+		final var slotTask = scenarioExecutor.task();
+		if (slotTask != null) {
+			return slotTask;
+		}
+		final var run = lastAcceptedRun;
+		return run == null || run.isFinished() ? null : run;
 	}
 
 	/**
@@ -190,7 +230,7 @@ public class RunServlet extends HttpServlet {
 
 	void applyForActiveRunIfAny(
 					final HttpServletResponse resp, final BiConsumer<Run, HttpServletResponse> action) throws RemoteException {
-		final var activeTask = scenarioExecutor.task();
+		final var activeTask = activeTask();
 		final var activeService = scenarioStepSvc.getStepService();
 		if (null == activeTask && activeService == null) {
 			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
@@ -363,6 +403,11 @@ public class RunServlet extends HttpServlet {
 			}
 			delegate.run();
 			return null;
+		}
+
+		/** True once the cleanup has returned and the terminal status is published. */
+		boolean isFinished() {
+			return completion.getCount() == 0;
 		}
 
 		boolean stopAndAwait(
