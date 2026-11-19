@@ -167,14 +167,18 @@ final class SteadyLifecycleSupport {
 		}
 	}
 
-	/** Supplies one prebuilt latency driver to the step's own driver construction. */
+	/** Supplies a latency driver, prebuilt or new for each request, to the step's driver construction. */
 	static final class LatencyDriverExtension<I extends Item, O extends Operation<I>> extends ExtensionBase
 					implements StorageDriverFactory<I, O, LatencyStorageDriver<I, O>> {
 		static final String ID = "latency-mock";
-		private final LatencyStorageDriver<I, O> driver;
+		private final Supplier<LatencyStorageDriver<I, O>> drivers;
 
 		LatencyDriverExtension(final LatencyStorageDriver<I, O> driver) {
-			this.driver = driver;
+			this(() -> driver);
+		}
+
+		LatencyDriverExtension(final Supplier<LatencyStorageDriver<I, O>> drivers) {
+			this.drivers = drivers;
 		}
 
 		@Override
@@ -190,7 +194,7 @@ final class SteadyLifecycleSupport {
 						final boolean verifyFlag,
 						final int batchSize)
 						throws IllegalConfigurationException {
-			return driver;
+			return drivers.get();
 		}
 
 		@Override

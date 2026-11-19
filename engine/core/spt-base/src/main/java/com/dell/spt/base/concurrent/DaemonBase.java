@@ -18,10 +18,10 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 
 	private static final Logger LOG = Logger.getLogger(DaemonBase.class.getSimpleName());
-	private static final Queue<WeakReference<Daemon>> REGISTRY = new ConcurrentLinkedQueue<>();
+	private static final Queue<WeakReference<DaemonBase>> REGISTRY = new ConcurrentLinkedQueue<>();
 	private static final ThreadLocal<ConstructionScope> OPEN_SCOPE = new ThreadLocal<>();
 
-	private final WeakReference<Daemon> daemonRef;
+	private final WeakReference<DaemonBase> daemonRef;
 
 	protected DaemonBase() {
 		daemonRef = new WeakReference<>(this);
@@ -138,6 +138,13 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 	public static void closeAll() {
 		InterruptedException ex = null;
 		synchronized (REGISTRY) {
+			// A close waits for a start in progress, so every start is told to end before the first close.
+			for (final var daemonRef : REGISTRY) {
+				final var daemon = daemonRef.get();
+				if (daemon != null) {
+					daemon.interruptStarter();
+				}
+			}
 			for (final var daemonRef : REGISTRY) {
 				final var daemon = daemonRef.get();
 				try {
