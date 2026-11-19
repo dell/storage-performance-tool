@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -32,6 +33,7 @@ import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -186,23 +188,74 @@ public class ConfigUtilTest {
 		assertEquals(headerNames, List.copyOf(written.keySet()));
 	}
 
+	/**
+	 * A backing list that its owner writes: it appends to itself whenever it is read whole, as another
+	 * thread appending during startup would, and counts every call made to it.
+	 */
+	static final class SelfAppendingList extends AbstractList<Object> {
+
+		final AtomicInteger calls = new AtomicInteger();
+		private final List<Object> elements;
+
+		SelfAppendingList(final List<Object> elements) {
+			this.elements = new ArrayList<>(elements);
+		}
+
+		private void wholeRead() {
+			calls.incrementAndGet();
+			elements.add("appended");
+		}
+
+		@Override
+		public Object get(final int index) {
+			calls.incrementAndGet();
+			return elements.get(index);
+		}
+
+		@Override
+		public int size() {
+			calls.incrementAndGet();
+			return elements.size();
+		}
+
+		@Override
+		public Iterator<Object> iterator() {
+			wholeRead();
+			return elements.iterator();
+		}
+
+		@Override
+		public void forEach(final Consumer<? super Object> action) {
+			wholeRead();
+			elements.forEach(action);
+		}
+
+		@Override
+		public Object[] toArray() {
+			wholeRead();
+			return elements.toArray();
+		}
+
+		@Override
+		public boolean contains(final Object element) {
+			calls.incrementAndGet();
+			return elements.contains(element);
+		}
+	}
+
 	@Test
-	@SuppressWarnings("unchecked")
-	public void testCopyOfAnUnmodifiableListIsADetachedUnmodifiableList() {
-		final Map<String, Object> element = new LinkedHashMap<>(Map.of("value", "first"));
-		final List<Object> names = Collections.unmodifiableList(new ArrayList<>(List.of("a", element)));
-		final Config source = new BasicConfig(
-						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", names)));
+	public void testMergeAndCopyOfKeepAnUnmodifiableViewWithoutReadingItsBackingList() {
+		// only text, as in Sol's fixture: a second read of the list runs past the copies
+		for (final List<Object> elements : List.<List<Object>> of(List.of("a", "b"), List.of("a", element()))) {
+			final SelfAppendingList backing = new SelfAppendingList(elements);
+			final List<Object> view = Collections.unmodifiableList(backing);
+			for (final boolean viaMerge : List.of(true, false)) {
+				final Object copied = assertDoesNotThrow(() -> copyNames(view, viaMerge));
 
-		final List<Object> copied = ConfigUtil.copyOf(source).listVal("names");
-
-		assertEquals(names.getClass(), copied.getClass());
-		assertNotSame(names, copied);
-		assertEquals(names, copied);
-		assertThrows(UnsupportedOperationException.class, () -> copied.add("b"));
-		assertNotSame(element, copied.get(1));
-		((Map<String, Object>) copied.get(1)).put("value", "changed");
-		assertEquals("first", element.get("value"));
+				assertSame(view, copied);
+			}
+			assertEquals(0, backing.calls.get());
+		}
 	}
 
 	/**
@@ -223,8 +276,6 @@ public class ConfigUtilTest {
 						() -> List.copyOf(List.of("p", "q", "r", element())),
 						() -> Stream.<Object> of("p", element()).toList(),
 						() -> Stream.<Object> of("p", null, element()).toList(),
-						() -> Collections.unmodifiableList(new ArrayList<>(List.of("p", element()))),
-						() -> Collections.unmodifiableList(new LinkedList<>(List.of("p", element()))),
 						() -> Collections.singletonList(element()),
 						() -> new Vector<>(List.of("p", "q", element())),
 						() -> new CopyOnWriteArrayList<>(List.of("p", element())));
@@ -287,6 +338,8 @@ public class ConfigUtilTest {
 						() -> new ArrayList<Object>(List.of("p", element())).subList(0, 2),
 						() -> Collections.synchronizedList(new ArrayList<>(List.of("p", element()))),
 						() -> Collections.checkedList(new ArrayList<>(List.of("p", element())), Object.class),
+						() -> Collections.unmodifiableList(new ArrayList<>(List.of("p", element()))),
+						() -> Collections.unmodifiableList(new LinkedList<>(List.of("p", element()))),
 						() -> new ArrayList<Object>(List.of("p", element())) {},
 						() -> new LinkedList<Object>(List.of("p", element())) {},
 						() -> Collections.emptyList());
@@ -552,15 +605,12 @@ public class ConfigUtilTest {
 	}
 
 	@Test
-	@SuppressWarnings("JdkObsolete") // a view over a list that is not RandomAccess
 	public void testMergeAndCopyOfKeepAReadOnlyListOfUnchangeableValues() {
 		final List<List<?>> lists = List.of(
 						List.of("p", "q"),
 						List.of("p", "q", "r"),
 						List.of(),
 						Stream.of("p", null).toList(),
-						Collections.unmodifiableList(new ArrayList<>(List.of("p"))),
-						Collections.unmodifiableList(new LinkedList<>(List.of("p"))),
 						Collections.singletonList("p"),
 						List.of(List.of("p"), 1));
 		for (final List<?> source : lists) {
