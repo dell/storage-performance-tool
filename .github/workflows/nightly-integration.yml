@@ -8,8 +8,6 @@ name: Nightly Integration Tests
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
-  push:
-    branches: ["ci/nightly-integration-tests"]
 
 permissions:
   contents: read
@@ -24,7 +22,9 @@ jobs:
   engine-integration:
     name: Engine Integration & Slow Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A trial run with a warm Gradle cache took about 2 minutes; this leaves room for a cold
+    # cache and a slow runner, and still stops a hung test well before GitHub's 6-hour limit.
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
