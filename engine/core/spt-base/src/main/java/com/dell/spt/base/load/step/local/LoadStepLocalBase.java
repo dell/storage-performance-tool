@@ -969,8 +969,40 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 			}
 		}
+		if (timeIsOut) {
+			countDown -= settleDoneContexts(stepContextsCopy);
+		}
 
 		return 0 == countDown;
+	}
+
+	/**
+	 * Once the time is up, looks at each remaining context once more, without waiting, so a context's
+	 * terminal failure is reported even when the time ran out before the loop above came to it.
+	 * Contexts are completed in their order only: a context reaches {@link #contextDone} here when it
+	 * is done and every context before it is settled. A context after one still running only has its
+	 * terminal failure checked, because a pipeline stage still reads what the stage before it writes.
+	 * Returns how many contexts it settled.
+	 */
+	private int settleDoneContexts(final LoadStepContext[] stepContextsCopy) {
+		int settled = 0;
+		boolean earlierSettled = true;
+		for (int i = 0; i < stepContextsCopy.length; i++) {
+			final LoadStepContext stepCtx = stepContextsCopy[i];
+			if (stepCtx == null) {
+				continue;
+			}
+			if (earlierSettled && stepCtx.isDone()) {
+				contextDone(stepCtx);
+				stepContextsCopy[i] = null;
+				settled++;
+			} else if (earlierSettled) {
+				earlierSettled = false;
+			} else {
+				stepCtx.checkTerminalFailure();
+			}
+		}
+		return settled;
 	}
 
 	/**

@@ -161,6 +161,12 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 
 	boolean isDone();
 
+	/**
+	 * Throws this context's terminal failure, the one {@link #isDone()} would throw, and otherwise does
+	 * nothing: it reads no limits, writes no log and changes no state. Does nothing by default.
+	 */
+	default void checkTerminalFailure() {}
+
 	@Override
 	default Input<O> getInput() {
 		throw new AssertionError("Shouldn't be invoked");
