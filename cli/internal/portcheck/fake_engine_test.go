@@ -55,6 +55,9 @@ type fakeEngine struct {
 	// hangUp, when set and true for a request, closes its connection with no
 	// answer, as an engine that resets or ends the connection does.
 	hangUp func(engine *fakeEngine, r *http.Request) bool
+	// redirect, when set and not empty for a request, answers it with a 307 to
+	// the address it returns.
+	redirect func(r *http.Request) string
 }
 
 func newFakeEngine(t *testing.T, runID int64) *fakeEngine {
@@ -73,6 +76,12 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 	if e.hangUp != nil && e.hangUp(e, r) {
 		hangUp(e.t, w)
 		return
+	}
+	if e.redirect != nil {
+		if location := e.redirect(r); location != "" {
+			http.Redirect(w, r, location, http.StatusTemporaryRedirect)
+			return
+		}
 	}
 	switch {
 	case r.URL.Path == "/metrics/json" && r.Method == http.MethodGet:

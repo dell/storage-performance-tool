@@ -157,3 +157,27 @@ func TestCheckPortConflictsReportsAnInterruptedRetry(t *testing.T) {
 		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
 	}
 }
+
+// Sol re-review 5 Low 8: Ctrl-C at the conflict prompt, or during detection,
+// returns the cancellation with the resolver's interruption, which is what the
+// command reports, not a generic failure to resolve the conflict.
+func TestCheckPortConflictsReportsAnInterruptionAtThePrompt(t *testing.T) {
+	const message = "Interrupted while waiting for an answer about port 23999: context canceled"
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{
+			Strategy: portcheck.StrategyRetry,
+			Message:  message,
+			Error:    context.Canceled,
+		}, context.Canceled
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 23999, "")
+	err := checkPortConflicts(cmd)
+	if err == nil || err.Error() != message {
+		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
+	}
+}

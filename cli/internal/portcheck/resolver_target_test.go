@@ -66,7 +66,7 @@ func TestPromptAnswerStopsOnlyTheRunShown(t *testing.T) {
 		want    string
 	}{
 		{"another run replaced the one shown", 41, 42, "run 42 replaced the run shown, 41"},
-		{"a run started on the idle engine shown", 0, 42, "run 42 started after"},
+		{"a run started on the idle engine shown", 0, 42, "run 42 is active, and detection showed no active run"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -306,12 +306,17 @@ func TestPromptEndsWithTheContext(t *testing.T) {
 		cancel()
 	}()
 
+	var result *ResolutionResult
 	err := within(t, func() error {
-		_, err := resolver.CheckAndResolveConflicts(ctx)
+		var err error
+		result, err = resolver.CheckAndResolveConflicts(ctx)
 		return err
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if want := "Interrupted while waiting for an answer about port " + engine.port(); result == nil || !strings.Contains(result.Message, want) {
+		t.Errorf("result = %+v, want it to say %q", result, want)
 	}
 	assertReadOnly(t, engine.received())
 }

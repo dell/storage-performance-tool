@@ -2202,6 +2202,11 @@ func checkPortConflicts(cmd *cobra.Command) error {
 	// The resolver bounds each phase itself, so time at its prompt uses no budget.
 	// The command context lets Ctrl-C end a wait for an engine to shut down.
 	result, err := resolvePortConflictFunc(commandContext(cmd), sptPort, forceMode)
+	// Ctrl-C during detection or at the prompt is reported as an interruption.
+	if err != nil && result != nil && result.Message != "" &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return errors.New(result.Message)
+	}
 	if err != nil {
 		logger.Error("Port conflict resolution failed", "error", err.Error())
 		return fmt.Errorf("failed to resolve port conflict on %s: %w", sptPort, err)

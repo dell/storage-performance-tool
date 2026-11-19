@@ -133,6 +133,10 @@ func (r *ConflictResolver) CheckAndResolveConflicts(ctx context.Context) (*Resol
 	if errors.Is(err, errNoOperatorAnswer) {
 		return r.abortUnattended(serviceInfo), nil
 	}
+	if ctx.Err() != nil {
+		// Ctrl-C at the prompt: nothing was chosen, and nothing was changed.
+		return r.interrupted(ctx, StrategyRetry, "waiting for an answer about port "+r.Port), ctx.Err()
+	}
 	if err != nil {
 		return &ResolutionResult{
 			Success: false,
@@ -207,10 +211,14 @@ func (r *ConflictResolver) unattendedAbortMessage(info *ServiceInfo) string {
 		if info.Container != nil {
 			holder = fmt.Sprintf("container %s (%s)", info.Container.Name, info.Container.Image)
 		}
+		removal := "remove it yourself"
+		if info.Container != nil {
+			removal = fmt.Sprintf("remove it by name (docker rm -f %s)", info.Container.Name)
+		}
 		return fmt.Sprintf("port %s is held by %s, which looks like SPT but no SPT API answered there; "+
-			"it was left running. Use --force to remove it and free the port, "+
-			"or --api-port with --rmi-registry-port to run alongside it",
-			r.Port, holder)
+			"it was left running. If it should go, %s; --force removes it when nothing answers on the port. "+
+			"Or use --api-port with --rmi-registry-port to run alongside it",
+			r.Port, holder, removal)
 	}
 	return fmt.Sprintf("port %s is in use (%s); it was left running. "+
 		"Free the port, or use --api-port with --rmi-registry-port to run alongside it",
@@ -530,6 +538,18 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 
 	if refusal := r.shownContainerRefusal(ctx, info, "shut it down"); refusal != nil {
 		fmt.Println(stopMessage(stopped, false))
+		// The engine may have closed after the stop, as its own CLI closes it at
+		// the run's end. A port that can be bound now is free, and no container
+		// is in doubt; one still held keeps the refusal.
+		if errors.Is(refusal.Error, errNoPublisher) {
+			held := r.checker.IsPortHeld(ctx)
+			if ctx.Err() != nil {
+				return r.interrupted(ctx, StrategyGracefulStop, "checking port "+r.Port+" after the stop")
+			}
+			if !held {
+				return r.waitForPortRelease(ctx, deadline)
+			}
+		}
 		return refusal
 	}
 	// Shutdown ends whatever runs on the engine, so another run must not be active.
@@ -539,7 +559,11 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	}
 	fmt.Println(stopMessage(stopped, ended))
 	if err != nil {
-		if r.checker.IsPortHeld(ctx) {
+		held := r.checker.IsPortHeld(ctx)
+		if ctx.Err() != nil {
+			return r.interrupted(ctx, StrategyGracefulStop, "checking port "+r.Port+" before the shutdown")
+		}
+		if held {
 			return gracefulStopFailure("Did not shut down the SPT engine, which was left running", err)
 		}
 		return r.waitForPortRelease(ctx, deadline)
@@ -551,22 +575,30 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	if ctx.Err() != nil {
 		return r.interrupted(ctx, StrategyGracefulStop, "shutting down the SPT engine at port "+r.Port)
 	}
-	if err != nil && r.checker.IsPortHeld(ctx) {
-		return gracefulStopFailure("The request to shut down the SPT engine failed", err)
+	if err != nil {
+		held := r.checker.IsPortHeld(ctx)
+		if ctx.Err() != nil {
+			return r.interrupted(ctx, StrategyGracefulStop, "checking port "+r.Port+" after the shutdown request")
+		}
+		if held {
+			return gracefulStopFailure("The request to shut down the SPT engine failed", err)
+		}
 	}
 	return r.waitForPortRelease(ctx, deadline)
 }
 
 // apiClient is a client of the SPT API at the address that answered detection,
-// the address every later request goes to. Each request opens its own
-// connection, so a check reads what listens there now, not a connection kept
-// from before, and goes through no proxy.
+// the address every later request goes to; it follows no redirect. Each request
+// opens its own connection, so a check reads what listens there now, not a
+// connection kept from before, and goes through no proxy. Each connection
+// counts the bytes it delivers, so that only a request that got not one byte
+// back counts as unanswered.
 func (r *ConflictResolver) apiClient(info *ServiceInfo) *SptAPIClient {
 	client := NewSptAPIClientWithClock(r.checker.apiBaseURL(info.Address), DefaultHTTPTimeout, r.clock)
 	client.HTTPClient.Transport = &http.Transport{
 		Proxy:             nil,
 		DisableKeepAlives: true,
-		DialContext:       (&net.Dialer{Timeout: r.checker.ConnectTimeout}).DialContext,
+		DialContext:       countingDial((&net.Dialer{Timeout: r.checker.ConnectTimeout}).DialContext),
 	}
 	return client
 }
@@ -574,6 +606,10 @@ func (r *ConflictResolver) apiClient(info *ServiceInfo) *SptAPIClient {
 // errHolderChanged marks a refusal because the port's holder may not be the one
 // shown: nothing was sent to the engine or removed.
 var errHolderChanged = errors.New("the port's holder changed since it was shown")
+
+// errNoPublisher is the errHolderChanged of a check that found no container
+// publishing the address.
+var errNoPublisher = fmt.Errorf("%w: no container publishes the address", errHolderChanged)
 
 // shownContainerRefusal is the container half of the check before an API request
 // that changes the engine. When detection showed a container, the one container
@@ -585,16 +621,17 @@ func (r *ConflictResolver) shownContainerRefusal(ctx context.Context, info *Serv
 		return nil
 	}
 	endpoint := net.JoinHostPort(ipOrUnknown(info.Address), r.Port)
-	refuse := func(now string) *ResolutionResult {
+	refuseWith := func(now string, err error) *ResolutionResult {
 		return &ResolutionResult{
 			Strategy: StrategyGracefulStop,
 			Success:  false,
 			Message: fmt.Sprintf("The container on port %s changed since it was shown (shown: %s; now: %s), so the "+
 				"SPT engine answering there may be another one. The CLI did not ask it to %s, and removed nothing. "+
 				"Run the command again", r.Port, info.Container.Name, now, action),
-			Error: errHolderChanged,
+			Error: err,
 		}
 	}
+	refuse := func(now string) *ResolutionResult { return refuseWith(now, errHolderChanged) }
 	if r.dockerFinder == nil || !r.dockerFinder.DaemonIsLocal() {
 		return refuse("the containers could not be listed")
 	}
@@ -608,7 +645,7 @@ func (r *ConflictResolver) shownContainerRefusal(ctx context.Context, info *Serv
 	case err != nil:
 		return refuse("the containers could not be listed: " + err.Error())
 	case len(publishers) == 0:
-		return refuse("no container publishes " + endpoint)
+		return refuseWith("no container publishes "+endpoint, errNoPublisher)
 	case len(publishers) > 1:
 		names := make([]string, 0, len(publishers))
 		for _, c := range publishers {
@@ -648,8 +685,9 @@ func stopMessage(stopped RunExecution, ended bool) string {
 	}
 }
 
-// stopEngineRun stops the engine's run. An operator's answer covers only the run
-// shown at the prompt; --force covers whatever holds the port.
+// stopEngineRun stops the run detection showed active, and only that run. g
+// needs it to be read again in full; --force also stops it by its ID alone when
+// detection itself had no start time for it (see StopActiveRun).
 func (r *ConflictResolver) stopEngineRun(ctx context.Context, client *SptAPIClient, info *ServiceInfo) (RunExecution, error) {
 	if r.forceMode {
 		return client.StopActiveRun(ctx, shownExecution(info))
@@ -657,9 +695,12 @@ func (r *ConflictResolver) stopEngineRun(ctx context.Context, client *SptAPIClie
 	return client.StopShownRun(ctx, shownExecution(info))
 }
 
-// shownExecution returns the run detection reported, with a zero ID if none.
+// shownExecution returns the run detection saw active, through HEAD /run, with
+// a zero ID if none. A run ID that /status gave for an engine with no active
+// run is a run that had ended, shown for information only: a run with that ID
+// active later is another execution.
 func shownExecution(info *ServiceInfo) RunExecution {
-	if info.Status == nil {
+	if info.Status == nil || !info.Status.RunActive {
 		return RunExecution{}
 	}
 	runID, err := strconv.ParseInt(info.Status.RunID, 10, 64)
@@ -749,7 +790,19 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 	}
 
 	fmt.Printf("Force stopping container: %s (%s)\n", target.Name, containerutil.ShortID(target.ID))
-	if err := r.dockerFinder.ForceStopAndRemoveContainer(ctx, target.ID); err != nil {
+	if err := r.dockerFinder.StopContainer(ctx, target.ID); err != nil {
+		if ctx.Err() != nil {
+			return r.interrupted(ctx, StrategyForceStop, "stopping container "+target.Name)
+		}
+		logging.LogDebug("portcheck", "the container's stop failed; checking again before its removal",
+			"container", target.Name, "error", err.Error())
+	}
+	// The removal is a write of its own. The stop can fail, or the container can
+	// restart after it and take a run, so the check is made again.
+	if result := r.checkAgainAfterTheStop(ctx, info, target); result != nil {
+		return result
+	}
+	if err := r.dockerFinder.RemoveContainer(ctx, target.ID, true); err != nil {
 		if ctx.Err() != nil {
 			return r.interrupted(ctx, StrategyForceStop, "removing container "+target.Name)
 		}
@@ -875,15 +928,55 @@ func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *Servic
 	return nil, refusal("No container publishes %s - the service may not be containerized; nothing was removed", endpoint)
 }
 
-// removalRefusal is the check right before the container is stopped and removed
-// (see CheckBeforeRemoval), on the address that answered detection: it returns
-// nil to go on, or the refusal. No HTTP answer is the fallback for an engine
-// whose API is unavailable, or for a service with none; an idle engine and the
-// run shown may be removed; anything else may end a run nobody chose, so the
-// container is left running. The container's stop and its removal are one
-// action: the removal follows the stop with no request between them. A run
-// that starts after this check and before the stop is not seen.
+// removalRefusal is the check right before the container is stopped (see
+// CheckBeforeRemoval), on the address that answered detection: it returns nil to
+// go on, or the refusal. No answer at all is the fallback for an engine whose
+// API is unavailable, or for a service with none; an idle engine and the run
+// shown may be removed; anything else may end a run nobody chose, or remove a
+// service that is not an engine, so the container is left running. A run that
+// starts after this check and before the stop is not seen.
 func (r *ConflictResolver) removalRefusal(ctx context.Context, info *ServiceInfo, target *ContainerInfo) *ResolutionResult {
+	return r.checkRemoval(ctx, info, target, "Did not stop or remove container %s", "It was left running")
+}
+
+// checkAgainAfterTheStop is the check right before the removal, once the stop
+// has returned or failed: the address must have no publisher but the container
+// stopped, and the engine's API must pass the same check as before the stop.
+func (r *ConflictResolver) checkAgainAfterTheStop(ctx context.Context, info *ServiceInfo, target *ContainerInfo) *ResolutionResult {
+	const did, left = "Asked Docker to stop container %s, and then did not remove it", "It was not removed"
+	endpoint := net.JoinHostPort(ipOrUnknown(info.Address), r.Port)
+	listCtx, cancel := context.WithTimeout(ctx, constants.PortConflictContainerListTimeout)
+	defer cancel()
+	publishers, err := r.dockerFinder.FindPublishers(listCtx, info.Address, r.Port)
+	if ctx.Err() != nil {
+		return r.interrupted(ctx, StrategyForceStop, "checking port "+r.Port+" before removing container "+target.Name)
+	}
+	refuse := func(reason string) *ResolutionResult {
+		return &ResolutionResult{
+			Strategy: StrategyForceStop,
+			Success:  false,
+			Message:  fmt.Sprintf(did+": %s. %s; run the command again", target.Name, reason, left),
+			Error:    errHolderChanged,
+		}
+	}
+	switch {
+	case err != nil:
+		return refuse("the containers could not be listed again (" + err.Error() + ")")
+	case len(publishers) > 1:
+		names := make([]string, 0, len(publishers))
+		for _, c := range publishers {
+			names = append(names, c.Name)
+		}
+		return refuse(strings.Join(names, ", ") + " all publish " + endpoint + " now")
+	case len(publishers) == 1 && publishers[0].ID != target.ID:
+		return refuse(publishers[0].Name + " publishes " + endpoint + " now")
+	}
+	return r.checkRemoval(ctx, info, target, did, left)
+}
+
+// checkRemoval runs CheckBeforeRemoval and words its refusal: did says what was
+// done to the container, with %s for its name, and left what became of it.
+func (r *ConflictResolver) checkRemoval(ctx context.Context, info *ServiceInfo, target *ContainerInfo, did, left string) *ResolutionResult {
 	check, err := r.apiClient(info).CheckBeforeRemoval(ctx, shownExecution(info))
 	if ctx.Err() != nil {
 		return r.interrupted(ctx, StrategyForceStop, "checking the run on port "+r.Port+" before removing a container")
@@ -892,20 +985,44 @@ func (r *ConflictResolver) removalRefusal(ctx context.Context, info *ServiceInfo
 		return &ResolutionResult{
 			Strategy: StrategyForceStop,
 			Success:  false,
-			Message: fmt.Sprintf("Did not remove container %s: %s. It was left running; stop the run yourself, "+
-				"then run the command again", target.Name, err.Error()),
-			Error: err,
+			Message:  fmt.Sprintf(did+": %s", target.Name, r.removalRefusalReason(info, target, err, left)),
+			Error:    err,
 		}
 	}
 	switch check {
 	case RemovalNoAnswer:
-		logging.LogInfo("portcheck", "no SPT API answers on the port; removing its container", "port", r.Port, "container", target.Name)
+		logging.LogInfo("portcheck", "nothing answers on the port; removing its container", "port", r.Port, "container", target.Name)
 	case RemovalIdle:
-		logging.LogInfo("portcheck", "the SPT engine has no active run; removing its container", "port", r.Port, "container", target.Name)
+		logging.LogInfo("portcheck", "HEAD /run reports no active run; removing the container", "port", r.Port, "container", target.Name)
 	case RemovalIdentified:
 		logging.LogInfo("portcheck", "the SPT engine runs the run shown; removing its container", "port", r.Port, "container", target.Name)
 	}
 	return nil
+}
+
+// removalRefusalReason says why the check before a removal refused, and what
+// to do. An answer that names no run is the SPT engine's only when detection
+// confirmed one and the answer is HTTP; otherwise the service may not be an
+// engine at all.
+func (r *ConflictResolver) removalRefusalReason(info *ServiceInfo, target *ContainerInfo, err error, left string) string {
+	var unreadable *unreadableAnswerError
+	switch {
+	case !errors.As(err, &unreadable):
+		return fmt.Sprintf("%s. %s; stop the run yourself, then run the command again", err.Error(), left)
+	case info.APIConfirmed && unreadable.http:
+		return fmt.Sprintf("the SPT engine on port %s answered, but its active run could not be read (%v), so a "+
+			"run may be active. %s; stop the run yourself, or remove the container by name (docker rm -f %s), "+
+			"then run the command again", r.Port, unreadable.err, left, target.Name)
+	case unreadable.http:
+		return fmt.Sprintf("the service on port %s answers HTTP, but not as an SPT engine (%v), so the CLI can't "+
+			"tell whether it is safe to remove. %s; if it should go, remove it by name (docker rm -f %s), or use "+
+			"--api-port with --rmi-registry-port to run alongside it", r.Port, unreadable.err, left, target.Name)
+	default:
+		return fmt.Sprintf("the service on port %s answered, but not with an HTTP answer the CLI can read (%v), "+
+			"so the CLI can't tell whether it is safe to remove. %s; if it should go, remove it by name "+
+			"(docker rm -f %s), or use --api-port with --rmi-registry-port to run alongside it",
+			r.Port, unreadable.err, left, target.Name)
+	}
 }
 
 func ipOrUnknown(ip net.IP) string {

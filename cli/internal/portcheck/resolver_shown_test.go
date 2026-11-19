@@ -242,13 +242,14 @@ func TestForceRemovesTheShownEngineAfterALingeringShutdown(t *testing.T) {
 	}
 }
 
-// Sol's recovered-after-stop and Fable P1: under --force, /status fails once, at
-// the stop, and then reads a later run with the same ID. The start time detection
-// saw still tells it apart, so the engine is not shut down. A run stopped with
-// only its ID known is not shut down while it is still active either.
+// Sol's recovered-after-stop, Fable P1 and Sol status-lost: under --force,
+// /status fails once, at the stop, while a later run with the same ID is active.
+// When detection saw a start time, the run cannot be shown to be the one shown,
+// and it is not stopped (re-review 5). A run stopped with only its ID known, as
+// detection had no start time for it, is not shut down while it is still active.
 func TestForceShutdownKeepsWhatDetectionSaw(t *testing.T) {
 	for _, tt := range []struct{ name, shownSince, want string }{
-		{"start time shown", firstStart, "is a later run that reuses the ID"},
+		{"start time shown", firstStart, "the engine's /status could not be read"},
 		{"no start time shown", "", "its /status could not be read when it was stopped, and no start time was shown for it"},
 	} {
 		shownSince := tt.shownSince
@@ -273,8 +274,8 @@ func TestForceShutdownKeepsWhatDetectionSaw(t *testing.T) {
 			if slices.Contains(engine.received(), shutdownRequest) {
 				t.Error("the engine running the later run was shut down")
 			}
-			if !slices.Contains(engine.received(), deleteRequest) {
-				t.Error("the run was not stopped, as --force may")
+			if stoppedByID := slices.Contains(engine.received(), deleteRequest); stoppedByID != (shownSince == "") {
+				t.Errorf("stop sent = %v, want it sent only when detection had no start time", stoppedByID)
 			}
 		})
 	}

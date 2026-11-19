@@ -28,6 +28,8 @@ type fakeDockerAPI struct {
 	removed    []string
 	inspects   map[string]containertypes.InspectResponse
 	onRemove   func(containerID string)
+	// onStop, when set, runs at each stop; a non-nil error fails the stop.
+	onStop func(containerID string) error
 	// daemonHost is the daemon's address; empty means the default local socket.
 	daemonHost string
 }
@@ -41,8 +43,12 @@ func (f *fakeDockerAPI) ContainerList(_ context.Context, options containertypes.
 
 func (f *fakeDockerAPI) ContainerStop(_ context.Context, containerID string, _ containertypes.StopOptions) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stopped = append(f.stopped, containerID)
+	onStop := f.onStop
+	f.mu.Unlock()
+	if onStop != nil {
+		return onStop(containerID)
+	}
 	return nil
 }
 

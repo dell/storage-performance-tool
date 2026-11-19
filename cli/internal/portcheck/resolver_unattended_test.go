@@ -146,9 +146,16 @@ func TestUnattendedMessageForALookalikeContainer(t *testing.T) {
 
 	result, err := resolver.CheckAndResolveConflicts(context.Background())
 	assertUnattendedAbort(t, result, err, "container dashboard (spt-dashboard), which looks like SPT")
-	for _, invented := range []string{"RUNNING", "detected", "held by an SPT engine"} {
+	for _, invented := range []string{"RUNNING", "detected", "held by an SPT engine", "Use --force to remove it"} {
 		if strings.Contains(result.Message, invented) {
 			t.Errorf("Message = %q, must not contain %q", result.Message, invented)
+		}
+	}
+	// Fable re-review 5 Medium 1: this holder answers HTTP, so --force refuses it.
+	// The advice names the manual removal, and --force only with its condition.
+	for _, want := range []string{"docker rm -f dashboard", "--force removes it when nothing answers on the port"} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("Message = %q, want it to contain %q", result.Message, want)
 		}
 	}
 	holder.assertUntouched(t)

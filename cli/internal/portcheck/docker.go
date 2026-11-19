@@ -384,26 +384,6 @@ func IsSptContainer(container *ContainerInfo) bool {
 	return false
 }
 
-// ForceStopAndRemoveContainer forcefully stops and removes a container
-func (d *DockerContainerFinder) ForceStopAndRemoveContainer(ctx context.Context, containerID string) error {
-	logging.LogInfo("portcheck", "force stopping and removing container",
-		"containerID", containerutil.ShortID(containerID))
-
-	// First try to stop the container
-	if err := d.StopContainer(ctx, containerID); err != nil {
-		logging.LogDebug("portcheck", "normal stop failed, trying force stop",
-			"containerID", containerutil.ShortID(containerID),
-			"error", err.Error())
-	}
-
-	// Then remove it (with force flag)
-	if err := d.RemoveContainer(ctx, containerID, true); err != nil {
-		return fmt.Errorf("failed to force remove container: %w", err)
-	}
-
-	return nil
-}
-
 // WaitForContainerToStop waits for a container to stop within the timeout
 func (d *DockerContainerFinder) WaitForContainerToStop(ctx context.Context, containerID string, timeout time.Duration) error {
 	deadline := d.clock.Now().Add(timeout)
