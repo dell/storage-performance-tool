@@ -25,7 +25,6 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import io.netty.channel.epoll.Epoll;
-import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
@@ -164,7 +163,8 @@ final class S3SplitReadTimingStepTest {
 		final var batches = new LongAdder();
 		if (batch) {
 			extensions.replaceAll(extension -> "s3".equals(extension.id())
-							? new BatchResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batches) : extension);
+							? new BatchResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batches)
+							: extension);
 		}
 		final var snapshot = new AtomicReference<AllMetricsSnapshot>();
 		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR) {
@@ -205,7 +205,8 @@ final class S3SplitReadTimingStepTest {
 						final boolean verifyFlag, final int batchSize) throws InterruptedException {
 			final StorageDriver<I, O> driver = delegate.create(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 			return (StorageDriver<I, O>) Proxy.newProxyInstance(StorageDriver.class.getClassLoader(),
-							new Class<?>[] {StorageDriver.class}, (proxy, method, args) -> {
+							new Class<?>[]{StorageDriver.class
+							}, (proxy, method, args) -> {
 								if ("operationResultOutput".equals(method.getName())) {
 									driver.operationResultOutput(new BatchOutput<>((Output<O>) args[0], batches));
 									return null;
@@ -239,33 +240,33 @@ final class S3SplitReadTimingStepTest {
 		}
 	}
 
-	private record BatchOutput<O>(Output<O> output, LongAdder batches) implements Output<O> {
+	private record BatchOutput<O>(Output<O> output, LongAdder batches)implements Output<O>
+	{
 
-		@Override
-		public boolean put(final O result) {
-			batches.increment();
-			return output.put(List.of(result), 0, 1) == 1;
-		}
-
-		@Override
-		public int put(final List<O> results, final int from, final int to) {
-			batches.increment();
-			return output.put(results, from, to);
-		}
-
-		@Override
-		public int put(final List<O> results) {
-			return put(results, 0, results.size());
-		}
-
-		@Override
-		public Input<O> getInput() {
-			return output.getInput();
-		}
-
-		@Override
-		public void close() throws Exception {
-			output.close();
-		}
+	@Override
+	public boolean put(final O result) {
+		batches.increment();
+		return output.put(List.of(result), 0, 1) == 1;
 	}
-}
+
+	@Override
+	public int put(final List<O> results, final int from, final int to) {
+		batches.increment();
+		return output.put(results, from, to);
+	}
+
+	@Override
+	public int put(final List<O> results) {
+		return put(results, 0, results.size());
+	}
+
+	@Override
+	public Input<O> getInput() {
+		return output.getInput();
+	}
+
+	@Override
+	public void close() throws Exception {
+		output.close();
+	}
+}}

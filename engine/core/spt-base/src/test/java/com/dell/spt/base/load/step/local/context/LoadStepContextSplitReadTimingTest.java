@@ -58,7 +58,8 @@ final class LoadStepContextSplitReadTimingTest {
 	}
 
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aSplitReadsTimingsAreOnePerRange(final boolean batch) {
 		final var context = context();
 		final List<Long> parentDurations = new ArrayList<>();
@@ -93,7 +94,8 @@ final class LoadStepContextSplitReadTimingTest {
 	}
 
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aFailedRangeAttemptAddsNoSampleAndItsRetryAddsOne(final boolean batch) {
 		final var read = new Published(OpType.READ, "retried").starts().partFails(1);
 		for (var part = 0; part < PARTS; part++) {
@@ -110,7 +112,8 @@ final class LoadStepContextSplitReadTimingTest {
 	}
 
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aFailedSplitReadAddsNoParentSample(final boolean batch) {
 		final var read = new Published(OpType.READ, "failed").starts().partRunsOut(0);
 		for (var part = 1; part < PARTS; part++) {
@@ -132,7 +135,8 @@ final class LoadStepContextSplitReadTimingTest {
 
 	/** The rule is for reads: an upload's finished parent is its completion request, which keeps its sample. */
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aMultipartUploadKeepsItsCompletionSample(final boolean batch) {
 		final var upload = new Published(OpType.CREATE, "upload").starts();
 		for (var part = 0; part < PARTS; part++) {
@@ -150,7 +154,8 @@ final class LoadStepContextSplitReadTimingTest {
 	}
 
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aWholeObjectOperationKeepsItsSample(final boolean batch) {
 		final List<Operation<DataItem>> results = new ArrayList<>();
 		for (final var type : List.of(OpType.READ, OpType.CREATE)) {

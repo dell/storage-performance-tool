@@ -81,7 +81,8 @@ final class S3AwsSplitReadTimingStepTest {
 	}
 
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aSplitReadStepHasOneTimingSamplePerRange(final boolean batch) throws Exception {
 		final var snapshot = readStep(batch);
 
@@ -93,7 +94,8 @@ final class S3AwsSplitReadTimingStepTest {
 
 	/** A refused range's attempts and the failed read that ends them add no sample. */
 	@ParameterizedTest(name = "batch={0}")
-	@ValueSource(booleans = {false, true})
+	@ValueSource(booleans = {false, true
+	})
 	void aFailedSplitReadAddsOnlyItsRangesThatSucceeded(final boolean batch) throws Exception {
 		target.refuseMiddleRange = true;
 		final var refused = OBJECTS / REFUSED_EVERY;
@@ -136,7 +138,8 @@ final class S3AwsSplitReadTimingStepTest {
 		final var batches = new LongAdder();
 		if (batch) {
 			extensions.replaceAll(extension -> "s3-aws".equals(extension.id())
-							? new BatchResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batches) : extension);
+							? new BatchResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batches)
+							: extension);
 		}
 		final var snapshot = new AtomicReference<AllMetricsSnapshot>();
 		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR) {
@@ -177,7 +180,8 @@ final class S3AwsSplitReadTimingStepTest {
 						final boolean verifyFlag, final int batchSize) throws InterruptedException {
 			final StorageDriver<I, O> driver = delegate.create(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 			return (StorageDriver<I, O>) Proxy.newProxyInstance(StorageDriver.class.getClassLoader(),
-							new Class<?>[] {StorageDriver.class}, (proxy, method, args) -> {
+							new Class<?>[]{StorageDriver.class
+							}, (proxy, method, args) -> {
 								if ("operationResultOutput".equals(method.getName())) {
 									driver.operationResultOutput(new BatchOutput<>((Output<O>) args[0], batches));
 									return null;
@@ -211,103 +215,103 @@ final class S3AwsSplitReadTimingStepTest {
 		}
 	}
 
-	private record BatchOutput<O>(Output<O> output, LongAdder batches) implements Output<O> {
+	private record BatchOutput<O>(Output<O> output, LongAdder batches)implements Output<O>
+	{
 
-		@Override
-		public boolean put(final O result) throws IOException {
-			batches.increment();
-			return output.put(List.of(result), 0, 1) == 1;
-		}
-
-		@Override
-		public int put(final List<O> results, final int from, final int to) throws IOException {
-			batches.increment();
-			return output.put(results, from, to);
-		}
-
-		@Override
-		public int put(final List<O> results) throws IOException {
-			return put(results, 0, results.size());
-		}
-
-		@Override
-		public Input<O> getInput() throws IOException {
-			return output.getInput();
-		}
-
-		@Override
-		public void close() throws IOException {
-			output.close();
-		}
+	@Override
+	public boolean put(final O result) throws IOException {
+		batches.increment();
+		return output.put(List.of(result), 0, 1) == 1;
 	}
 
-	/** A loopback S3 serving {@link #OBJECT_SIZE}-byte objects by range, each range after a short wait. */
-	private static final class RangeTarget implements AutoCloseable {
+	@Override
+	public int put(final List<O> results, final int from, final int to) throws IOException {
+		batches.increment();
+		return output.put(results, from, to);
+	}
 
-		private static final byte[] CHUNK = new byte[64 * 1024];
+	@Override
+	public int put(final List<O> results) throws IOException {
+		return put(results, 0, results.size());
+	}
 
-		private final HttpServer server;
-		private final ExecutorService threads = Executors.newCachedThreadPool();
-		volatile boolean refuseMiddleRange;
+	@Override
+	public Input<O> getInput() throws IOException {
+		return output.getInput();
+	}
 
-		RangeTarget() {
-			try {
-				server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
-			} catch (final IOException e) {
-				throw new IllegalStateException(e);
-			}
-			server.setExecutor(threads);
-			server.createContext("/", this::handle);
-			server.start();
-		}
-
-		int port() {
-			return server.getAddress().getPort();
-		}
-
-		private void handle(final HttpExchange exchange) throws IOException {
-			try (exchange) {
-				exchange.getRequestBody().readAllBytes();
-				final var headers = exchange.getResponseHeaders();
-				headers.set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
-				final var range = exchange.getRequestHeaders().getFirst("Range");
-				if (!"GET".equals(exchange.getRequestMethod()) || range == null) {
-					headers.set("Content-Length", "0");
-					exchange.sendResponseHeaders(200, -1);
-					return;
-				}
-				TimeUnit.MILLISECONDS.sleep(ANSWER_DELAY_MILLIS);
-				final var first = Long.parseLong(range.substring("bytes=".length(), range.indexOf('-')));
-				final var last = Math.min(Long.parseLong(range.substring(range.indexOf('-') + 1)), OBJECT_SIZE - 1);
-				final var path = exchange.getRequestURI().getPath();
-				final var object = Integer.parseInt(path.substring(path.lastIndexOf('-') + 1));
-				if (refuseMiddleRange && first == PART_SIZE && object % REFUSED_EVERY == 0) {
-					final var xml = "<Error><Code>AccessDenied</Code><Message>scripted</Message></Error>"
-									.getBytes(StandardCharsets.UTF_8);
-					headers.set("Content-Type", "application/xml");
-					exchange.sendResponseHeaders(403, xml.length);
-					exchange.getResponseBody().write(xml);
-					return;
-				}
-				headers.set("ETag", "\"stub\"");
-				headers.set("Accept-Ranges", "bytes");
-				headers.set("Content-Type", "application/octet-stream");
-				headers.set("Content-Range", "bytes " + first + "-" + last + "/" + OBJECT_SIZE);
-				final var length = last - first + 1;
-				exchange.sendResponseHeaders(206, length);
-				final var body = exchange.getResponseBody();
-				for (var left = length; left > 0; left -= CHUNK.length) {
-					body.write(CHUNK, 0, (int) Math.min(CHUNK.length, left));
-				}
-			} catch (final InterruptedException e) {
-				Thread.currentThread().interrupt();
-			}
-		}
-
-		@Override
-		public void close() {
-			server.stop(0);
-			threads.shutdownNow();
-		}
+	@Override
+	public void close() throws IOException {
+		output.close();
 	}
 }
+
+/** A loopback S3 serving {@link #OBJECT_SIZE}-byte objects by range, each range after a short wait. */
+private static final class RangeTarget implements AutoCloseable {
+
+	private static final byte[] CHUNK = new byte[64 * 1024];
+
+	private final HttpServer server;
+	private final ExecutorService threads = Executors.newCachedThreadPool();
+	volatile boolean refuseMiddleRange;
+
+	RangeTarget() {
+		try {
+			server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+		} catch (final IOException e) {
+			throw new IllegalStateException(e);
+		}
+		server.setExecutor(threads);
+		server.createContext("/", this::handle);
+		server.start();
+	}
+
+	int port() {
+		return server.getAddress().getPort();
+	}
+
+	private void handle(final HttpExchange exchange) throws IOException {
+		try (exchange) {
+			exchange.getRequestBody().readAllBytes();
+			final var headers = exchange.getResponseHeaders();
+			headers.set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
+			final var range = exchange.getRequestHeaders().getFirst("Range");
+			if (!"GET".equals(exchange.getRequestMethod()) || range == null) {
+				headers.set("Content-Length", "0");
+				exchange.sendResponseHeaders(200, -1);
+				return;
+			}
+			TimeUnit.MILLISECONDS.sleep(ANSWER_DELAY_MILLIS);
+			final var first = Long.parseLong(range.substring("bytes=".length(), range.indexOf('-')));
+			final var last = Math.min(Long.parseLong(range.substring(range.indexOf('-') + 1)), OBJECT_SIZE - 1);
+			final var path = exchange.getRequestURI().getPath();
+			final var object = Integer.parseInt(path.substring(path.lastIndexOf('-') + 1));
+			if (refuseMiddleRange && first == PART_SIZE && object % REFUSED_EVERY == 0) {
+				final var xml = "<Error><Code>AccessDenied</Code><Message>scripted</Message></Error>"
+								.getBytes(StandardCharsets.UTF_8);
+				headers.set("Content-Type", "application/xml");
+				exchange.sendResponseHeaders(403, xml.length);
+				exchange.getResponseBody().write(xml);
+				return;
+			}
+			headers.set("ETag", "\"stub\"");
+			headers.set("Accept-Ranges", "bytes");
+			headers.set("Content-Type", "application/octet-stream");
+			headers.set("Content-Range", "bytes " + first + "-" + last + "/" + OBJECT_SIZE);
+			final var length = last - first + 1;
+			exchange.sendResponseHeaders(206, length);
+			final var body = exchange.getResponseBody();
+			for (var left = length; left > 0; left -= CHUNK.length) {
+				body.write(CHUNK, 0, (int) Math.min(CHUNK.length, left));
+			}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	@Override
+	public void close() {
+		server.stop(0);
+		threads.shutdownNow();
+	}
+}}
