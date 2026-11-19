@@ -266,9 +266,9 @@ TtfbMax[us]     | Maximum Time to First Byte
 
 Time to First Byte is populated for body-returning operations when first response body bytes are observed, currently READ and LIST. Non-body operations and empty/no-body samples do not contribute TTFB values.
 
-**Split reads.** On `s3`, `s3-rdma` and `s3-aws`, a read split by `item-data-ranges-threshold` (`--part-size` on the CLI) sends no request of its own: each range is a ranged GET. `Duration*`, `DurationSum[s]` and `Latency*` hold the samples of the range requests that succeeded, and the read adds none, so these columns describe ranges, not whole objects. `Ttfb*` holds a sample for each of those ranges whose response body started. On `fs`, the read reads the whole file itself before its ranges run, and that read keeps its sample next to theirs. With `output-metrics-trace-persist` on, `op.trace.csv` has a row for the read, from its start to its finalization; it can include time queued after its last range ended. `CountSucc`, `CountFail` and `TP*` still count objects, and `Size` and `BW*` count bytes.
+**Split reads.** On `s3`, `s3-rdma` and `s3-aws`, a read split by `item-data-ranges-threshold` (`--part-size` on the CLI) sends no request of its own: each range is a ranged GET. `Duration*`, `DurationSum[s]` and `Latency*` hold the timings recorded for the range requests that succeeded, and the read adds none, so these columns describe ranges, not whole objects. `Ttfb*` holds the first-byte timings recorded for those ranges. A meter records only a positive duration or latency, and only a positive first byte no later than the duration, so a request that ends within one clock tick can be missing from a column. On `fs`, the read reads the whole file itself before its ranges run, and the timings of that pass are recorded next to theirs, also when the file turns out empty. With `output-metrics-trace-persist` on, `op.trace.csv` has a row for the read, from its start to its finalization; it can include time queued after its last range ended. `CountSucc`, `CountFail` and `TP*` still count objects, and `Size` and `BW*` count bytes.
 
-**Multipart uploads.** `Duration*`, `DurationSum[s]` and `Latency*` hold one sample per part that succeeds and one for the completion request when it succeeds.
+**Multipart uploads.** `Duration*`, `DurationSum[s]` and `Latency*` hold the timings recorded for each part that succeeds and for the completion request when it succeeds.
 
 On `s3-aws`, the upload's last sample instead covers the whole upload, from its initiation to its completion.
 
@@ -324,7 +324,7 @@ Console summary metrics output has YAML format for the better readability:
 ```
 
 * The console summary is displayed only on the entry node. It's not displayed on the additional nodes in the distributed mode.
-* The equation (CONFIGURED_CURRENCY_LEVEL * DRIVER_COUNT * ELAPSED_TIME / OPERATIONS_DURATION_SUM) may be used as efficiency estimate. For a split read, the sum is that of its range requests.
+* The equation (CONFIGURED_CURRENCY_LEVEL * DRIVER_COUNT * ELAPSED_TIME / OPERATIONS_DURATION_SUM) may be used as efficiency estimate. For a split read on `s3`, `s3-rdma` or `s3-aws`, the sum is that of its range requests; on `fs`, it also includes the read's own pass over the file.
 * *Mean* rates are calculated as current total count of items/bytes divided by current elapsed time.
 * `Time To First Byte [us]` is reported when the load step has TTFB samples; otherwise it is shown as `N/A`.
 * *Last* rates are calculated as [exponentially decaying moving average](https://en.wikipedia.org/wiki/Moving_average#Exponential_moving_average) where
