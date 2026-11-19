@@ -14,10 +14,13 @@ import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
 import com.dell.spt.base.load.step.linear.LinearLoadStepLocal;
 import com.dell.spt.base.load.step.linear.LinearLoadStepExtension;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -117,11 +120,18 @@ class LoadStepBaseJvmExitTest {
 
 	@Test
 	void aSliceRefusedOnAWorkerPublishesNothingWhenClosed() throws Exception {
+		// A slice's files go where the logging configuration puts them, not under the test's log home.
+		final Path lifecycle = Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), STEP_ID));
+		final Path eventLoops = lifecycle.resolveSibling(EventLoopsArtifact.FILE_NAME);
+		Files.deleteIfExists(lifecycle);
+		Files.deleteIfExists(eventLoops);
 		JvmExit.markBegun();
 		try (var slice = new LinearLoadStepLocal(config(), List.of(), null, mock(MetricsManager.class))) {
 			assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, slice::start));
 		}
 		assertNoStepDirectory();
+		assertFalse(Files.exists(lifecycle), "the refused slice wrote its lifecycle file");
+		assertFalse(Files.exists(eventLoops), "the refused slice wrote its event loops file");
 	}
 
 	private void assertNoStepDirectory() {
