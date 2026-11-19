@@ -349,6 +349,30 @@ class WeightedLoadStepClientTest {
 			return this;
 		}
 
+		/** As a caller of the public constructor may build its contexts: a schema with no load.step.id. */
+		@SuppressWarnings("unchecked")
+		InitProbe withoutContextStepIdLeaves() {
+			ctxConfigs.replaceAll(ctx -> {
+				final Map<String, Object> tree = Config.deepToMap(ctx);
+				((Map<String, Object>) ((Map<String, Object>) tree.get("load")).get("step")).remove("id");
+				final Map<String, Object> schema = deepCopy(ctx.schema());
+				((Map<String, Object>) ((Map<String, Object>) schema.get("load")).get("step")).remove("id");
+				try {
+					return new BasicConfig(ctx.pathSep(), schema, tree);
+				} catch (final Exception e) {
+					throw new AssertionError(e);
+				}
+			});
+			return this;
+		}
+
+		@SuppressWarnings("unchecked")
+		private static Map<String, Object> deepCopy(final Map<String, Object> map) {
+			final Map<String, Object> copy = new LinkedHashMap<>();
+			map.forEach((key, value) -> copy.put(key, value instanceof Map ? deepCopy((Map<String, Object>) value) : value));
+			return copy;
+		}
+
 		List<String> contextIds() {
 			return ctxConfigs.stream().map(ctx -> ctx.stringVal("load-step-id")).toList();
 		}
@@ -463,6 +487,19 @@ class WeightedLoadStepClientTest {
 		assertDoesNotThrow(step::init);
 
 		assertEquals(List.of("wctxhand"), step.contextIds());
+	}
+
+	@Test
+	@DisplayName("a context whose schema has no load.step.id runs under the step's id")
+	void aContextWithoutAStepIdLeafRunsUnderTheStepId() throws Exception {
+		final InitProbe configured = runConfigStep("wbase").withContext(null).withoutContextStepIdLeaves();
+		assertDoesNotThrow(configured::init);
+		assertEquals(List.of("wbase"), configured.metricsIds());
+
+		final InitProbe generated = runConfigStep(null).withContext(null).withoutContextStepIdLeaves();
+		assertDoesNotThrow(generated::init);
+		assertEquals(1, generated.metricsIds().size());
+		assertTrue(generated.metricsIds().get(0).startsWith("weighted_"), generated.metricsIds().toString());
 	}
 
 	@Test

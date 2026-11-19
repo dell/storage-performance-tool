@@ -73,11 +73,16 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 		// A context that only copied the base's id runs under the step's; one whose append() set an id
 		// keeps it, and the last context's id still names the step below. A context built without the
 		// flag, as a caller of the public constructor may pass, keeps its id as before, and one without
-		// a load.step section at all takes the step's from the base at the merge below.
+		// a load.step section, or whose schema has no load.step.id, takes the step's from the base at
+		// the merge below.
 		final String stepId = stepConfig.stringVal("id");
 		for (final Config ctxConfig : ctxConfigs) {
 			if (copiedGeneratedStepId(ctxConfig)) {
-				ctxConfig.val("load-step-id", stepId);
+				try {
+					ctxConfig.val("load-step-id", stepId);
+				} catch (final InvalidValuePathException e) {
+					// No id of its own to replace: the merge gives it the step's.
+				}
 			}
 		}
 		final int subStepCount = ctxConfigs.size();
