@@ -17,7 +17,7 @@ sent while copying the objects so these requests may be significantly faster tha
 ## 1. Limitations
 
 1. Works only if the input path is different from the output one. On the `fs` driver, an output path equal to or above
-   the input path used to truncate the source files and never finish. Now each copy whose destination resolves to its
+   the input path of listed files used to truncate the source files and never finish. Now each copy whose destination resolves to its
    own source file fails with a client error and leaves the source as it was. A destination that reaches its source
    through a symbolic or hard link is not detected: the source is still truncated, and the copy now fails instead of
    running forever. Because those copies now end, the step goes on to the next item, so every source reached that way
