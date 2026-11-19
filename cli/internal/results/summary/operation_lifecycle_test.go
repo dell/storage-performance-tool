@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -37,7 +38,8 @@ func lifecycleCSV(unresolved ...string) string {
 
 // lifecycleArtifact is a file of the fake run. An empty status leaves it out of the manifest, and
 // fileStatusMissing lists it with no file. absent lists it as ok with nothing on disk, directory
-// puts a directory in its place, and outsideLink a symlink to a file outside the run directory.
+// puts a directory in its place, and outsideLink and insideLink a symlink to a file outside or
+// inside the run directory.
 type lifecycleArtifact struct {
 	name        string
 	content     string
@@ -45,10 +47,22 @@ type lifecycleArtifact struct {
 	absent      bool
 	directory   bool
 	outsideLink bool
+	insideLink  bool
 }
 
 func okLifecycle(content string) lifecycleArtifact {
 	return lifecycleArtifact{name: lifecycleFile, content: content, status: fileStatusOK}
+}
+
+// symlinkOrSkip skips the test on a Windows account that may not create links.
+func symlinkOrSkip(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.Symlink(target, path); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create a symlink: %v", err)
+		}
+		t.Fatal(err)
+	}
 }
 
 // loadLifecycleRun writes a one-step run into dir and loads it.
@@ -74,9 +88,13 @@ func loadLifecycleRun(t *testing.T, dir, metricsRow string, artifacts ...lifecyc
 			if err := os.WriteFile(outside, []byte(artifact.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(outside, path); err != nil {
+			symlinkOrSkip(t, outside, path)
+		case artifact.insideLink:
+			const target = "lifecycle-target.csv"
+			if err := os.WriteFile(filepath.Join(dir, target), []byte(artifact.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			symlinkOrSkip(t, target, path)
 		case !artifact.absent && artifact.status != fileStatusMissing:
 			if err := os.WriteFile(path, []byte(artifact.content), 0o600); err != nil {
 				t.Fatal(err)
@@ -145,6 +163,7 @@ func TestUnresolvedOperationsWarningFromLifecycleFile(t *testing.T) {
 		{"singular", []lifecycleArtifact{okLifecycle(lifecycleCSV("1"))}, "Read: 1 operation" + tail},
 		{"merged rows are summed and node copies are not", []lifecycleArtifact{okLifecycle(lifecycleCSV("704", "108")), nodeCopy}, "Read: 812 operations" + tail},
 		{"workers that sum to one stay singular", []lifecycleArtifact{okLifecycle(lifecycleCSV("0", "1"))}, "Read: 1 operation" + tail},
+		{"a link inside the run directory", []lifecycleArtifact{{name: lifecycleFile, content: lifecycleCSV("9"), status: fileStatusOK, insideLink: true}}, "Read: 9 operations" + tail},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -280,23 +299,47 @@ func TestUnresolvedOperationsWarningWithoutMetricsOrLabel(t *testing.T) {
 	}
 }
 
-// Steps of one phase share a label, and equal counts would otherwise merge into one line.
-func TestUnresolvedOperationsOfStepsWithOneLabelStaySeparate(t *testing.T) {
+// Steps of one phase share a label, so each warning names its step: equal counts would otherwise
+// merge into one line, and a plain label would not say which step it means.
+func TestUnresolvedOperationsOfStepsWithOneLabelNameTheirSteps(t *testing.T) {
 	t.Parallel()
 	const tail = ": 5 operations unresolved at the stop, in neither Success nor Failed; Data Moved can include their bytes (operation.lifecycle.csv)"
-	data, err := loadLifecycleRun(t, t.TempDir(), lifecycleOKRow, okLifecycle(lifecycleCSV("5")))
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name   string
+		counts []int64
+		want   []int
+	}{
+		{"equal counts", []int64{5, 5}, []int{0, 1}},
+		{"a clean step first", []int64{0, 5}, []int{1}},
+		{"a clean step between two", []int64{5, 0, 5}, []int{0, 2}},
 	}
-	const second = "spt-004-20261115.120000.000-read"
-	step := *data.Steps[lifecycleStep]
-	step.StepID = second
-	data.Steps[second] = &step
-	data.StepOrder = append(data.StepOrder, second)
-	got := unresolvedWarnings(aggregateLifecycleRun(t, data))
-	want := []string{"Read (" + second + ")" + tail, "Read" + tail}
-	if !slices.Equal(got, want) {
-		t.Fatalf("warnings = %q, want %q", got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := loadLifecycleRun(t, t.TempDir(), lifecycleOKRow, okLifecycle(lifecycleCSV("5")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := *data.Steps[lifecycleStep]
+			data.Steps = make(map[string]*StepData, len(test.counts))
+			data.StepOrder = nil
+			ids := make([]string, len(test.counts))
+			for i, count := range test.counts {
+				step := base
+				step.StepID = fmt.Sprintf("spt-%03d-20261115.120000.000-read", i+3)
+				step.UnresolvedOperations = count
+				ids[i] = step.StepID
+				data.Steps[step.StepID] = &step
+				data.StepOrder = append(data.StepOrder, step.StepID)
+			}
+			var want []string
+			for _, i := range test.want {
+				want = append(want, "Read ("+ids[i]+")"+tail)
+			}
+			if got := unresolvedWarnings(aggregateLifecycleRun(t, data)); !slices.Equal(got, want) {
+				t.Fatalf("warnings = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
