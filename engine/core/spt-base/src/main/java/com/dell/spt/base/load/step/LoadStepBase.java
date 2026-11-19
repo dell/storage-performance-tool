@@ -384,12 +384,16 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	/** Cancels subclass-owned duration resources after the bounded run cleanup is exhausted. */
 	protected void cancelDurationRunCleanupResourcesAfterExhaustion() {}
 
+	/** Called when {@link #doStart} refuses this step because the JVM is exiting. */
+	protected void onStartRefusedAtJvmExit() {}
+
 	@Override
 	protected void doStart() throws IllegalStateException {
 
 		// The shutdown hook ends the running step without stopping the scenario, which reaches its next
 		// step here. Ending as a stop, this step touches neither the target nor a result directory.
 		if (JvmExit.begun()) {
+			onStartRefusedAtJvmExit();
 			throwUnchecked(new InterruptedException(loadStepId() + ": not started, the engine is exiting"));
 		}
 		validateRangeConfiguration();
