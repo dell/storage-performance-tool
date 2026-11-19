@@ -144,6 +144,10 @@ public class PipelineLoadStepLocal
 
 				final int batchSize = loadConfig.intVal("batch-size");
 
+				// What this context opened before a context owns it, closed if init() fails first.
+				StorageDriver unownedDriver = null;
+				LoadGenerator unownedGenerator = null;
+				boolean contextPending = true;
 				try {
 
 					NicSetConfig.requireSupportedWorkload(
@@ -151,6 +155,7 @@ public class PipelineLoadStepLocal
 					final StorageDriver driver = StorageDriver.instance(
 									extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 									com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
+					unownedDriver = driver;
 
 					final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 					final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
@@ -174,6 +179,7 @@ public class PipelineLoadStepLocal
 							generatorBuilder.itemInput(nextItemBuff);
 						}
 						final LoadGenerator generator = generatorBuilder.build();
+						unownedGenerator = generator;
 
 						final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 						final LoadStepContext stepCtx = new LoadStepContextImpl<>(
@@ -187,6 +193,7 @@ public class PipelineLoadStepLocal
 						((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
 										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
+						contextPending = false;
 
 						final var itemOutputConfig = itemConfig.configVal("output");
 						if (originIndex < subStepCount - 1) {
@@ -225,9 +232,15 @@ public class PipelineLoadStepLocal
 						throw new IllegalStateException("Failed to initialize the load generator", e);
 					}
 				} catch (final IllegalConfigurationException e) {
-					throw new IllegalStateException("Failed to initialize the storage driver", e);
+					throw closeAfterInitFailure(
+									new IllegalStateException("Failed to initialize the storage driver", e), contextPending,
+									unownedGenerator, unownedDriver);
 				} catch (final InterruptedException e) {
-					throwUnchecked(e);
+					throwUnchecked(closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver));
+				} catch (final RuntimeException e) {
+					throw closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver);
+				} catch (final Error e) {
+					throw closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver);
 				}
 			} catch (final IOException e) {
 				throw new IllegalStateException("Failed to initialize the data input", e);

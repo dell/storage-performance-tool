@@ -110,6 +110,10 @@ public class LinearLoadStepLocal
 
 			final int batchSize = loadConfig.intVal("batch-size");
 
+			// What this context opened before a context owns it, closed if init() fails first.
+			StorageDriver unownedDriver = null;
+			LoadGenerator unownedGenerator = null;
+			boolean contextPending = true;
 			try {
 
 				NicSetConfig.requireSupportedWorkload(
@@ -117,6 +121,7 @@ public class LinearLoadStepLocal
 				final StorageDriver driver = StorageDriver.instance(
 								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 								com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
+				unownedDriver = driver;
 
 				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
@@ -137,6 +142,7 @@ public class LinearLoadStepLocal
 						generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));
 					}
 					final LoadGenerator generator = generatorBuilder.build();
+					unownedGenerator = generator;
 					final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 					final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
 					final String immutableListRootPrefix = metadataMode && OpType.LIST.equals(opType)
@@ -156,6 +162,7 @@ public class LinearLoadStepLocal
 					((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
 									initBucketMetrics(config, metricsContexts.get(0), null));
 					stepContexts.add(stepCtx);
+					contextPending = false;
 
 					final String itemOutputFile = itemConfig.stringVal("output-file");
 					if (itemOutputFile != null && itemOutputFile.length() > 0) {
@@ -209,9 +216,15 @@ public class LinearLoadStepLocal
 					throw new IllegalStateException("Failed to initialize the load generator", e);
 				}
 			} catch (final IllegalConfigurationException e) {
-				throw new IllegalStateException("Failed to initialize the storage driver", e);
+				throw closeAfterInitFailure(
+								new IllegalStateException("Failed to initialize the storage driver", e), contextPending,
+								unownedGenerator, unownedDriver);
 			} catch (final InterruptedException e) {
-				throwUnchecked(e);
+				throwUnchecked(closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver));
+			} catch (final RuntimeException e) {
+				throw closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver);
+			} catch (final Error e) {
+				throw closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver);
 			}
 		} catch (final IOException e) {
 			throw new IllegalStateException("Failed to initialize the data input", e);
