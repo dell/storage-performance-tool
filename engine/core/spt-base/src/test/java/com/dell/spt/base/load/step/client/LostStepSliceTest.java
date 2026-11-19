@@ -268,9 +268,9 @@ class LostStepSliceTest {
 			final String name = method.getName();
 			if (method.getDeclaringClass() == Object.class) {
 				return switch (name) {
-					case "equals" -> proxy == args[0];
-					case "hashCode" -> System.identityHashCode(proxy);
-					default -> "recording slice @ " + addr;
+				case "equals" -> proxy == args[0];
+				case "hashCode" -> System.identityHashCode(proxy);
+				default -> "recording slice @ " + addr;
 				};
 			}
 			synchronized (sliceCalls) {
@@ -289,7 +289,8 @@ class LostStepSliceTest {
 			}
 		};
 		return (LoadStepService) Proxy.newProxyInstance(
-						LoadStepService.class.getClassLoader(), new Class<?>[] {LoadStepService.class}, handler);
+						LoadStepService.class.getClassLoader(), new Class<?>[]{LoadStepService.class
+						}, handler);
 	}
 
 	private void startWorkers(final int count) throws Exception {

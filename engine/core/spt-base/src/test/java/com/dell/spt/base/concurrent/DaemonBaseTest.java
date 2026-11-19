@@ -126,4 +126,47 @@ class DaemonBaseTest {
 		// Ensure closeAll on empty registry does not throw
 		DaemonBase.closeAll();
 	}
+
+	@Test
+	void aDaemonClosedByAFailingCloseLeavesTheRegistry() throws Exception {
+		final var failure = new IOException("after close");
+		final var d = new TestDaemon() {
+			@Override
+			protected void afterClosed() throws IOException {
+				throw failure;
+			}
+		};
+		assertTrue(registered(d));
+
+		assertSame(failure, assertThrows(IOException.class, d::close));
+
+		assertTrue(d.isClosed());
+		assertFalse(registered(d));
+	}
+
+	@Test
+	void aDaemonWhoseCloseFailsStaysInTheRegistry() throws Exception {
+		final var d = new TestDaemon() {
+			@Override
+			protected void doClose() {
+				throw new IllegalStateException("close failed");
+			}
+		};
+
+		assertThrows(IllegalStateException.class, d::close);
+
+		assertFalse(d.isClosed());
+		assertTrue(registered(d), "closeAll still closes it");
+	}
+
+	private static boolean registered(final Daemon daemon) throws ReflectiveOperationException {
+		final var field = DaemonBase.class.getDeclaredField("REGISTRY");
+		field.setAccessible(true);
+		for (final Object ref : (java.util.Collection<?>) field.get(null)) {
+			if (((java.lang.ref.WeakReference<?>) ref).get() == daemon) {
+				return true;
+			}
+		}
+		return false;
+	}
 }
