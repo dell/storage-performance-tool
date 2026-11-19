@@ -28,6 +28,8 @@ type fakeDockerAPI struct {
 	removed    []string
 	inspects   map[string]containertypes.InspectResponse
 	onRemove   func(containerID string)
+	// daemonHost is the daemon's address; empty means the default local socket.
+	daemonHost string
 }
 
 func (f *fakeDockerAPI) ContainerList(_ context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error) {
@@ -58,6 +60,13 @@ func (f *fakeDockerAPI) ContainerInspect(_ context.Context, containerID string) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.inspects[containerID], nil
+}
+
+func (f *fakeDockerAPI) DaemonHost() string {
+	if f.daemonHost == "" {
+		return "unix:///var/run/docker.sock"
+	}
+	return f.daemonHost
 }
 
 func (f *fakeDockerAPI) Close() error { return nil }

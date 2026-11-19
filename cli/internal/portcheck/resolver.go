@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -381,7 +382,7 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	client := NewSptAPIClientWithClock(baseURL, DefaultHTTPTimeout, r.clock)
 
 	fmt.Printf("Stopping the run on the SPT engine at port %s...\n", r.Port)
-	runID, err := client.StopActiveRun(ctx)
+	runID, err := r.stopEngineRun(ctx, client, info)
 	if err != nil {
 		return gracefulStopFailure("Failed to stop the SPT run", err)
 	}
@@ -391,12 +392,41 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 		fmt.Printf("No SPT run is active\n")
 	}
 
+	// Shutdown ends whatever runs on the engine, so another run must not be active.
+	if err := client.ConfirmNoOtherRun(ctx, runID); err != nil {
+		if r.checker.IsPortHeld() {
+			return gracefulStopFailure("Left the SPT engine running", err)
+		}
+		return r.waitForPortRelease(ctx, deadline)
+	}
+
 	fmt.Printf("Shutting down the SPT engine (waiting up to %s for port %s)...\n",
 		constants.PortConflictGracefulStopTimeout, r.Port)
-	if err := client.Shutdown(ctx); err != nil && r.checker.IsPortInUse() {
+	if err := client.Shutdown(ctx); err != nil && r.checker.IsPortHeld() {
 		return gracefulStopFailure("Failed to shut down the SPT engine", err)
 	}
 	return r.waitForPortRelease(ctx, deadline)
+}
+
+// stopEngineRun stops the engine's run. An operator's answer covers only the run
+// shown at the prompt; --force covers whatever holds the port.
+func (r *ConflictResolver) stopEngineRun(ctx context.Context, client *SptAPIClient, info *ServiceInfo) (int64, error) {
+	if r.forceMode {
+		return client.StopActiveRun(ctx)
+	}
+	return client.StopShownRun(ctx, shownRunID(info))
+}
+
+// shownRunID returns the run ID detection reported, or 0 if it reported none.
+func shownRunID(info *ServiceInfo) int64 {
+	if info.Status == nil {
+		return 0
+	}
+	runID, err := strconv.ParseInt(info.Status.RunID, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return runID
 }
 
 func gracefulStopFailure(what string, err error) *ResolutionResult {
@@ -410,15 +440,14 @@ func gracefulStopFailure(what string, err error) *ResolutionResult {
 
 // waitForPortRelease polls until the port closes, the deadline passes or ctx ends.
 func (r *ConflictResolver) waitForPortRelease(ctx context.Context, deadline time.Time) *ResolutionResult {
-	for r.checker.IsPortInUse() {
+	for r.checker.IsPortHeld() {
 		if !r.clock.Now().Before(deadline) {
-			return &ResolutionResult{
-				Strategy: StrategyGracefulStop,
-				Success:  false,
-				Message: fmt.Sprintf("Port %s is still in use %s after the SPT engine was asked to stop; "+
-					"its api.linger.sec may be longer. Retry later, or use --force to remove its container",
-					r.Port, constants.PortConflictGracefulStopTimeout),
+			message := fmt.Sprintf("Port %s is still in use %s after the SPT engine was asked to stop; "+
+				"its api.linger.sec may be longer", r.Port, constants.PortConflictGracefulStopTimeout)
+			if !r.forceMode {
+				message += ". Retry later, or use --force to remove its container"
 			}
+			return &ResolutionResult{Strategy: StrategyGracefulStop, Success: false, Message: message}
 		}
 		select {
 		case <-ctx.Done():
@@ -490,6 +519,14 @@ func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *Servic
 		return nil, lookupFailure(err)
 	}
 	if container == nil && info.APIConfirmed {
+		if !r.dockerFinder.DaemonIsLocal() {
+			return nil, &ResolutionResult{
+				Strategy: StrategyForceStop,
+				Success:  false,
+				Message: fmt.Sprintf("No containers found using port %s - the Docker daemon is not local, "+
+					"so its host-network containers cannot be matched to this port", r.Port),
+			}
+		}
 		container, err = r.dockerFinder.FindHostNetworkEngine(ctx, r.Port)
 		if err != nil {
 			return nil, lookupFailure(err)
@@ -549,7 +586,7 @@ func (r *ConflictResolver) verifyResolution(ctx context.Context, strategy Resolu
 		}
 	}
 
-	if !newInfo.IsListening {
+	if !newInfo.IsListening && !r.checker.IsPortHeld() {
 		fmt.Printf("✅ Resolution successful - port %s is now available\n", r.Port)
 		return &ResolutionResult{
 			Strategy: strategy,

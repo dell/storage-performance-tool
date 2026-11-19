@@ -144,6 +144,19 @@ func TestGracefulStopReportsTheDeadline(t *testing.T) {
 	}
 }
 
+// Under --force the message does not advise --force: the container is next.
+func TestForcedGracefulStopDeadlineDoesNotAdviseForce(t *testing.T) {
+	engine := newFakeEngine(t, 41)
+	resolver := engine.resolver(true, false)
+	resolver.clock = &pollClock{}
+	defer resolver.Close()
+
+	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
+	if result.Success || !strings.Contains(result.Message, "still in use") || strings.Contains(result.Message, "--force") {
+		t.Fatalf("result = %+v, want the deadline without --force advice", result)
+	}
+}
+
 func TestGracefulStopWaitEndsWithTheContext(t *testing.T) {
 	engine := newFakeEngine(t, 41)
 	resolver := engine.resolver(false, true)

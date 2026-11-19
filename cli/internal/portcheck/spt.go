@@ -422,10 +422,10 @@ func (c *SptAPIClient) getMetricsJSON(ctx context.Context) ([]jsonMetricsStep, e
 	return steps, nil
 }
 
-// StopActiveRun stops whatever run the engine reports as active and returns its
-// ID, or 0 when no run is active. A run that replaces the reported one between
-// the read and the stop was never shown to the caller, so it is not stopped here
-// and is reported as an error.
+// StopActiveRun stops the run the engine reports as active when called, whichever
+// it is, and returns its ID, or 0 when no run is active. If another run takes over
+// between that read and the stop, the stop does not reach it, and the replacement
+// is returned as an error.
 func (c *SptAPIClient) StopActiveRun(ctx context.Context) (int64, error) {
 	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
@@ -434,6 +434,45 @@ func (c *SptAPIClient) StopActiveRun(ctx context.Context) (int64, error) {
 	if !active {
 		return 0, nil
 	}
+	return c.stopReportedRun(ctx, runID)
+}
+
+// StopShownRun stops the active run only if it is shownRunID, the run the operator
+// was shown (0 for none). Any other active run is left alone and returned as an
+// error. It returns the stopped run's ID, or 0 when no run is active.
+func (c *SptAPIClient) StopShownRun(ctx context.Context, shownRunID int64) (int64, error) {
+	runID, active, err := c.activeRunID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !active {
+		return 0, nil
+	}
+	if runID != shownRunID {
+		if shownRunID == 0 {
+			return 0, fmt.Errorf("run %d started after the engine was shown without one; it was not stopped", runID)
+		}
+		return 0, fmt.Errorf("run %d replaced the run shown, %d; it was not stopped", runID, shownRunID)
+	}
+	return c.stopReportedRun(ctx, runID)
+}
+
+// ConfirmNoOtherRun returns an error if a run other than stoppedRunID is active.
+// A stopped run may stay active until its cleanup returns, so it is allowed. The
+// engine's shutdown takes no run ID: a run that starts after this check is not seen.
+func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stoppedRunID int64) error {
+	runID, active, err := c.activeRunID(ctx)
+	if err != nil {
+		return fmt.Errorf("re-read the active run: %w", err)
+	}
+	if active && runID != stoppedRunID {
+		return fmt.Errorf("run %d is active on the engine", runID)
+	}
+	return nil
+}
+
+// stopReportedRun stops runID, which the engine just reported as active.
+func (c *SptAPIClient) stopReportedRun(ctx context.Context, runID int64) (int64, error) {
 	logging.LogInfo("portcheck", "stopping the active run", "url", c.BaseURL, "run_id", runID)
 	stopped, err := c.StopRun(ctx, runID)
 	if err != nil {

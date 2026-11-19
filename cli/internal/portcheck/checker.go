@@ -7,12 +7,14 @@ package portcheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -105,6 +107,34 @@ func (p *PortChecker) IsPortInUse() bool {
 	_ = conn.Close()
 	logging.LogDebug("portcheck", "port is in use", "address", address)
 	return true
+}
+
+// IsPortHeld reports whether something still holds the port, on any local
+// address. A failed connection alone does not show that the port is free: a
+// listener with a full accept queue does not answer, and one bound to another
+// address refuses. So it first tries to bind the port, for an instant, and only
+// a connection refusal after that counts as free.
+func (p *PortChecker) IsPortHeld() bool {
+	listener, err := net.Listen("tcp", net.JoinHostPort("", p.Port))
+	if err == nil {
+		_ = listener.Close()
+	} else if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(p.Host, p.Port), p.ConnectTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return true
+	}
+	return dialFailureMeansHeld(err)
+}
+
+// dialFailureMeansHeld reports whether a failed connection suggests a listener
+// that did not answer, rather than no listener.
+func dialFailureMeansHeld(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // CheckService performs comprehensive service detection on the port

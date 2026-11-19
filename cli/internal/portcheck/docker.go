@@ -24,6 +24,7 @@ type dockerAPI interface {
 	ContainerStop(ctx context.Context, containerID string, options containertypes.StopOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options containertypes.RemoveOptions) error
 	ContainerInspect(ctx context.Context, containerID string) (containertypes.InspectResponse, error)
+	DaemonHost() string
 	Close() error
 }
 
@@ -76,6 +77,14 @@ func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port
 
 	logging.LogDebug("portcheck", "no containers found using port", "port", port)
 	return nil, nil
+}
+
+// DaemonIsLocal reports whether the Docker daemon is reached through a local
+// socket. A daemon reached over TCP or SSH, even through a forwarded local port,
+// may run on another host, so its host network need not be this one.
+func (d *DockerContainerFinder) DaemonIsLocal() bool {
+	host := d.client.DaemonHost()
+	return strings.HasPrefix(host, "unix://") || strings.HasPrefix(host, "npipe://")
 }
 
 // FindHostNetworkEngine finds the SPT-managed node container that serves the API

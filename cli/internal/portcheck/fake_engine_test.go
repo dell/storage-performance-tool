@@ -35,6 +35,8 @@ type fakeEngine struct {
 	onDelete func(engine *fakeEngine, w http.ResponseWriter)
 	// shutdownStatus, when non-zero, replaces the 202 answer of POST /shutdown.
 	shutdownStatus int
+	// onHead, when set, runs before HEAD /run is answered.
+	onHead func(engine *fakeEngine)
 	// worker makes /status answer IDLE while HEAD /run reports the run, as a
 	// worker engine of a distributed run does.
 	worker bool
@@ -63,6 +65,9 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"state":"RUNNING","run_id":%d}`, e.runID)
 	case r.URL.Path == "/run" && r.Method == http.MethodHead:
+		if e.onHead != nil {
+			e.onHead(e)
+		}
 		if e.runID == 0 {
 			w.WriteHeader(http.StatusNoContent)
 			return
