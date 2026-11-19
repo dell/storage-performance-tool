@@ -28,7 +28,10 @@ objects/files in the unlimited manner (infinitely either using time limit).
 
 1. Recycle the load operations on the items.
 2. Sustain the initial items input order.
-3. Respect the operation weight in case of the weighted load.
+3. Respect the operation weight in case of the weighted load. The weight
+    limits what a context may offer; it does not by itself set the achieved
+    mix (see the
+    [weighted load step](../../../../../../extensions/load-steps/weighted/README.md#when-the-mix-follows-the-weights)).
 4. Respect the rate limit if configured.
 5. Output only the latest items state.
 
