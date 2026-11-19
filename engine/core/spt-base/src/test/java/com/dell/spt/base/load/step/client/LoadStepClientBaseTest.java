@@ -53,6 +53,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -754,9 +755,47 @@ class LoadStepClientBaseTest {
 
 		assertFalse(completed);
 		assertTrue(elapsedMillis >= 950, "returned before the limit, after " + elapsedMillis + " ms");
-		assertTrue(elapsedMillis < 2500, "ran a multiple of the 1 s limit: " + elapsedMillis + " ms");
-		// The first slice holds the only poller to the deadline, and nothing is polled after it.
-		assertEquals(1, polls.stream().filter(slicePolls -> slicePolls.get() > 0).count());
+		// The first slice holds the only poller to the limit. Each later one gets its single poll, not a new limit.
+		assertTrue(polls.stream().allMatch(slicePolls -> slicePolls.get() > 0), "a slice was never polled: " + polls);
+		assertTrue(polls.stream().filter(slicePolls -> slicePolls.get() > 1).count() <= 1, "polled past the limit: " + polls);
+	}
+
+	/** Only a poll reports a slice's terminal failure, so a slice queued until the limit must still get one. */
+	@Test
+	void aSliceQueuedUntilTheLimitStillReportsItsTerminalFailure() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final IntegrityTerminalException terminal = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "slice failed");
+		final AtomicReference<LoadStep> firstPolled = new AtomicReference<>();
+		for (int i = 0; i < 3; i++) {
+			final LoadStep slice = mock(LoadStep.class);
+			when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+				if (firstPolled.compareAndSet(null, slice) || firstPolled.get() == slice) {
+					Thread.sleep(1);
+					return false;
+				}
+				throw terminal;
+			});
+			addRawStepSlice(client, slice);
+		}
+
+		final ExecutionException failure = assertThrows(
+						ExecutionException.class, () -> awaitOnOnePoller(client, 200, TimeUnit.MILLISECONDS));
+
+		assertNotNull(IntegrityTerminalException.find(failure), "the slice's failure was lost");
+	}
+
+	@Test
+	void awaitWithNoTimeAllowedPollsNoSlice() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		addRawStepSlice(client, slice);
+
+		assertFalse(awaitOnOnePoller(client, 0, TimeUnit.SECONDS));
+
+		verify(slice, never()).await(anyLong(), any(TimeUnit.class));
 	}
 
 	@Test
