@@ -1,6 +1,5 @@
 package com.dell.spt.load.step.pipeline;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,7 +28,10 @@ import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
-/** A context whose init fails closes its own driver; the contexts before it stay with the step. */
+/**
+ * A context whose init fails closes its own driver, and the contexts built before it, before the
+ * step itself is closed; the step's close then finds them closed.
+ */
 @SuppressWarnings({"rawtypes", "unchecked"
 })
 class PipelineLoadStepLocalFailedInitTest {
@@ -48,7 +50,7 @@ class PipelineLoadStepLocalFailedInitTest {
 	}
 
 	@Test
-	void theContextThatFailsClosesItsDriverAndTheStepClosesTheEarlierOne() throws Exception {
+	void theContextThatFailsClosesItsDriverAndTheEarlierOne() throws Exception {
 		final var baseSchema = SchemaProvider.resolveAndReduce(Constants.APP_NAME, getClass().getClassLoader());
 		final var schema = TreeUtil.reduceForest(List.of(baseSchema, new PipelineLoadStepExtension().schemaProvider().schema()));
 		final Config config;
@@ -68,11 +70,11 @@ class PipelineLoadStepLocalFailedInitTest {
 
 			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
 			assertTrue(drivers.size() == 2, () -> "drivers built: " + drivers.size());
-			assertFalse(drivers.get(0).isClosed(), "the first context owns its driver");
+			assertTrue(drivers.get(0).isClosed(), "a failed init also closes the earlier context");
 			assertTrue(drivers.get(1).isClosed(), "nothing else would close this driver");
 		} finally {
 			step.close();
 		}
-		assertTrue(drivers.get(0).isClosed());
+		assertTrue(drivers.get(0).isClosed(), "the step's close leaves it closed");
 	}
 }
