@@ -5,7 +5,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RunnableScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.ThreadContext;
 
 /**
@@ -36,12 +35,19 @@ public final class RetryDelayScheduler {
 		final Map<String, String> logContext = ThreadContext.getImmutableContext();
 		return EXECUTOR.schedule(
 						() -> {
-							try (final var ctx = CloseableThreadContext.putAll(logContext)) {
-								task.run();
-							}
+							applyLogContext(logContext);
+							task.run();
 						},
 						delayMillis,
 						TimeUnit.MILLISECONDS);
+	}
+
+	/** Consecutive retries of one step usually share a context, so most tasks change nothing here. */
+	private static void applyLogContext(final Map<String, String> logContext) {
+		if (!logContext.equals(ThreadContext.getImmutableContext())) {
+			ThreadContext.clearMap();
+			ThreadContext.putAll(logContext);
+		}
 	}
 
 	/** Whether {@code future} is still waiting in the timer's queue. */
