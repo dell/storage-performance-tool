@@ -300,22 +300,31 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Merges the configurations into a new one that shares no map with them. {@code addBranches} adds
-	 * to the first tree's maps in place, and {@code deepToMap} keeps a map-typed value, such as the
-	 * HTTP headers, by reference, so merging the original trees would change the first configuration.
+	 * Merges the configurations into a new one that shares none of their nested maps. {@code
+	 * addBranches} adds to the first tree's maps in place, and {@code deepToMap} keeps a map-typed
+	 * value, such as the HTTP headers, by reference, so merging the original trees would change the
+	 * first configuration. Lists are still shared, and nothing writes into them.
 	 */
 	static Config merge(final String pathSep, final List<Config> configs) {
 		final var schema = configs.stream()
 						.map(Config::schema)
-						.map(TreeUtil::copyTree)
+						.map(ConfigUtil::copyMaps)
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		final var configTree = configs.stream()
 						.map(Config::deepToMap)
-						.map(TreeUtil::copyTree)
+						.map(ConfigUtil::copyMaps)
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		return new BasicConfig(pathSep, schema, configTree);
+	}
+
+	/** Copies the nested maps. An ordered map stays ordered: headers go out in the order written. */
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> copyMaps(final Map<String, Object> tree) {
+		final Map<String, Object> copy = tree instanceof LinkedHashMap ? new LinkedHashMap<>() : new HashMap<>();
+		tree.forEach((key, value) -> copy.put(key, value instanceof Map ? copyMaps((Map<String, Object>) value) : value));
+		return copy;
 	}
 
 	static void flatten(
