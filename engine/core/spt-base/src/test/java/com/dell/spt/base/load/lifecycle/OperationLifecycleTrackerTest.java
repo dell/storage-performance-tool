@@ -824,6 +824,57 @@ final class OperationLifecycleTrackerTest {
 		assertEquals(List.of(op), observed);
 	}
 
+	/**
+	 * An operation the driver created and queued itself never reaches the observer; the mark lasts
+	 * for its pass only, so a later pass queued as an ordinary operation does.
+	 */
+	@Test
+	void aDriverCreatedOperationLeavesCustodyUnobserved() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final List<DataOperationImpl<DataItemImpl>> observed = new CopyOnWriteArrayList<>();
+		tracker.unattemptedObserver(observed::add);
+		final var child = operation("child");
+		final var generated = operation("generated");
+		assertTrue(tracker.driverCreatedQueued(child));
+		assertTrue(tracker.driverQueued(generated));
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(child));
+		assertEquals(2, tracker.counters().driverQueued(), "both are held in custody");
+
+		assertTrue(tracker.unattempted(child));
+		assertTrue(tracker.unattempted(generated));
+		assertEquals(List.of(generated), observed);
+		assertEquals(2, tracker.counters().unattempted());
+
+		// A new pass of the same operation, queued as an ordinary one, is observed.
+		assertTrue(tracker.driverQueued(child));
+		assertTrue(tracker.unattempted(child));
+		assertEquals(List.of(generated, child), observed);
+	}
+
+	/** The same holds for a compatibility operation, which carries no lifecycle of its own. */
+	@Test
+	void aDriverCreatedCompatibilityOperationLeavesCustodyUnobserved() {
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		final List<Operation<Item>> observed = new CopyOnWriteArrayList<>();
+		tracker.unattemptedObserver(observed::add);
+		@SuppressWarnings("unchecked")
+		final Operation<Item> child = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		assertTrue(tracker.driverCreatedQueued(child));
+		assertTrue(tracker.unattempted(child));
+		assertEquals(List.of(), observed);
+		assertEquals(1, tracker.counters().unattempted());
+	}
+
+	/** Past the dispatch deadline, the driver-created route refuses custody as {@code driverQueued} does. */
+	@Test
+	void theDriverCreatedRouteHonoursTheDispatchDeadline() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		tracker.enforceDispatchDeadline(System.nanoTime() - 1);
+		assertFalse(tracker.driverCreatedQueued(operation("late")));
+		assertTrue(OperationLifecycleTracker.<DataOperationImpl<DataItemImpl>> disabled()
+						.driverCreatedQueued(operation("disabled")));
+	}
+
 	/** The shared disabled tracker keeps no observer, so one step cannot install it for another. */
 	@Test
 	void theDisabledTrackerKeepsNoUnattemptedObserver() throws Exception {

@@ -1311,8 +1311,9 @@ class MixedLoadGeneratorTest {
 	}
 
 	@Test
-	@DisplayName("Neither an unattempted composite nor its parts count out")
-	void anUnattemptedCompositeAndItsPartsStayCounted() throws Exception {
+	@DisplayName("An unsent composite counts out once at stop, its parts never, and one its last result retired not again")
+	@Timeout(30)
+	void anUnattemptedCompositeCountsOutOnceAndItsPartsNever() throws Exception {
 		try (final DataInput dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4KB"), 4, false)) {
 			final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
 			final List<Operation> held = new ArrayList<>();
@@ -1343,29 +1344,94 @@ class MixedLoadGeneratorTest {
 			final int creates = composites.size();
 			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "precondition");
 
-			// The first composite started: its parts were queued, then taken back unsent.
+			// The first composite started: its parts were queued, then taken back unsent. A part is
+			// never counted out, whether the driver queued it as its own (as the cooperative base
+			// does) or not.
 			final CompositeOperation started = (CompositeOperation) composites.get(0);
 			assertTrue(lifecycle.dispatched(started));
-			for (final Object part : started.subOperations()) {
+			final List<?> parts = started.subOperations();
+			for (int i = 0; i < parts.size(); i++) {
+				final Operation part = (Operation) parts.get(i);
 				assertTrue(part instanceof PartialOperation);
-				assertTrue(lifecycle.driverQueued((Operation) part));
-				assertTrue(lifecycle.unattempted((Operation) part));
+				assertTrue(i % 2 == 0 ? lifecycle.driverCreatedQueued(part) : lifecycle.driverQueued(part));
+				assertTrue(lifecycle.unattempted(part));
 			}
 			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "unattempted parts change nothing");
 
-			// The second never started. It stays counted, as before.
+			// The second never started and published no result: it counts out once.
 			final Operation neverStarted = composites.get(1);
 			assertTrue(lifecycle.unattempted(neverStarted));
 			assertFalse(lifecycle.unattempted(neverStarted));
-			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "no composite counted out");
+			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "an unsent composite counted out once");
 
-			// The result wrapper counts a composite out at its first result; one left unsent
-			// after that is not counted out a second time, which would hide another CREATE.
+			// The third published its first result, which the result wrapper does not retire, and was
+			// queued again for its parts: taken back unsent, it counts out once.
 			final Operation kickedOff = composites.get(2);
-			gen.onOperationCompleted(kickedOff);
+			kickedOff.status(Operation.Status.SUCC);
+			assertFalse(MixedLoadStepLocal.endsOperation(kickedOff, true), "its first result does not end it");
+			MixedLoadStepLocal.retire(gen, kickedOff, true);
+			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "its first result retired nothing");
+			assertTrue(lifecycle.dispatched(kickedOff));
+			assertTrue(lifecycle.completionStarted(kickedOff));
+			assertTrue(lifecycle.terminal(kickedOff, Operation.Status.SUCC));
+			assertTrue(lifecycle.driverQueued(kickedOff));
 			assertTrue(lifecycle.unattempted(kickedOff));
-			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "counted out once, by its result");
+			assertEquals(creates - 2, gen.inFlightCount(OpType.CREATE), "counted out once, at the stop");
+
+			// A composite whose last result retired it is terminal: the stop does not settle it, so it
+			// does not count out again.
+			if (composites.size() > 3) {
+				final Operation finished = composites.get(3);
+				assertTrue(lifecycle.dispatched(finished));
+				assertTrue(lifecycle.completionStarted(finished));
+				finished.status(Operation.Status.RESP_FAIL_CLIENT);
+				MixedLoadStepLocal.retire(gen, finished, true);
+				assertTrue(lifecycle.terminal(finished, Operation.Status.RESP_FAIL_CLIENT));
+				assertFalse(lifecycle.unattempted(finished));
+				assertEquals(creates - 3, gen.inFlightCount(OpType.CREATE), "retired once, by its last result");
+			}
 		}
+	}
+
+	@Test
+	@DisplayName("An operation the driver created and queued itself does not count out when it is unattempted")
+	@Timeout(30)
+	void aDriverCreatedOperationDoesNotCountOutWhenUnattempted() throws Exception {
+		final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+		final List<Operation> held = new ArrayList<>();
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				assertTrue(lifecycle.driverQueued(op));
+				held.add(op);
+				return true;
+			}
+		};
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.STAT, 50);
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.STAT, testBuilder(OpType.STAT, null));
+		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
+						new PoolItemInput<>(makeItems(10)), builders, driver, 1_000, mockNewItemSupplier());
+		gen.operationLifecycle(lifecycle);
+		dispatch(gen, 20);
+		final List<Operation> reads = held.stream().filter(op -> op.type() == OpType.READ).toList();
+		final int count = reads.size();
+		assertTrue(count >= 2, "precondition: READs were dispatched");
+		assertEquals(count, gen.inFlightCount(OpType.READ), "precondition");
+
+		// An ordinary READ the driver made itself, as an extension's child of a composite: the
+		// generator never counted it in, so leaving custody unsent must not count anything out.
+		final Operation child = new OperationImpl<>(0, OpType.READ, new ItemImpl("child"), null, "/bucket", null);
+		assertTrue(lifecycle.driverCreatedQueued(child));
+		assertTrue(lifecycle.unattempted(child));
+		assertEquals(count, gen.inFlightCount(OpType.READ), "the driver's own READ counted nothing out");
+
+		// The generator's own unsent READ still counts out.
+		assertTrue(lifecycle.unattempted(reads.get(0)));
+		assertEquals(count - 1, gen.inFlightCount(OpType.READ), "the generator's unsent READ counted out");
 	}
 
 	private static long count(final List<Operation> ops, final OpType type) {

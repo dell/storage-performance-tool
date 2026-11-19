@@ -7,7 +7,6 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
-import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -388,13 +387,17 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Counts out an operation the driver accepted but never sent, which publishes no result at
-	 * stop. A part of a composite was never counted in, so it never counts out. A composite is
-	 * left counted, as before: the result wrapper may already have counted it out at its first
-	 * result, and counting it out again would hide another operation of its type. Runs inside
+	 * stop. The tracker calls it only for an operation that entered the driver's custody as one
+	 * the generator dispatched, not one the driver created itself ({@code
+	 * OperationLifecycleTracker.driverCreatedQueued}), so it debits only operations the generator
+	 * counted in. A part was never counted in either, so it never counts out, from whatever route.
+	 * A composite counts out here once: the result wrapper retires a composite only at its last
+	 * result, so an unfinished one is still counted when the stop settles it, and a composite that
+	 * published its last result is terminal and is not settled unattempted after it. Runs inside
 	 * the tracker's unattempted transition, so it must stay bounded and non-throwing.
 	 */
 	void onOperationUnattempted(final O op) {
-		if (!(op instanceof PartialOperation) && !(op instanceof CompositeOperation)) {
+		if (!(op instanceof PartialOperation)) {
 			onOperationCompleted(op);
 		}
 	}

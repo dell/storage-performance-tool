@@ -21,7 +21,9 @@ import com.dell.spt.base.item.naming.ItemNameInputFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.logging.LogUtil;
@@ -375,23 +377,23 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// ── 14b. Wrap the driver result output to release generator permits ──
 		// The LoadStepContextImpl constructor sets itself as the driver's
 		// operationResultOutput.  We replace it with a thin wrapper that
-		// releases one MixedLoadGenerator concurrency permit for every
-		// completed operation (regardless of status), then delegates to the
-		// original step context.  This prevents the generator from flooding
-		// the driver's input queue.
+		// retires each operation the generator dispatched once, at its last
+		// result: it counts the operation out of flight and releases one
+		// MixedLoadGenerator concurrency permit (see endsOperation), then
+		// delegates every result to the original step context unchanged.
+		// This prevents the generator from flooding the driver's input queue.
+		final boolean compositesInParts = compositeResults == CompositeResults.IN_PARTS;
 		final Output resultOutput = new Output() {
 			@Override
 			public boolean put(final Object op) {
-				generator.onOperationCompleted((Operation) op);
-				generator.releasePermit();
+				retire(generator, (Operation) op, compositesInParts);
 				return stepCtx.put((Operation) op);
 			}
 
 			@Override
 			public int put(final List ops, final int from, final int to) {
 				for (int i = from; i < to; i++) {
-					generator.onOperationCompleted((Operation) ops.get(i));
-					generator.releasePermit();
+					retire(generator, (Operation) ops.get(i), compositesInParts);
 				}
 				return stepCtx.put((List) ops, from, to);
 			}
@@ -489,6 +491,62 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 				LogUtil.exception(Level.ERROR, e, "Failed to initialize timing metrics for mixed generator");
 			}
 		}
+	}
+
+	/**
+	 * Retires {@code op} on the generator, counting it out of flight and releasing its concurrency
+	 * permit, when {@code op} is the last result of an operation the generator dispatched; see
+	 * {@link #endsOperation}. Both of the result wrapper's {@code put} methods call it, once per
+	 * result, before the step context sees the result.
+	 */
+	static void retire(final MixedLoadGenerator generator, final Operation op, final boolean compositesInParts) {
+		if (endsOperation(op, compositesInParts)) {
+			generator.onOperationCompleted(op);
+			generator.releasePermit();
+		}
+	}
+
+	/**
+	 * Whether {@code op} is the last result of an operation the generator dispatched, which then
+	 * leaves the generator's in-flight count and returns its permit. A part's result never is: the
+	 * driver creates parts, and the generator never counted one in. An ordinary operation's result
+	 * always is, whatever its status: the step context, not this, decides whether a result is
+	 * counted, and an {@code INTERRUPTED} result, which it does not count, still ends its operation.
+	 *
+	 * <p>A composite (multipart) operation on a driver that publishes it in parts
+	 * ({@link CompositeResults#IN_PARTS}, every cooperative driver) has several results: its first
+	 * pass (a multipart upload's initiation, or a split read's kickoff), each part attempt, and its
+	 * finalization. Only the finalization, or a result after which the driver sends nothing more for
+	 * it, ends it. A successful, unfinished CREATE or READ composite has parts to come. Every other
+	 * composite result ends it: a finished one ({@link CompositeOperation#allSubOperationsDone()}),
+	 * and an unfinished one whose status is not {@code SUCC}, a failure, {@code INTERRUPTED} or
+	 * {@code PENDING}, after which the cooperative base expands nothing. That is wider than the
+	 * clause {@code LoadStepContextImpl.put} uses to count a result: it counts an unfinished
+	 * composite only when it failed, but an unfinished {@code INTERRUPTED} one still ends its
+	 * operation here. A composite of another type has one result.
+	 *
+	 * <p>A known limit: an upload's abort that a driver leaves an unfinished success, with a part
+	 * still in flight, looks like an initiation, and the cooperative base never finalizes that
+	 * upload, so it keeps its permit and its in-flight count to the step's end. The {@code s3} and
+	 * {@code s3-aws} drivers end an abort with the failure of the part that caused it, which retires
+	 * it; the cooperative mock and {@code fs} do not.
+	 *
+	 * <p>On a driver that publishes a composite as one result ({@link CompositeResults#ONE_RESULT},
+	 * the dummy driver), or does not say ({@link CompositeResults#UNDECLARED}), each composite
+	 * result ends its operation, as every result did before.
+	 */
+	static boolean endsOperation(final Operation<?> op, final boolean compositesInParts) {
+		if (op instanceof PartialOperation) {
+			return false;
+		}
+		if (compositesInParts && op instanceof CompositeOperation<?> composite) {
+			if (composite.allSubOperationsDone() || op.status() != Operation.Status.SUCC) {
+				return true;
+			}
+			final OpType type = op.type();
+			return type != OpType.CREATE && type != OpType.READ;
+		}
+		return true;
 	}
 
 	// ── Helpers ────────────────────────────────────────────────────────────────

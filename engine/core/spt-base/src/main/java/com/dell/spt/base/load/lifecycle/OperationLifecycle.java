@@ -16,6 +16,10 @@ public final class OperationLifecycle {
 	private final boolean tracked;
 	private final AtomicReference<OperationLifecycleState> state = new AtomicReference<>(OperationLifecycleState.NEW);
 	private boolean explicitDispatch;
+	// Written and first read under this lifecycle's monitor, which the tracker holds for each of its
+	// transitions: whether the driver created the operation of this pass, see
+	// OperationLifecycleTracker.driverCreatedQueued.
+	private boolean driverCreated;
 
 	/** Creates an independently tracked lifecycle in the {@link OperationLifecycleState#NEW} state. */
 	public OperationLifecycle() {
@@ -93,6 +97,14 @@ public final class OperationLifecycle {
 		return (current == OperationLifecycleState.DRIVER_QUEUED
 						|| current == OperationLifecycleState.DISPATCHED)
 						&& state.compareAndSet(current, OperationLifecycleState.TERMINAL);
+	}
+
+	void markDriverCreated() {
+		driverCreated = true;
+	}
+
+	boolean isDriverCreated() {
+		return driverCreated;
 	}
 
 	boolean unattempted() {
