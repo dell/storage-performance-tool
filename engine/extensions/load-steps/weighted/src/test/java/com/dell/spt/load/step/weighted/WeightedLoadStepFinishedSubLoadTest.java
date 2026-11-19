@@ -111,6 +111,27 @@ class WeightedLoadStepFinishedSubLoadTest {
 		assertEquals(List.of(100L), successCounts(OpType.CREATE));
 	}
 
+	/**
+	 * A recycling sub-load capped below its share stops partway through a weight cycle, and the other
+	 * sub-load, which spends its whole share every cycle, still reaches its count.
+	 */
+	@Test
+	void aRecyclingSubLoadCappedPartwayThroughItsShareLetsTheOtherFinish() throws Exception {
+		run(
+						Map.of(
+										"item", Map.of("input", Map.of("file", items(2).toString())),
+										"load", Map.of("op", Map.of(
+														"type", "read",
+														"weight", 2,
+														"recycle", Map.of("mode", true),
+														"limit", Map.of("count", 3L)))),
+						Map.of("load", Map.of(
+										"batch", Map.of("size", 1),
+										"op", Map.of("type", "create", "weight", 1024, "limit", Map.of("count", 2049L)))));
+		assertEquals(List.of(3L), successCounts(OpType.READ));
+		assertEquals(List.of(2049L), successCounts(OpType.CREATE));
+	}
+
 	private void run(final Map<String, Object> first, final Map<String, Object> second, final Map<String, Object> third) {
 		assertTimeoutPreemptively(RUN_TIMEOUT, () -> new WeightedLoadStepClient(config, extensions(), null, metrics)
 						.append(first)
