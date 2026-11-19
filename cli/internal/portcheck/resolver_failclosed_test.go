@@ -27,11 +27,7 @@ func TestForceLeavesAContainerOnAnotherAddress(t *testing.T) {
 			name = "force"
 		}
 		t.Run(name, func(t *testing.T) {
-			engine := newFakeEngine(t, 41)
-			engine.onDelete = func(e *fakeEngine, w http.ResponseWriter) {
-				e.runID = 42
-				w.WriteHeader(http.StatusNotFound)
-			}
+			engine := failingEngine(t)
 			api := fakeDockerWith(publishedEngine(t, "different-spt-engine", "127.0.0.2", engine.port()))
 			resolver := engine.resolver(force, !force)
 			withDocker(resolver, api)
@@ -42,8 +38,9 @@ func TestForceLeavesAContainerOnAnotherAddress(t *testing.T) {
 				result, _ := resolver.CheckAndResolveConflicts(context.Background())
 				return result
 			})
-			if result.Success || !strings.Contains(result.Message, "No container publishes 127.0.0.1:"+engine.port()) {
-				t.Fatalf("result = %+v, want no container matched", result)
+			if result.Success || !strings.Contains(result.Message, "No container publishes 127.0.0.1:"+engine.port()) ||
+				!strings.Contains(result.Message, "published by different-spt-engine, but on another address") {
+				t.Fatalf("result = %+v, want no container matched and the candidate named", result)
 			}
 			if stopped, removed := api.mutations(); len(stopped) != 0 || len(removed) != 0 {
 				t.Errorf("stopped %v, removed %v; want none", stopped, removed)
@@ -213,7 +210,7 @@ func TestPromptAnswerNeedsTheShownStartTime(t *testing.T) {
 			e.since, e.statusCode = laterStart, http.StatusServiceUnavailable
 		}, "could not be read"},
 		{"status 500", func(e *fakeEngine) { e.statusCode = http.StatusInternalServerError }, "could not be read"},
-		{"status reads the run stopped", func(e *fakeEngine) { e.statusState = "STOPPED" }, "gives no start time"},
+		{"status reads the run stopped", func(e *fakeEngine) { e.statusState = "STOPPED" }, "has ended and its cleanup is still running"},
 		{"status without a start time", func(e *fakeEngine) { e.since = "" }, "gives no start time"},
 		{"status names another run", func(e *fakeEngine) { e.statusRunID = 99 }, "names run 99"},
 	}

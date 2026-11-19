@@ -65,14 +65,10 @@ func withDocker(resolver *ConflictResolver, api *fakeDockerAPI) {
 	resolver.checker.newFinder = func() (*DockerContainerFinder, error) { return newFakeFinder(api), nil }
 }
 
-// When a replacement run keeps the engine up, --force does not remove a container
-// only because it publishes the port: it is not an SPT engine container.
-func TestForceLeavesAnUnrelatedPublisherAfterAReplacementRun(t *testing.T) {
-	engine := newFakeEngine(t, 41)
-	engine.onDelete = func(e *fakeEngine, w http.ResponseWriter) {
-		e.runID = 42
-		w.WriteHeader(http.StatusNotFound)
-	}
+// When the stop fails and the engine stays up, --force does not remove a
+// container only because it publishes the port: it is not an SPT engine container.
+func TestForceLeavesAnUnrelatedPublisherAfterAFailedStop(t *testing.T) {
+	engine := failingEngine(t)
 	api := fakeDockerWith(unrelatedPublisher(t, engine.port()))
 	resolver := engine.resolver(true, false)
 	withDocker(resolver, api)
@@ -276,9 +272,9 @@ func TestNoShutdownWhenALaterRunReusesTheStoppedID(t *testing.T) {
 			if slices.Contains(engine.received(), shutdownRequest) {
 				t.Error("the engine running the later run was shut down")
 			}
-			// Under --force the container may be next, so it is not called left running.
-			if left := strings.Contains(result.Message, "left running"); left == force {
-				t.Errorf("Message = %q; left running stated = %v under force %v", result.Message, left, force)
+			// An identity refusal is final under --force too, so the engine is left running.
+			if !strings.Contains(result.Message, "left running") || !IsRunIdentityRefusal(result.Error) {
+				t.Errorf("result = %+v, want an identity refusal that leaves the engine running", result)
 			}
 		})
 	}

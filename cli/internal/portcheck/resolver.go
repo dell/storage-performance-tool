@@ -147,7 +147,16 @@ func (r *ConflictResolver) CheckAndResolveConflicts(ctx context.Context) (*Resol
 func (r *ConflictResolver) checkService(ctx context.Context) (*ServiceInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, constants.PortConflictDetectionTimeout)
 	defer cancel()
-	return r.checker.CheckService(ctx)
+	info, err := r.checker.CheckService(ctx)
+	if err != nil || !info.IsListening || !info.APIConfirmed || r.dockerFinder == nil {
+		return info, err
+	}
+	// The checker looks for a container only when no SPT API answered. A force
+	// stop of an engine may remove only the container shown, so look for it here.
+	if err := identifyContainer(ctx, r.dockerFinder, r.Port, info); err != nil {
+		logging.LogDebug("portcheck", "failed to find the SPT engine's container", "port", r.Port, "error", err.Error())
+	}
+	return info, nil
 }
 
 // presentConflictAndGetChoice shows conflict info and gets the user's resolution choice.
@@ -245,6 +254,10 @@ func (r *ConflictResolver) displayConflictInfo(info *ServiceInfo) {
 		}
 	}
 
+	if len(info.Publishers) > 1 {
+		fmt.Printf("\nContainers %s all publish the port on the address that answered, so none is shown as its holder\n",
+			strings.Join(info.Publishers, ", "))
+	}
 	if info.Container != nil {
 		fmt.Printf("\nContainer Details:\n")
 		fmt.Printf("  Name: %s\n", info.Container.Name)
@@ -369,8 +382,16 @@ func (r *ConflictResolver) executeForceResolution(ctx context.Context, info *Ser
 		if result.Success || ctx.Err() != nil {
 			return result, nil
 		}
+		// Removing the container would end the run the CLI just refused to touch.
+		if IsRunIdentityRefusal(result.Error) {
+			return r.identityRefusalResult(result, info), nil
+		}
 		// A port that nothing accepts connections on names no holder to remove.
-		if !r.checker.isListening(ctx) && ctx.Err() == nil {
+		listening := r.checker.isListening(ctx)
+		if ctx.Err() != nil {
+			return r.interrupted(ctx, StrategyForceStop, "checking port "+r.Port+" after the graceful stop"), nil
+		}
+		if !listening {
 			return r.nothingListensResult(result), nil
 		}
 
@@ -383,6 +404,22 @@ func (r *ConflictResolver) executeForceResolution(ctx context.Context, info *Ser
 	// Force stop containers or services
 	fmt.Printf("[FORCE] Force stopping service on port %s\n", r.Port)
 	return r.executeForceStop(ctx, info), nil
+}
+
+// identityRefusalResult ends --force when the graceful step refused because the
+// engine's run could not be identified: nothing is removed.
+func (r *ConflictResolver) identityRefusalResult(graceful *ResolutionResult, info *ServiceInfo) *ResolutionResult {
+	advice := "stop the run yourself, then run the command again"
+	if info.Container != nil {
+		advice = fmt.Sprintf("stop the run yourself, or remove the engine's container by name (docker rm -f %s), "+
+			"then run the command again", info.Container.Name)
+	}
+	return &ResolutionResult{
+		Strategy: StrategyForceStop,
+		Success:  false,
+		Message:  fmt.Sprintf("%s. No container was removed: %s", graceful.Message, advice),
+		Error:    graceful.Error,
+	}
 }
 
 // nothingListensResult is the end of --force when the graceful stop failed and
@@ -469,16 +506,13 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	if err != nil {
 		return gracefulStopFailure("Failed to stop the SPT run", err)
 	}
-	fmt.Println(stopMessage(stopped))
 
 	// Shutdown ends whatever runs on the engine, so another run must not be active.
-	if err := client.ConfirmNoOtherRun(ctx, stopped); err != nil {
+	ended, err := client.ConfirmNoOtherRun(ctx, stopped)
+	fmt.Println(stopMessage(stopped, ended))
+	if err != nil {
 		if r.checker.IsPortHeld(ctx) {
-			what := "Did not shut down the SPT engine"
-			if !r.forceMode {
-				what += ", which was left running"
-			}
-			return gracefulStopFailure(what, err)
+			return gracefulStopFailure("Did not shut down the SPT engine, which was left running", err)
 		}
 		return r.waitForPortRelease(ctx, deadline)
 	}
@@ -491,22 +525,30 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	return r.waitForPortRelease(ctx, deadline)
 }
 
-// stopMessage says what the stop did. Only an engine whose /status shows it
-// running or ending the run itself ends the run on a stop. A worker answers the
-// stop and the run goes on from its entry node; an entry engine whose status a
-// refused POST /run overwrote looks the same, so the message holds for both.
-func stopMessage(stopped RunExecution) string {
+// stopMessage says what the stop did. ended is what the engine reported after
+// the stop: the run no longer active, or /status naming it in a terminal state.
+// A worker answers the stop and the run goes on from its entry node; an entry
+// engine whose status a refused POST /run overwrote looks the same, so the
+// worker message holds for both.
+func stopMessage(stopped RunExecution, ended bool) string {
 	switch {
 	case stopped.ID == 0:
 		return "No SPT run is active"
-	case stopped.confirmedEntry():
-		return fmt.Sprintf("Stopped SPT run %d", stopped.ID)
-	case stopped.Worker:
+	case stopped.Worker && stopped.Known:
 		return fmt.Sprintf("Asked the engine to stop run %d; its status does not name that run, so this node "+
 			"may be a worker of it, and then its entry node goes on running it", stopped.ID)
-	default:
+	case stopped.Worker:
+		return fmt.Sprintf("Asked the engine to stop run %d; its status could not be read, and when it was shown "+
+			"it did not name that run, so this node may be a worker of it, and then its entry node goes on running it",
+			stopped.ID)
+	case ended:
+		return fmt.Sprintf("Stopped SPT run %d", stopped.ID)
+	case !stopped.Known:
 		return fmt.Sprintf("Asked the engine to stop run %d; its status could not be read, so the CLI "+
 			"cannot confirm that the run stopped", stopped.ID)
+	default:
+		return fmt.Sprintf("Asked the engine to stop run %d; its status does not show that the run ended, so the "+
+			"CLI cannot confirm that it stopped", stopped.ID)
 	}
 }
 
@@ -554,13 +596,19 @@ func (r *ConflictResolver) waitForPortRelease(ctx context.Context, deadline time
 		}
 		if !r.clock.Now().Before(deadline) {
 			reason, err := "its api.linger.sec may be longer", error(nil)
-			if !r.checker.isListening(ctx) && ctx.Err() == nil {
+			listening := r.checker.isListening(ctx)
+			if ctx.Err() != nil {
+				return gracefulStopFailure(
+					fmt.Sprintf("Stopped waiting for port %s to close", r.Port), ctx.Err())
+			}
+			if !listening {
 				reason, err = "nothing accepts connections on it, but it cannot be bound yet", errPortNotBindable
 			}
 			message := fmt.Sprintf("Port %s is still in use %s after the SPT engine was asked to stop; %s",
 				r.Port, constants.PortConflictGracefulStopTimeout, reason)
 			if !r.forceMode {
-				message += ". Retry later, or use --force to remove its container"
+				message += ". Retry later. --force removes the engine's container only if it publishes the port; " +
+					"an engine on host networking is not removed"
 			}
 			return &ResolutionResult{Strategy: StrategyGracefulStop, Success: false, Message: message, Error: err}
 		}
@@ -603,6 +651,9 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 
 	fmt.Printf("Force stopping container: %s (%s)\n", target.Name, containerutil.ShortID(target.ID))
 	if err := r.dockerFinder.ForceStopAndRemoveContainer(ctx, target.ID); err != nil {
+		if ctx.Err() != nil {
+			return r.interrupted(ctx, StrategyForceStop, "removing container "+target.Name)
+		}
 		return &ResolutionResult{
 			Strategy: StrategyForceStop,
 			Success:  false,
@@ -624,13 +675,15 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 	return r.verifyResolution(ctx, StrategyForceStop)
 }
 
-// findForceStopTarget returns the one container shown to hold the port, or the
-// refusal. Only a daemon reached through a local socket can hold this host's
-// ports. The holder must publish the port on a binding that covers the address
-// that accepted the CLI's connection, and be the only container that does; when
-// an SPT engine answers there, it must also be an SPT engine node container. A
-// container on host networking publishes nothing, so nothing shows that it, and
-// not another process, holds the port: it is named, and left running.
+// findForceStopTarget returns the container detection showed as the holder, if
+// it still is, or the refusal. Only a daemon reached through a local socket can
+// hold this host's ports. The address that accepts the CLI's connection must be
+// the one that answered detection. The holder must publish the port on a binding
+// that covers that address, be the only container that does, and be the
+// container shown; when an SPT engine answers there, it must also be an SPT
+// engine node container. A container on host networking publishes nothing, so
+// nothing shows that it, and not another process, holds the port: it is named,
+// and left running.
 func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *ServiceInfo) (*ContainerInfo, *ResolutionResult) {
 	refusal := func(format string, args ...any) *ResolutionResult {
 		return &ResolutionResult{Strategy: StrategyForceStop, Success: false, Message: fmt.Sprintf(format, args...)}
@@ -648,14 +701,25 @@ func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *Servic
 			"hold it; nothing was removed", r.Port)
 	}
 	endpoint := net.JoinHostPort(address.String(), r.Port)
+	if info.Address == nil || !address.Equal(info.Address) {
+		return nil, refusal("The address answering port %s changed since it was shown (%s, now %s); nothing "+
+			"was removed. Run the command again", r.Port, ipOrUnknown(info.Address), address)
+	}
 
 	lookupFailure := func(err error) *ResolutionResult {
+		if ctx.Err() != nil {
+			return r.interrupted(ctx, StrategyForceStop, "finding the container on port "+r.Port)
+		}
 		return &ResolutionResult{
 			Strategy: StrategyForceStop,
 			Success:  false,
 			Message:  fmt.Sprintf("Failed to find containers using port: %s", err.Error()),
 			Error:    err,
 		}
+	}
+	changed := func(now string) *ResolutionResult {
+		return refusal("The container on port %s changed since it was shown (shown: %s; now: %s); nothing was "+
+			"removed. Run the command again", r.Port, containerOrNone(info.Container), now)
 	}
 	publishers, err := r.dockerFinder.FindPublishers(ctx, address, r.Port)
 	if err != nil {
@@ -672,8 +736,12 @@ func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *Servic
 	case len(publishers) == 1 && info.APIConfirmed && !isEngineNodeContainer(publishers[0].Labels):
 		return nil, refusal("Container %s publishes %s but is not an SPT engine container, so it cannot be "+
 			"matched to the SPT engine answering there; it was left running", publishers[0].Name, endpoint)
+	case len(publishers) == 1 && (info.Container == nil || publishers[0].ID != info.Container.ID):
+		return nil, changed(publishers[0].Name)
 	case len(publishers) == 1:
 		return publishers[0], nil
+	case info.Container != nil:
+		return nil, changed("no container publishes " + endpoint)
 	}
 
 	if info.APIConfirmed {
@@ -687,7 +755,35 @@ func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *Servic
 				"remove it by name (docker rm -f %s)", endpoint, candidate.Name, r.Port, candidate.Name)
 		}
 	}
+	others, err := r.dockerFinder.FindPortNumberPublishers(ctx, r.Port)
+	if err != nil {
+		return nil, lookupFailure(err)
+	}
+	if len(others) > 0 {
+		names := make([]string, 0, len(others))
+		for _, c := range others {
+			names = append(names, c.Name)
+		}
+		return nil, refusal("No container publishes %s, so nothing was removed. Port %s is published by %s, but on "+
+			"another address, or with no address given (as Podman's default publish gives), so nothing shows that it "+
+			"holds %s; if it does, remove it by name (docker rm -f <name>)",
+			endpoint, r.Port, strings.Join(names, ", "), endpoint)
+	}
 	return nil, refusal("No container publishes %s - the service may not be containerized; nothing was removed", endpoint)
+}
+
+func ipOrUnknown(ip net.IP) string {
+	if ip == nil {
+		return "none recorded"
+	}
+	return ip.String()
+}
+
+func containerOrNone(c *ContainerInfo) string {
+	if c == nil {
+		return "none"
+	}
+	return c.Name
 }
 
 // executeRetry re-checks port status

@@ -28,18 +28,31 @@ func fullQueueListener(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := raw.Control(func(fd uintptr) { _ = syscall.Listen(int(fd), 0) }); err != nil {
+	var listenErr error
+	if err := raw.Control(func(fd uintptr) { listenErr = syscall.Listen(int(fd), 0) }); err != nil {
 		t.Fatal(err)
 	}
-	address := listener.Addr().String()
-	for range 8 {
-		conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
-		if err != nil {
-			_, port, _ := net.SplitHostPort(address)
-			return port
-		}
-		t.Cleanup(func() { _ = conn.Close() })
+	if listenErr != nil {
+		t.Fatalf("shrink the accept queue: %v", listenErr)
 	}
+	address := listener.Addr().String()
+	const attempts = 8
+	for range attempts {
+		conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
+		if err == nil {
+			t.Cleanup(func() { _ = conn.Close() })
+			continue
+		}
+		// Only a dial that waited out its timeout shows a full queue; a refusal
+		// or any other error would let the probe under test end at once.
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("filling the accept queue: %v", err)
+		}
+		_, port, _ := net.SplitHostPort(address)
+		return port
+	}
+	t.Logf("the accept queue of %s took %d connections without filling", address, attempts)
 	t.Skip("the accept queue never filled on this host")
 	return ""
 }
@@ -61,9 +74,16 @@ func cancelSoon(t *testing.T) context.Context {
 	return ctx
 }
 
-func assertPrompt(t *testing.T, start time.Time) {
+// assertEndedByCancellation checks that the probe waited for the cancellation at
+// 100ms and ended soon after it. The upper bound only separates a dial that the
+// context ended from one that waited out its minute-long timeout.
+func assertEndedByCancellation(t *testing.T, ctx context.Context, start time.Time) {
 	t.Helper()
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
+	elapsed := time.Since(start)
+	if ctx.Err() == nil || elapsed < 100*time.Millisecond {
+		t.Errorf("ended after %s with context error %v, before the cancellation at 100ms", elapsed, ctx.Err())
+	}
+	if elapsed > 15*time.Second {
 		t.Errorf("took %s after a cancellation at 100ms", elapsed)
 	}
 }
@@ -73,8 +93,10 @@ func TestDetectionDialEndsWithTheContext(t *testing.T) {
 	checker := slowDialChecker(fullQueueListener(t))
 	ctx := cancelSoon(t)
 	start := time.Now()
-	within(t, func() bool { return checker.isListening(ctx) })
-	assertPrompt(t, start)
+	if within(t, func() bool { return checker.isListening(ctx) }) {
+		t.Error("isListening() = true; the dial should have been waiting on the full queue")
+	}
+	assertEndedByCancellation(t, ctx, start)
 }
 
 // The connection in IsPortHeld, which follows a bind that settles nothing (as on
@@ -88,7 +110,7 @@ func TestIsPortHeldDialEndsWithTheContext(t *testing.T) {
 	if !within(t, func() bool { return checker.IsPortHeld(ctx) }) {
 		t.Error("IsPortHeld() = false for a probe the context ended")
 	}
-	assertPrompt(t, start)
+	assertEndedByCancellation(t, ctx, start)
 }
 
 // Ctrl-C during the check after a force stop ends it at once, as an interruption.
@@ -106,5 +128,5 @@ func TestForceVerificationEndsWithTheContext(t *testing.T) {
 		!errors.Is(result.Error, context.Canceled) {
 		t.Fatalf("result = %+v, want the interruption reported", result)
 	}
-	assertPrompt(t, start)
+	assertEndedByCancellation(t, ctx, start)
 }

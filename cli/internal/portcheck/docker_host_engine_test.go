@@ -191,7 +191,7 @@ func TestForceLeavesHostNetworkEngineWhenAnotherServiceHoldsThePort(t *testing.T
 		dockerFinder: newFakeFinder(api), clock: NewFakeClock(),
 	}
 
-	result := resolver.executeForceStop(context.Background(), &ServiceInfo{IsListening: true})
+	result := resolver.executeForceStop(context.Background(), &ServiceInfo{IsListening: true, Address: net.ParseIP("127.0.0.1")})
 	if result.Success || !strings.Contains(result.Message, "No container publishes") || strings.Contains(result.Message, "engine") {
 		t.Fatalf("result = %+v, want no container found", result)
 	}

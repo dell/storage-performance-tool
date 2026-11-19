@@ -52,6 +52,10 @@ type PortChecker struct {
 	// bind tries to bind the port on every address and returns the listener;
 	// nil means net.Listen. Tests supply a bind that fails as it does on Windows.
 	bind func(address string) (net.Listener, error)
+	// dial connects to address for a port probe; nil means a net.Dialer with
+	// ConnectTimeout. Tests supply one for a host name that maps to several
+	// addresses.
+	dial func(ctx context.Context, address string) (net.Conn, error)
 }
 
 // NewPortChecker creates a new port checker with default settings
@@ -110,8 +114,7 @@ func (p *PortChecker) answeringAddress(ctx context.Context) (net.IP, bool) {
 		"address", address,
 		"timeout", p.ConnectTimeout)
 
-	dialer := net.Dialer{Timeout: p.ConnectTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	conn, err := p.dialPort(ctx, address)
 	if err != nil {
 		// Connection failed - port is likely available
 		logging.LogDebug("portcheck", "port appears available",
@@ -129,6 +132,15 @@ func (p *PortChecker) answeringAddress(ctx context.Context) (net.IP, bool) {
 		return nil, true
 	}
 	return remote.IP, true
+}
+
+// dialPort opens a probe connection to address.
+func (p *PortChecker) dialPort(ctx context.Context, address string) (net.Conn, error) {
+	if p.dial != nil {
+		return p.dial(ctx, address)
+	}
+	dialer := net.Dialer{Timeout: p.ConnectTimeout}
+	return dialer.DialContext(ctx, "tcp", address)
 }
 
 // IsPortHeld reports whether something still holds the port, on any local
@@ -150,8 +162,7 @@ func (p *PortChecker) IsPortHeld(ctx context.Context) bool {
 		return true
 	}
 
-	dialer := net.Dialer{Timeout: p.ConnectTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(p.Host, p.Port))
+	conn, err := p.dialPort(ctx, net.JoinHostPort(p.Host, p.Port))
 	if err == nil {
 		_ = conn.Close()
 		return true
@@ -177,12 +188,14 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 	}
 
 	// First check if port is listening
-	if !p.isListening(ctx) {
+	address, listening := p.answeringAddress(ctx)
+	if !listening {
 		logging.LogDebug("portcheck", "port is not in use", "port", p.Port)
 		return info, nil
 	}
 
 	info.IsListening = true
+	info.Address = address
 	logging.LogInfo("portcheck", "port is in use, identifying service", "port", p.Port)
 
 	// Try to identify if it's Spt by making HTTP requests
@@ -470,21 +483,20 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 	}
 	defer func() { _ = dockerFinder.Close() }()
 
-	// Find container using the port
-	container, err := dockerFinder.FindContainerUsingPort(ctx, p.Port)
-	if err != nil {
+	// Find the container whose binding covers the address that answered
+	if err := identifyContainer(ctx, dockerFinder, p.Port, info); err != nil {
 		logging.LogDebug("portcheck", "failed to find Docker container using port",
 			"port", p.Port,
 			"error", err.Error())
 		return info // Return original info if Docker search fails
 	}
 
+	container := info.Container
 	if container == nil {
 		logging.LogDebug("portcheck", "no Docker container found using port", "port", p.Port)
 		return info
 	}
 
-	info.Container = container
 	logging.LogInfo("portcheck", "found Docker container using port",
 		"port", p.Port, "container_name", container.Name, "image", container.Image)
 
@@ -501,6 +513,28 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 	}
 
 	return info
+}
+
+// identifyContainer sets info.Container to the one running container whose
+// published binding covers the address that answered detection, by the rule a
+// force stop applies (see FindPublishers), so the container shown is the one a
+// force stop would remove. When more than one covers it, none is shown and
+// info.Publishers names them. When the SPT API answered, only an SPT engine node
+// container is shown: another publisher cannot be matched to that engine.
+func identifyContainer(ctx context.Context, finder *DockerContainerFinder, port string, info *ServiceInfo) error {
+	publishers, err := finder.FindPublishers(ctx, info.Address, port)
+	if err != nil {
+		return err
+	}
+	switch {
+	case len(publishers) > 1:
+		for _, c := range publishers {
+			info.Publishers = append(info.Publishers, c.Name)
+		}
+	case len(publishers) == 1 && (!info.APIConfirmed || isEngineNodeContainer(publishers[0].Labels)):
+		info.Container = publishers[0]
+	}
+	return nil
 }
 
 // isSptBadRequestError checks if a 400 Bad Request error is from Spt

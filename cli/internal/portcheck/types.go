@@ -6,6 +6,7 @@ package portcheck
 
 import (
 	"fmt"
+	"net"
 	"time"
 )
 
@@ -17,8 +18,17 @@ type ServiceInfo struct {
 	// may rest on a container's name, image or labels, which is enough to
 	// describe the holder but not to send it API requests that change anything.
 	APIConfirmed bool
-	Status       *SptStatus     // Spt status if detected (nil if not Spt)
-	Container    *ContainerInfo // Docker container info if found (nil if none)
+	Status       *SptStatus // Spt status if detected (nil if not Spt)
+	// Container is the one container whose published binding covers Address
+	// (nil if none, or if more than one does). It is the only container that a
+	// force stop of this conflict may remove.
+	Container *ContainerInfo
+	// Address is the address that accepted detection's connection. A force stop
+	// acts only while the same address answers.
+	Address net.IP
+	// Publishers names the containers whose bindings cover Address when there is
+	// more than one, so none of them is shown as the holder.
+	Publishers []string
 }
 
 // SptStatus represents the status of a running Spt test

@@ -135,6 +135,24 @@ func (d *DockerContainerFinder) FindPublishers(ctx context.Context, ip net.IP, p
 	return publishers, nil
 }
 
+// FindPortNumberPublishers returns every running container that publishes TCP
+// port, whatever the address of the binding, or with none given. It only names
+// candidates in a message: a binding that does not cover the address that
+// answered does not show that its container holds the port.
+func (d *DockerContainerFinder) FindPortNumberPublishers(ctx context.Context, port string) ([]*ContainerInfo, error) {
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+	var publishers []*ContainerInfo
+	for _, c := range containers {
+		if containerHoldsPorts(c) && d.containerUsesPort(c, port) {
+			publishers = append(publishers, d.containerToInfo(c))
+		}
+	}
+	return publishers, nil
+}
+
 // bindingCovers reports whether a published binding on bindIP accepts a
 // connection to ip.
 func bindingCovers(bindIP string, ip net.IP) bool {

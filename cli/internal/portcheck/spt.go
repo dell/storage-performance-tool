@@ -7,6 +7,7 @@ package portcheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -454,10 +455,21 @@ type RunExecution struct {
 	statusRunID int64
 }
 
-// confirmedEntry reports whether /status showed this engine running or ending
-// the run itself, so a stop it accepted is a stop of the run.
-func (e RunExecution) confirmedEntry() bool {
-	return e.Known && !e.Worker
+// RunIdentityError is a refusal because the active run cannot be shown to be the
+// run expected: the one shown, or the one just stopped. The run is left alone,
+// and so is anything that would end it, such as its container.
+type RunIdentityError struct{ reason string }
+
+func (e *RunIdentityError) Error() string { return e.reason }
+
+func identityRefusal(format string, args ...any) error {
+	return &RunIdentityError{reason: fmt.Sprintf(format, args...)}
+}
+
+// IsRunIdentityRefusal reports whether err is, or wraps, a RunIdentityError.
+func IsRunIdentityRefusal(err error) bool {
+	var identity *RunIdentityError
+	return errors.As(err, &identity)
 }
 
 func executionFromStatus(runID int64, status terminalStatus) RunExecution {
@@ -507,6 +519,8 @@ func unconfirmedReason(expected, now RunExecution, allowEnded bool) string {
 		return fmt.Sprintf("the engine's /status names run %d, not run %d", now.statusRunID, now.ID)
 	case now.Terminal && allowEnded:
 		return ""
+	case now.Terminal:
+		return fmt.Sprintf("run %d has ended and its cleanup is still running; try again shortly", now.ID)
 	case now.Since == "":
 		return fmt.Sprintf("the engine's /status gives no start time for run %d", now.ID)
 	case now.Since != expected.Since:
@@ -520,8 +534,10 @@ func unconfirmedReason(expected, now RunExecution, allowEnded bool) string {
 // over between that read and the stop, the stop does not reach it, and the
 // replacement is returned as an error. shown is the run detection reported: when
 // /status cannot be read now and the active run has its ID, the run keeps
-// detection's worker mark, so a worker's stop is not reported as the run's end.
-// A run whose /status cannot be read is not shut down afterwards (see
+// detection's start time and worker mark, so the check before the shutdown
+// still tells a later run with the same ID apart, and a worker's stop is not
+// reported as the run's end. A run stopped with neither a /status nor a start
+// time from detection is not shut down while it is still active (see
 // ConfirmNoOtherRun).
 func (c *SptAPIClient) StopActiveRun(ctx context.Context, shown RunExecution) (RunExecution, error) {
 	runID, active, err := c.activeRunID(ctx)
@@ -533,7 +549,7 @@ func (c *SptAPIClient) StopActiveRun(ctx context.Context, shown RunExecution) (R
 	}
 	now := c.execution(ctx, runID)
 	if !now.Known && runID == shown.ID {
-		now.Worker = shown.Worker
+		now.Since, now.Worker = shown.Since, shown.Worker
 	}
 	return c.stopReportedRun(ctx, now)
 }
@@ -552,13 +568,13 @@ func (c *SptAPIClient) StopShownRun(ctx context.Context, shown RunExecution) (Ru
 	}
 	if runID != shown.ID {
 		if shown.ID == 0 {
-			return RunExecution{}, fmt.Errorf("run %d started after the engine was shown without one; it was not stopped", runID)
+			return RunExecution{}, identityRefusal("run %d started after the engine was shown without one; it was not stopped", runID)
 		}
-		return RunExecution{}, fmt.Errorf("run %d replaced the run shown, %d; it was not stopped", runID, shown.ID)
+		return RunExecution{}, identityRefusal("run %d replaced the run shown, %d; it was not stopped", runID, shown.ID)
 	}
 	now := c.execution(ctx, runID)
 	if reason := unconfirmedReason(shown, now, false); reason != "" {
-		return RunExecution{}, fmt.Errorf("run %d cannot be shown to be the run shown: %s; it was not stopped. "+
+		return RunExecution{}, identityRefusal("run %d cannot be shown to be the run shown: %s; it was not stopped. "+
 			"Retry, or stop the run yourself", runID, reason)
 	}
 	return c.stopReportedRun(ctx, now)
@@ -567,25 +583,32 @@ func (c *SptAPIClient) StopShownRun(ctx context.Context, shown RunExecution) (Ru
 // ConfirmNoOtherRun returns an error unless the only run active is stopped, or
 // none is. A stopped run may stay active until its cleanup returns, so it is
 // allowed, in a terminal state. A run with another ID, a later run with the same
-// ID, and a run that cannot be shown to be stopped (see unconfirmedReason) are
-// errors. The engine's shutdown takes no run ID: a run that starts after this
-// check is not seen, nor is a later run that reuses the ID on an engine without
-// start times.
-func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stopped RunExecution) error {
+// ID, a run that cannot be shown to be stopped (see unconfirmedReason), a run
+// stopped with nothing but its ID known, and an active run that cannot be read
+// are errors, all of them a RunIdentityError. ended reports that the stopped run
+// is no longer active, or that /status shows it in a terminal state. The
+// engine's shutdown takes no run ID: a run that starts after this check is not
+// seen, nor is a later run that reuses the ID on an engine without start times.
+func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stopped RunExecution) (ended bool, err error) {
 	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
-		return fmt.Errorf("re-read the active run: %w", err)
+		return false, identityRefusal("the engine's active run could not be read again (%v), so another run may be active", err)
 	}
 	if !active {
-		return nil
+		return true, nil
 	}
 	if runID != stopped.ID {
-		return fmt.Errorf("run %d is active on the engine", runID)
+		return false, identityRefusal("run %d is active on the engine", runID)
 	}
-	if reason := unconfirmedReason(stopped, c.execution(ctx, runID), true); reason != "" {
-		return fmt.Errorf("run %d is still active and cannot be shown to be the run stopped: %s", runID, reason)
+	if !stopped.Known && stopped.Since == "" {
+		return false, identityRefusal("run %d is still active, and nothing but its ID was known when it was stopped, "+
+			"so it cannot be shown to be the run stopped", runID)
 	}
-	return nil
+	now := c.execution(ctx, runID)
+	if reason := unconfirmedReason(stopped, now, true); reason != "" {
+		return false, identityRefusal("run %d is still active and cannot be shown to be the run stopped: %s", runID, reason)
+	}
+	return now.Known && now.Terminal, nil
 }
 
 // stopReportedRun stops the run the engine just reported as active.
@@ -610,7 +633,7 @@ func (c *SptAPIClient) stopReportedRun(ctx context.Context, execution RunExecuti
 	if currentID == runID {
 		return RunExecution{}, fmt.Errorf("the engine did not accept the stop of its active run %d", runID)
 	}
-	return RunExecution{}, fmt.Errorf("run %d was replaced by run %d, which was not stopped", runID, currentID)
+	return RunExecution{}, identityRefusal("run %d was replaced by run %d, which was not stopped", runID, currentID)
 }
 
 // StopRun asks the engine to stop the run with runID through DELETE /run,

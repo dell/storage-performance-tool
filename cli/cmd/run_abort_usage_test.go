@@ -134,3 +134,26 @@ func TestCheckPortConflictsSetsNoOverallDeadline(t *testing.T) {
 		t.Fatalf("checkPortConflicts() error = %v", err)
 	}
 }
+
+// An interrupted recheck at the conflict prompt says it was interrupted, not that
+// the port is still in use: the probe that was cut short showed nothing.
+func TestCheckPortConflictsReportsAnInterruptedRetry(t *testing.T) {
+	const message = "Interrupted while rechecking port 23999: context canceled"
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{
+			Strategy: portcheck.StrategyRetry,
+			Message:  message,
+			Error:    context.Canceled,
+		}, nil
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 23999, "")
+	err := checkPortConflicts(cmd)
+	if err == nil || err.Error() != message {
+		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
+	}
+}

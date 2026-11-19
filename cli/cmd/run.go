@@ -2220,6 +2220,10 @@ func checkPortConflicts(cmd *cobra.Command) error {
 			return fmt.Errorf("operation cancelled by user")
 
 		case portcheck.StrategyRetry:
+			// An interrupted recheck shows nothing about the port.
+			if errors.Is(result.Error, context.Canceled) || errors.Is(result.Error, context.DeadlineExceeded) {
+				return errors.New(result.Message)
+			}
 			// For retry failures, show retry information
 			if result.RetryAfter > 0 {
 				fmt.Printf("\n⏳ Port %s still in use - you may retry after resolving the conflict\n", sptPort)
