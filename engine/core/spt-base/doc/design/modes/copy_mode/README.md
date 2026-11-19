@@ -65,9 +65,10 @@ A listed item, or an item from an items file written by an `fs` step, is named b
 so it lands under the output path with that full path, as for `s3`: `/src/dir/f0` is copied to
 `/dst/src/dir/f0`. Missing directories under the output path are created.
 
-A listed path covers one directory level: its subdirectories are not copied. A subdirectory entry fails and leaves
-an empty file in its place under the output path, so a later copy of that subdirectory to the same output path
-fails. Copy nested directories deepest first, or to separate output paths.
+A listed path covers the regular files of one directory level. Its subdirectories, and other entries that are not
+regular files, are skipped, and the log notes how many; an entry whose attributes cannot be read is skipped with a
+warning. A symbolic link to a regular file is copied with the target's content. Nested directories are copied with
+one step each.
 
 ### 2.3. HTTP Storage Case
 
