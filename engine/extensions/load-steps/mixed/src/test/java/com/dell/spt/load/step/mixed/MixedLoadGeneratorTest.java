@@ -1311,8 +1311,8 @@ class MixedLoadGeneratorTest {
 	}
 
 	@Test
-	@DisplayName("A part of an unattempted composite does not count out; the composite counts out once")
-	void anUnattemptedCompositeCountsOutOnceAndItsPartsNever() throws Exception {
+	@DisplayName("Neither an unattempted composite nor its parts count out")
+	void anUnattemptedCompositeAndItsPartsStayCounted() throws Exception {
 		try (final DataInput dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4KB"), 4, false)) {
 			final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
 			final List<Operation> held = new ArrayList<>();
@@ -1339,7 +1339,7 @@ class MixedLoadGeneratorTest {
 			gen.operationLifecycle(lifecycle);
 			dispatch(gen, 40);
 			final List<Operation> composites = held.stream().filter(op -> op instanceof CompositeOperation).toList();
-			assertTrue(composites.size() >= 2, "precondition: composites were dispatched");
+			assertTrue(composites.size() >= 3, "precondition: composites were dispatched");
 			final int creates = composites.size();
 			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "precondition");
 
@@ -1353,11 +1353,18 @@ class MixedLoadGeneratorTest {
 			}
 			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "unattempted parts change nothing");
 
-			// The second never started, and counts out once however often it is settled.
+			// The second never started. It stays counted, as before.
 			final Operation neverStarted = composites.get(1);
 			assertTrue(lifecycle.unattempted(neverStarted));
 			assertFalse(lifecycle.unattempted(neverStarted));
-			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "one composite counted out");
+			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "no composite counted out");
+
+			// The result wrapper counts a composite out at its first result; one left unsent
+			// after that is not counted out a second time, which would hide another CREATE.
+			final Operation kickedOff = composites.get(2);
+			gen.onOperationCompleted(kickedOff);
+			assertTrue(lifecycle.unattempted(kickedOff));
+			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "counted out once, by its result");
 		}
 	}
 

@@ -7,6 +7,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -387,11 +388,13 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Counts out an operation the driver accepted but never sent, which publishes no result at
-	 * stop. A part of a composite was never counted in, so only the composite itself counts out.
-	 * Runs inside the tracker's unattempted transition, so it must stay bounded and non-throwing.
+	 * stop. A part of a composite was never counted in, so it never counts out. A composite is
+	 * left counted, as before: the result wrapper may already have counted it out at its first
+	 * result, and counting it out again would hide another operation of its type. Runs inside
+	 * the tracker's unattempted transition, so it must stay bounded and non-throwing.
 	 */
 	void onOperationUnattempted(final O op) {
-		if (!(op instanceof PartialOperation)) {
+		if (!(op instanceof PartialOperation) && !(op instanceof CompositeOperation)) {
 			onOperationCompleted(op);
 		}
 	}
