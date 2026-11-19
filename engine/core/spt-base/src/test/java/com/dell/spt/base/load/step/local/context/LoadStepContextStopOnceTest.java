@@ -126,8 +126,12 @@ class LoadStepContextStopOnceTest {
 		assertEquals(
 						"Standalone DELETE post-verification could not complete its full inventory pass",
 						thrown.getMessage());
+		// The stop fixed the verification summary before it released the outcome storage, so the
+		// context can still be read.
+		assertDoesNotThrow(context::deleteObjectLifecycle);
 
 		assertDoesNotThrow(context::close);
+		assertDoesNotThrow(context::deleteObjectLifecycle);
 		assertTrue(context.isClosed());
 		// The verification did not complete: no evidence is finished, and the driver is stopped.
 		fixture.verifyFinishCalls(0);
@@ -135,6 +139,26 @@ class LoadStepContextStopOnceTest {
 		verify(fixture.driver, times(1)).stop();
 		verify(fixture.generator, times(1)).close();
 		verify(fixture.recorder, times(1)).close();
+		verify(fixture.driver, times(1)).close();
+	}
+
+	@Test
+	void aDriverShutdownThatFailsOnceAfterTheDrainStillFinishesTheEvidence(@TempDir final Path temp)
+					throws Exception {
+		final var fixture = new Fixture(temp, false, false);
+		final IllegalStateException shutdownFailure = new IllegalStateException(
+						"one-off driver shutdown failure");
+		when(fixture.driver.shutdown()).thenThrow(shutdownFailure).thenReturn(fixture.driver);
+		final var context = fixture.context();
+		context.start();
+
+		assertSame(shutdownFailure, assertThrows(IllegalStateException.class, context::stop));
+		assertDoesNotThrow(context::close);
+
+		// Only the driver failed: the stop that follows still finishes the DELETE evidence.
+		assertTrue(context.isClosed());
+		fixture.verifyFinishCalls(1);
+		verify(fixture.driver, times(1)).stop();
 		verify(fixture.driver, times(1)).close();
 	}
 

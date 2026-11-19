@@ -2613,7 +2613,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			shutdownFailed = true;
 			return;
 		}
-		// Set before the attempt, cleared when it passes: a failure leaves it set, so the stop only
+		// Set before the attempt, cleared once the drain and verification pass: a failure there leaves
+		// it set, so the stop only
 		// releases. A retry that passes, where the shutdown is retried, clears it, and that stop runs
 		// in full.
 		// An interrupt leaves shutdownAttempted unset, so the shutdown runs again when repeated.
@@ -2626,6 +2627,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			// The driver stays up for a failed verification: a duration-mode retry verifies with it,
 			// and the stop that follows a failure stops it.
 			verifyDeleteInventoryForDirectLifecycle();
+			// The drain and verification are complete: a driver shutdown that throws leaves the
+			// evidence for the stop to finish.
+			shutdownFailed = false;
 			try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 							.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				driver.shutdown();
@@ -2633,7 +2637,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			} catch (final RemoteException e) {
 				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
 			}
-			shutdownFailed = false;
 		} catch (final RuntimeException e) {
 			shutdownAttempted = true;
 			throw e;
@@ -2649,7 +2652,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (shutdownFailed || stopRetriesAbandoned) {
 			// The drain or verification did not complete, or the slice gave up: no evidence to
 			// finish and no results to output. Release what the stop owns; the close does the rest.
-			RuntimeException failure = closeDeleteVerificationStorage();
+			// Fix the summary first: later reads of the context take it, not the closed storage.
+			RuntimeException failure = null;
+			if (standaloneDeleteEnabled) {
+				try {
+					finalizeDeleteVerificationSummary();
+				} catch (final RuntimeException e) {
+					failure = e;
+				}
+			}
+			failure = appendRecoveryFailure(failure, closeDeleteVerificationStorage());
 			try {
 				driver.stop();
 			} catch (final RuntimeException e) {
