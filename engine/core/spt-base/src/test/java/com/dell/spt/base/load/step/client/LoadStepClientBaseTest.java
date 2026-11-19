@@ -53,6 +53,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -727,6 +728,80 @@ class LoadStepClientBaseTest {
 
 		verify(slice).stop();
 		verify(slice, never()).verifyDeleteInventoryForStepStop();
+	}
+
+	/** One poller, as on an entry with fewer CPUs than slices: a queued slice must not restart the limit. */
+	@Test
+	void awaitEndsAtTheTimeLimitWhenSlicesOutnumberThePollers() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final List<AtomicInteger> polls = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			final AtomicInteger slicePolls = new AtomicInteger();
+			polls.add(slicePolls);
+			final LoadStep slice = mock(LoadStep.class);
+			when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+				slicePolls.incrementAndGet();
+				Thread.sleep(1);
+				return false;
+			});
+			addRawStepSlice(client, slice);
+		}
+
+		final long startedNanos = System.nanoTime();
+		final boolean completed = awaitOnOnePoller(client, 1, TimeUnit.SECONDS);
+		final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+
+		assertFalse(completed);
+		assertTrue(elapsedMillis >= 950, "returned before the limit, after " + elapsedMillis + " ms");
+		assertTrue(elapsedMillis < 2500, "ran a multiple of the 1 s limit: " + elapsedMillis + " ms");
+		// The first slice holds the only poller to the deadline, and nothing is polled after it.
+		assertEquals(1, polls.stream().filter(slicePolls -> slicePolls.get() > 0).count());
+	}
+
+	@Test
+	void awaitCompletesEverySliceBeforeTheLimitWithFewerPollersThanSlices() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final List<LoadStep> slices = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			final LoadStep slice = mock(LoadStep.class);
+			when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false, true);
+			slices.add(slice);
+			addRawStepSlice(client, slice);
+		}
+
+		assertTrue(awaitOnOnePoller(client, 30, TimeUnit.SECONDS));
+
+		for (final LoadStep slice : slices) {
+			verify(slice, times(2)).await(1, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	/** A count-limited step passes this timeout: it saturates in milliseconds and must not overflow. */
+	@Test
+	void awaitWithTheLargestTimeoutReturnsAsSoonAsEverySliceIsDone() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						testConfig, extensions, ctxConfigs, mockMetricsManager);
+		for (int i = 0; i < 3; i++) {
+			final LoadStep slice = mock(LoadStep.class);
+			when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+			addRawStepSlice(client, slice);
+		}
+
+		assertTrue(awaitOnOnePoller(client, Long.MAX_VALUE, TimeUnit.SECONDS));
+	}
+
+	/** A parallel stream run inside a pool uses that pool, whatever the CPU count of the test host. */
+	private static boolean awaitOnOnePoller(
+					final LoadStepClientBase<?> client, final long timeout, final TimeUnit timeUnit)
+					throws Exception {
+		final ForkJoinPool poller = new ForkJoinPool(1);
+		try {
+			return poller.submit(() -> client.await(timeout, timeUnit)).get(30, TimeUnit.SECONDS);
+		} finally {
+			poller.shutdownNow();
+		}
 	}
 
 	@Test

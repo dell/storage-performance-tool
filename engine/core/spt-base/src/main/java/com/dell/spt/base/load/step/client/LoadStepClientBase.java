@@ -1961,10 +1961,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			try {
+				// One start time for all slices: a slice queued for a free poller must not restart the limit.
+				// Compared by subtraction, since toMillis saturates for a step without a time limit.
+				final var invokeTimeMillis = System.currentTimeMillis();
+				final var timeOutMillis = timeUnit.toMillis(timeout);
 				return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
 					try {
-						final var invokeTimeMillis = System.currentTimeMillis();
-						final var timeOutMillis = timeUnit.toMillis(timeout);
 						var awaitResult = false;
 						while (timeOutMillis > System.currentTimeMillis() - invokeTimeMillis) {
 							if (Thread.currentThread().isInterrupted()) {
