@@ -50,7 +50,7 @@ public final class ItemInfoFileOutput<O extends Operation> implements Output<O> 
 			ioResult = ioResults.get(i);
 			if (ioResult == null) { // poison
 				try {
-					return itemInfoOutput.put(itemsInfo, 0, i);
+					return itemInfoOutput.put(itemsInfo, 0, itemsInfo.size());
 				} finally {
 					try {
 						close();

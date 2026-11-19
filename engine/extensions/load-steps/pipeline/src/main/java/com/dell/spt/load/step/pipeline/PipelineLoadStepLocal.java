@@ -13,6 +13,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.TransferConvertBuffer;
+import com.dell.spt.base.load.step.local.ContextInitResources;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
@@ -144,13 +145,14 @@ public class PipelineLoadStepLocal
 
 				final int batchSize = loadConfig.intVal("batch-size");
 
-				try {
+				try (final var pending = new ContextInitResources()) {
 
 					NicSetConfig.requireSupportedWorkload(
 									storageConfig, opType, itemConfig.configVal("input").stringVal("path"));
 					final StorageDriver driver = StorageDriver.instance(
 									extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 									com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
+					pending.hold(driver);
 
 					final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 					final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
@@ -174,6 +176,7 @@ public class PipelineLoadStepLocal
 							generatorBuilder.itemInput(nextItemBuff);
 						}
 						final LoadGenerator generator = generatorBuilder.build();
+						pending.hold(generator);
 
 						final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 						final LoadStepContext stepCtx = new LoadStepContextImpl<>(
@@ -184,9 +187,11 @@ public class PipelineLoadStepLocal
 										loadConfig,
 										outputConfig.boolVal("metrics-trace-persist"),
 										shardMetrics);
+						pending.ownedBy(stepCtx, generator, driver);
 						((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
 										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
+						pending.handedOver();
 
 						final var itemOutputConfig = itemConfig.configVal("output");
 						if (originIndex < subStepCount - 1) {

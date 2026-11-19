@@ -1,6 +1,7 @@
 package com.dell.spt.base.item.io;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.DataItemImpl;
@@ -10,6 +11,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.storage.Credential;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -150,5 +152,41 @@ class ItemInfoFileOutputTest {
 		assertEquals(
 						List.of("/src/dir/k2,0,1024,0/0", "/dst/k3,0,8,0/0", "/src/k1,0,1024,0/0"),
 						Files.readAllLines(file));
+	}
+
+	private static Operation<Item> plainOp(final String name) {
+		return op(OpType.READ, new DataItemImpl(name, 0, 1), null);
+	}
+
+	/** The poison's index is absolute; the rows before it in the range are written, then the file closes. */
+	@Test
+	void rangePutFromAnOffsetWritesRowsUpToThePoisonAndCloses() throws Exception {
+		final Path file = tempDir.resolve("offset.csv");
+		final var output = new ItemInfoFileOutput<Operation<Item>>(file);
+		final List<Operation<Item>> batch = Arrays.asList(
+						plainOp("/b/r0"), plainOp("/b/r1"), plainOp("/b/r2"), null, plainOp("/b/r4"));
+		assertEquals(2, output.put(batch, 1, 4));
+		assertEquals(List.of("r1,0,1,0/0", "r2,0,1,0/0"), Files.readAllLines(file));
+		assertThrows(IOException.class, () -> output.put(plainOp("/b/late")));
+	}
+
+	@Test
+	void rangePutFromAnOffsetHoldingOnlyThePoisonWritesNothingAndCloses() throws Exception {
+		final Path file = tempDir.resolve("poison-only.csv");
+		final var output = new ItemInfoFileOutput<Operation<Item>>(file);
+		final List<Operation<Item>> batch = Arrays.asList(plainOp("/b/r0"), plainOp("/b/r1"), null);
+		assertEquals(0, output.put(batch, 2, 3));
+		assertEquals(List.of(), Files.readAllLines(file));
+		assertThrows(IOException.class, () -> output.put(plainOp("/b/late")));
+	}
+
+	@Test
+	void rangePutFromZeroWritesRowsUpToThePoisonAndCloses() throws Exception {
+		final Path file = tempDir.resolve("zero.csv");
+		final var output = new ItemInfoFileOutput<Operation<Item>>(file);
+		final List<Operation<Item>> batch = Arrays.asList(plainOp("/b/r0"), plainOp("/b/r1"), null);
+		assertEquals(2, output.put(batch, 0, 3));
+		assertEquals(List.of("r0,0,1,0/0", "r1,0,1,0/0"), Files.readAllLines(file));
+		assertThrows(IOException.class, () -> output.put(plainOp("/b/late")));
 	}
 }

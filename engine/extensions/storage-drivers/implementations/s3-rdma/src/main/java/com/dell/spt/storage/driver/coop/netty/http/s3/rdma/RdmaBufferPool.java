@@ -295,6 +295,10 @@ final class RdmaBufferPool {
 		deregisterAfterUnlock(drained);
 	}
 
+	synchronized boolean isClosed() {
+		return closed;
+	}
+
 	/** The most buffers one size class holds. */
 	int maxBuffersPerClass() {
 		return maxBuffersPerClass;

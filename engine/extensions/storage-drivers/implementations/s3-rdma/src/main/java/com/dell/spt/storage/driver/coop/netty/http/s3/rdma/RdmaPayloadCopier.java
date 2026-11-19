@@ -270,6 +270,10 @@ final class RdmaPayloadCopier implements AutoCloseable {
 		return awaitStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeWaitMillis));
 	}
 
+	boolean isStopped() {
+		return stopped;
+	}
+
 	/** The first half of {@link #shutdown}, which does not wait: every lane is stopped at once. */
 	void signalStop() {
 		stopped = true;

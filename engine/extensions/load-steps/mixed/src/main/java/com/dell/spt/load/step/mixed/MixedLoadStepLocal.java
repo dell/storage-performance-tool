@@ -22,6 +22,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
+import com.dell.spt.base.load.step.local.ContextInitResources;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.logging.LogUtil;
@@ -126,6 +127,12 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 	@Override
 	protected void init() {
+		try (final var pending = new ContextInitResources()) {
+			init(pending);
+		}
+	}
+
+	private void init(final ContextInitResources pending) {
 
 		// ── 1. Merge base config with all context configs ──────────────────
 		final List<Map<String, Object>> trees = new ArrayList<>(1 + ctxConfigs.size());
@@ -254,6 +261,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			driver = StorageDriver.instance(
 							extensions, storageConfig, dataInput,
 							effectiveVerifyFlag, batchSize, stepId);
+			pending.hold(driver);
 			driver.adjustIoBuffers(itemDataSize.get(), OpType.NOOP);
 		} catch (final IllegalConfigurationException | InterruptedException e) {
 			throw new IllegalStateException("Failed to initialize storage driver", e);
@@ -312,6 +320,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (putWeight > 0) {
 			try {
 				putRemainingFileOut = new ItemInfoFileOutput<>(putRemainingFilePath);
+				pending.hold(putRemainingFileOut);
 			} catch (final IOException e) {
 				throw new IllegalStateException("Failed to open put-remaining.csv: " + putRemainingFilePath, e);
 			}
@@ -337,6 +346,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final MixedLoadGenerator generator = new MixedLoadGenerator(
 						ServiceTaskExecutor.TASK_EXECUTOR, schedule, pool, builders,
 						driver, concurrencyLimit, newItemInput, capped ? countLimit : 0);
+		pending.hold(generator);
 		this.mixedGenerator = generator;
 
 		// ── 13. Register metrics ───────────────────────────────────────────
@@ -370,6 +380,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 						metricsContexts.get(0),
 						metricsCtxByOpType,
 						loadConfig, tracePersist, null);
+		pending.ownedBy(stepCtx, generator, driver);
 		stepCtx.bucketRecorder(initBucketMetrics(mergedConfig, metricsContexts.get(0), metricsCtxByOpType));
 
 		// ── 14b. Wrap the driver result output to release generator permits ──
@@ -420,6 +431,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 										: resultOutput);
 
 		stepContexts.add(stepCtx);
+		pending.handedOver();
 
 		// ── 15. Wire operation results output (for put-remaining routing) ──
 		stepCtx.operationsResultsOutput(new Output() {
