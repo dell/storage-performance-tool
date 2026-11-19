@@ -26,9 +26,8 @@ Internally, the weighted load step contains several
 [load generator](../../../doc/design/architecture/README.md#22-load-generator)s
 (for each configuration element supplied) and single
 [load step context](../../../doc/design/architecture/README.md#23-load-step-context).
-The load step context contains the
-[weight throttle](https://github.com/akurilov/java-commons/blob/master/src/main/java/com/github/akurilov/commons/concurrent/throttle/SequentialWeightsThrottle.java)
-shared among the load generators configured.
+The load step context contains the weight throttle shared among the load
+generators configured.
 
 ## Configuration
 
@@ -67,6 +66,23 @@ var weightedReadConfig = {
 **Notes**
 > * Full example may be found in the `example/scenario/js/types/weighted.js` scenario file.
 > * Weight throttle will never permit the operations if the corresponding weight is 0
+
+### When a sub-load finishes first
+
+Each cycle gives every sub-load up to its weight in operations, and the next
+cycle starts when those shares are used up. A sub-load finishes scheduling when
+it reaches its count limit or, if it does not recycle its operations, when its
+item input runs out. It then leaves the cycle: the other sub-loads carry on to
+their own limits and share the cycle by their weights, so the configured ratio
+no longer applies to the finished sub-load. A retry of one of its operations
+still runs, outside the cycle.
+
+A sub-load that recycles, which includes every path listing (`list` with
+`item.type=path`), finishes only at its count limit. If it has nothing left to
+issue before then, it keeps its place in the cycle and the other sub-loads stop
+at the end of their shares. A sub-load with work beyond its share never gets
+to it, so the step then ends only at its time limit, and without one it does
+not end.
 
 ## Limitations
 
