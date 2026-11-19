@@ -106,12 +106,12 @@ Partial configurations may omit `run` or provide only `run.id`. `run.version` is
 after the submitted configuration is merged with local defaults. A submitted `run.version` is ignored with a warning and cannot
 redefine the executing engine build.
 
-If successful, the response will contain the ETag header with the hexadecimal timestamp (Unix epoch time):
+If successful, the response will contain the ETag header with the run id, a decimal number:
 ```bash
 ...
 < HTTP/1.1 202 Accepted
 < Date: Mon, 26 Nov 2018 18:35:50 GMT
-< ETag: 167514e6082
+< ETag: 1543257350274
 < Content-Length: 0
 ...
 ```
@@ -125,16 +125,16 @@ curl -v -X HEAD http://localhost:9999/run
 ...
 < HTTP/1.1 200 OK
 < Date: Mon, 26 Nov 2018 18:40:10 GMT
-< ETag: 167514e6082
+< ETag: 1543257350274
 < Content-Length: 0
 ...
 ```
 
-The `If-Match` header with the hexadecimal run id value may be used also:
+The `GET` and `DELETE` requests require the `If-Match` header with the decimal run id value:
 
 Checking the run state:
 ```bash
-curl -v -X GET -H "If-Match: 167514e6082" http://localhost:9999/run
+curl -v -X GET -H "If-Match: 1543257350274" http://localhost:9999/run
 ...
 < HTTP/1.1 200 OK
 < Date: Mon, 26 Nov 2018 18:40:10 GMT
@@ -144,12 +144,15 @@ curl -v -X GET -H "If-Match: 167514e6082" http://localhost:9999/run
 
 Stopping the run:
 ```bash
-curl -v -X DELETE -H "If-Match: 167514e6082" http://localhost:9999/run
+curl -v -X DELETE -H "If-Match: 1543257350274" http://localhost:9999/run
 ...
 < HTTP/1.1 200 OK
 < Date: Mon, 26 Nov 2018 18:41:26 GMT
 < Content-Length: 0
 ```
+
+`DELETE` answers 200 when the stop was requested, 204 when no run is active, and 404 when the active run has another id.
+Without a valid `If-Match` value it answers 400.
 
 #### 4.2.2.2. Distributed mode
 To start Spt in distributed mode via REST you need to have 2 Spt nodes in `--run-node` mode. Let's say you have started them via docker. One using the default ports: 
