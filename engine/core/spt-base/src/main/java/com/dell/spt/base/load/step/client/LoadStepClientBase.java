@@ -193,10 +193,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
 		super(config, extensions, ctxConfigs, metricsMgr);
-		this.failureBudgetController = standaloneDeleteEnabled()
-						? new ObjectFailureBudgetController(
-										ObjectFailureBudgetConfig.from(this.config.configVal("load")))
-						: null;
+		try {
+			this.failureBudgetController = standaloneDeleteEnabled()
+							? new ObjectFailureBudgetController(
+											ObjectFailureBudgetConfig.from(this.config.configVal("load")))
+							: null;
+		} catch (final RuntimeException | Error e) {
+			// The base constructor finished, so this object is registered; a subclass's fields are not set.
+			abandonRegistration();
+			throw e;
+		}
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {
@@ -682,6 +688,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		for (final var nodeAddr : nodeAddrs) {
 			final var fileMgr = resolveFileManager(nodeAddr);
 			if (null == fileMgr) {
+				if (Thread.currentThread().isInterrupted()) {
+					// A stop ended the retries, and the node may yet have been reachable.
+					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while resolving the file manager service @ " + nodeAddr));
+				}
 				throw new IllegalStateException(
 								"Failed to resolve the file manager service @ " + nodeAddr
 												+ ". Ensure the remote node is running with --run-node");
@@ -696,20 +706,55 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private static FileManagerService resolveFileManagerWithRetries(final String nodeAddrWithPort, final int maxRetries) {
+		return resolveFileManagerWithRetries(nodeAddrWithPort, maxRetries, FileManagerClient::resolve, Thread::sleep);
+	}
+
+	/** One try to resolve a node's file manager service; tests supply their own. */
+	@FunctionalInterface
+	interface FileManagerResolver {
+		FileManagerService resolve(String nodeAddrWithPort) throws Exception;
+	}
+
+	/** The sleep between two tries; it throws on interrupt as {@link Thread#sleep(long)} does. */
+	@FunctionalInterface
+	interface RetrySleeper {
+		void sleep(long millis) throws InterruptedException;
+	}
+
+	/**
+	 * Tries {@code maxRetries} times to resolve the file manager service of {@code nodeAddrWithPort}.
+	 * Only a {@link ConnectException} (connect refused or timed out) is retried, after a sleep of
+	 * {@code min(2^n s, 2 min)} following try {@code n}; there is no sleep after the last try.
+	 *
+	 * @return the service, or null when every try failed, a failure is not retried, or the thread is
+	 *     interrupted (the interrupt flag is then left set)
+	 */
+	static FileManagerService resolveFileManagerWithRetries(
+					final String nodeAddrWithPort, final int maxRetries, final FileManagerResolver resolver,
+					final RetrySleeper sleeper) {
+		final long startNanos = System.nanoTime();
 		FileManagerService fms = null;
 		int retryCount = 0;
 		while (null == fms && retryCount < maxRetries && !Thread.currentThread().isInterrupted()) {
 			try {
 				retryCount++;
-				fms = FileManagerClient.resolve(nodeAddrWithPort);
+				fms = resolver.resolve(nodeAddrWithPort);
 			} catch (final ConnectException e) {
+				if (retryCount >= maxRetries) {
+					LogUtil.exception(
+									Level.ERROR, e, "Failed to resolve the file manager service @ {}. Giving up after {} "
+													+ "tries in {} s",
+									nodeAddrWithPort, retryCount,
+									TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startNanos));
+					break;
+				}
 				LogUtil.exception(
 								Level.ERROR, e, "Failed to resolve the file manager service @ {}. Will try to " +
 												"reconnect. {} retry out of {}",
 								nodeAddrWithPort, retryCount, maxRetries);
 				try {
 					final int sleepTime = 1000 * (int) Math.pow(2, retryCount);
-					Thread.sleep(Math.min(sleepTime, MAX_SLEEP_TIME_MILLIS));
+					sleeper.sleep(Math.min(sleepTime, MAX_SLEEP_TIME_MILLIS));
 				} catch (final InterruptedException ie) {
 					Thread.currentThread().interrupt();
 					break;

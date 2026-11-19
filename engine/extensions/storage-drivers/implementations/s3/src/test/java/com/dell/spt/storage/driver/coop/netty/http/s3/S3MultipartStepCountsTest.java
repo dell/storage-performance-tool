@@ -590,18 +590,47 @@ final class S3MultipartStepCountsTest {
 	/**
 	 * Queue pressure: a 1-slot driver input queue, batch size 1, a 500 ms child enqueue timeout, and
 	 * parts that take 1.5 s, for 4-part uploads at concurrency 5. A part's enqueue times out, so its
-	 * upload is aborted, or failed without its abort when the abort's own enqueue times out too. A
-	 * count-limited step with no time limit then ends on its count with nothing unresolved, where it
-	 * used to wait for the lost upload until it was stopped. With integrity metadata on, every
-	 * initiated upload has exactly one terminal {@code multipart.lifecycle.csv} record, an upload failed
-	 * without its abort {@code failed_orphaned}.
+	 * upload is aborted: through the queue, or, when the abort's own enqueue times out too, by the
+	 * driver outside the queue. A count-limited step with no time limit then ends on its count with
+	 * nothing unresolved, where it used to wait for the lost upload until it was stopped, and no upload
+	 * stays open. With integrity metadata on, every initiated upload has exactly one terminal {@code
+	 * multipart.lifecycle.csv} record, each failed one {@code failed_aborted}.
 	 */
 	@Test
 	@Timeout(120)
 	void aCountLimitedStepWhosePartEnqueueTimesOutEndsOnItsCount() throws Exception {
+		final var run = partEnqueueTimesOut(false, 500);
+		assertTrue(run.failures() >= 1, () -> "the upload that lost a part is one failure: " + run);
+		assertEquals(run.failures(), run.aborted(), () -> "each failed upload is aborted: " + run);
+	}
+
+	/** The same with {@code load-op-retry}: the failed uploads are retried, and none stays open. */
+	@Test
+	@Timeout(120)
+	void aCountLimitedStepWhosePartEnqueueTimesOutEndsOnItsCountWithRetry() throws Exception {
+		partEnqueueTimesOut(true, 500);
+	}
+
+	/**
+	 * At a 1000 ms timeout against 1.5 s parts the queued abort usually finds room: whichever route
+	 * sends it, each failed upload gets exactly one abort and is recorded {@code failed_aborted}.
+	 */
+	@Test
+	@Timeout(120)
+	void aCountLimitedStepWhosePartEnqueueTimesOutAtALongerTimeoutAbortsOnce() throws Exception {
+		final var run = partEnqueueTimesOut(false, 1_000);
+		assertEquals(run.failures(), run.aborted(), () -> "each failed upload is aborted: " + run);
+	}
+
+	/** What a run of {@link #partEnqueueTimesOut} counted, as it reports them. */
+	private record PartEnqueueTimeoutRun(
+					long partTimeouts, long abortTimeouts, long abortsSent, int openUploads, long failures,
+					long aborted, long orphaned, long completed) {}
+
+	private PartEnqueueTimeoutRun partEnqueueTimesOut(final boolean retry, final long timeoutMillis) throws Exception {
 		final var property = "spt.mpu.child.enqueue.timeout.millis";
 		final var previous = System.getProperty(property);
-		System.setProperty(property, "500");
+		System.setProperty(property, Long.toString(timeoutMillis));
 		stub.answerDelayMillis = request -> request.isPart() ? 1_500 : 0;
 		final Map<String, List<Long>> outcomes;
 		final List<ErrorsLogCapture.Line> errors;
@@ -610,7 +639,7 @@ final class S3MultipartStepCountsTest {
 							Load.config({
 								"load": {
 									"batch": {"size": 1},
-									"op": {"limit": {"count": 4}, "retry": false, "wait": {"limit": %d}}
+									"op": {"limit": {"count": 4}, "retry": %s, "wait": {"limit": %d}}
 								},
 								"storage": {
 									"driver": {"limit": {"concurrency": 5, "queue": {"input": 1}}},
@@ -618,7 +647,7 @@ final class S3MultipartStepCountsTest {
 								},
 								"item": {"data": {"size": "4KB", "ranges": {"threshold": "1KB"}}}
 							}).run();
-							""".formatted(LONG_WAIT_LIMIT_SECONDS));
+							""".formatted(retry, LONG_WAIT_LIMIT_SECONDS));
 			errors = capture.drained();
 		} finally {
 			if (previous == null) {
@@ -630,15 +659,12 @@ final class S3MultipartStepCountsTest {
 
 		final var counts = outcomes.get("CREATE-5");
 		assertEquals(4L, counts.get(0) + counts.get(1), outcomes::toString);
-		final var timeouts = errors.stream().filter(line -> line.message().contains("timed out enqueueing MPU")).count();
-		assertTrue(timeouts >= 1, () -> "a child enqueue timed out: " + errors);
-		assertTrue(counts.get(1) >= 1, () -> "the upload that lost a part is one failure: " + outcomes);
+		final var partTimeouts = errors.stream()
+						.filter(line -> line.message().contains("timed out enqueueing MPU part operation")).count();
+		assertTrue(partTimeouts >= 1, () -> "a part enqueue timed out: " + errors);
 		assertTrue(stepMillis < ENDS_WITHIN_MILLIS, () -> "the step took " + stepMillis + " ms");
 		assertNoneUnresolved();
-		// An upload whose abort could not be queued either is failed without it and stays open.
-		final var unsent = errors.stream().filter(line -> line.message().contains("may stay open on the target")).count();
-		assertTrue(stub.openUploads() <= unsent,
-						() -> stub.openUploads() + " uploads stay open, " + unsent + " failed unsent: " + errors);
+		// The stop waited for the aborts sent outside the queue, so the stub has had them all.
 		final var initiated = count(stub.requests(), request -> "POST".equals(request.method())
 						&& request.query() != null && request.query().contains("uploads"));
 		final var records = multipartLifecycle(initiated);
@@ -652,8 +678,24 @@ final class S3MultipartStepCountsTest {
 										.filter(state -> record.contains("," + state + ",")).findFirst().orElse(record))
 						.toList();
 		assertTrue(states.stream().allMatch(state -> !state.contains(",")), () -> "terminal records: " + records);
-		assertTrue(unsent == 0 || states.contains("failed_orphaned"),
-						() -> unsent + " uploads failed unsent, records: " + records);
+		final var aborts = stub.requests().stream().filter(S3NicSetWorkloadTest::isAbort).toList();
+		final var run = new PartEnqueueTimeoutRun(
+						partTimeouts,
+						errors.stream().filter(line -> line.message().contains("timed out enqueueing MPU abort operation")).count(),
+						aborts.size(),
+						stub.openUploads(),
+						counts.get(1),
+						states.stream().filter("failed_aborted"::equals).count(),
+						states.stream().filter("failed_orphaned"::equals).count(),
+						states.stream().filter("completed"::equals).count());
+		System.out.println("PART-ENQUEUE-TIMEOUT-RUN retry=" + retry + " timeoutMillis=" + timeoutMillis + " " + run);
+		assertEquals(0, run.openUploads(), () -> "no upload stays open: " + run + ", records: " + records);
+		assertEquals(0, run.orphaned(), () -> "no upload is orphaned: " + records);
+		assertEquals(initiated - run.completed(), run.aborted(), () -> "each failed upload is aborted: " + records);
+		assertEquals(run.aborted(), run.abortsSent(), () -> "one abort per failed upload: " + aborts);
+		assertEquals(run.abortsSent(), aborts.stream().map(request -> NicSetLoopback.param(request.query(), "uploadId"))
+						.distinct().count(), () -> "no upload is aborted twice: " + aborts);
+		return run;
 	}
 
 	/**

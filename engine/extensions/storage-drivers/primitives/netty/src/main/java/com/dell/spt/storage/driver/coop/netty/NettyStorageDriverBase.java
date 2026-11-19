@@ -313,6 +313,29 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		warnLateIoGroups(shutdownIoGroups(groups));
 	}
 
+	/** Nothing has connected yet, so this needs none of the stop work of {@link #beforeIoShutdown()}. */
+	@Override
+	protected void releaseAfterFailedConstruction() {
+		try {
+			if (ioExecutor != null && !shutdownIoExecutor(ioExecutor)) {
+				Loggers.ERR.warn(
+								"{}: I/O workers did not stop within {} s",
+								stepId,
+								IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS);
+			}
+		} finally {
+			try {
+				if (connPool != null) {
+					connPool.close();
+				}
+			} catch (final IOException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to close the connection pool", stepId);
+			} finally {
+				super.releaseAfterFailedConstruction();
+			}
+		}
+	}
+
 	/** Runs first in {@link #doStop()}, before any event-loop group shuts down. */
 	protected void beforeIoShutdown() {}
 

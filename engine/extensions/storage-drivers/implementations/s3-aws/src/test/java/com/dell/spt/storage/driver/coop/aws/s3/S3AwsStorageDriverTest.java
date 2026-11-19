@@ -18,6 +18,12 @@ import com.dell.spt.base.item.ItemFactoryImpl;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.logging.Loggers;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
@@ -2973,6 +2979,121 @@ public class S3AwsStorageDriverTest {
 			ArgumentCaptor<AbortMultipartUploadRequest> cap = ArgumentCaptor.forClass(AbortMultipartUploadRequest.class);
 			verify(mockS3Client).abortMultipartUpload(cap.capture());
 			assertEquals("upload-id-abort", cap.getValue().uploadId());
+		}
+
+		/**
+		 * An upload whose abort could not be queued is aborted by the hook itself, outside the queue,
+		 * and recorded {@code failed_aborted} with the part's failure and why the abort was not queued.
+		 */
+		@Test
+		void anUploadWhoseAbortCannotBeQueuedIsAbortedOutsideTheQueue() throws Exception {
+			enableIntegrityMetadata(drv);
+			when(mockS3Client.abortMultipartUpload(any(AbortMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(AbortMultipartUploadResponse.builder().build()));
+			final var upload = initiatedUpload("abort-not-queued");
+			((CompositeDataOperation<?>) upload).put("mpuFailure", Operation.Status.FAIL_TIMEOUT.name());
+
+			try (final var records = new MultipartLifecycleCapture()) {
+				drv.recordUploadLeftOpen(upload, true, "timed out enqueueing MPU abort operation after 500 ms");
+
+				final var record = records.await("abort-not-queued");
+				assertTrue(record.contains(",failed_aborted,true,true,"), record);
+				assertTrue(record.contains("multipart part failed: FAIL_TIMEOUT; abort not queued: "
+								+ "timed out enqueueing MPU abort operation after 500 ms"), record);
+			}
+			final ArgumentCaptor<AbortMultipartUploadRequest> cap = ArgumentCaptor.forClass(AbortMultipartUploadRequest.class);
+			verify(mockS3Client).abortMultipartUpload(cap.capture());
+			assertEquals("upload-id-left-open", cap.getValue().uploadId());
+			assertEquals("test-bucket", cap.getValue().bucket());
+		}
+
+		/** An upload whose completion could not be queued is aborted the same way, with its own reason. */
+		@Test
+		void anUploadWhoseCompletionCannotBeQueuedIsAbortedOutsideTheQueue() throws Exception {
+			enableIntegrityMetadata(drv);
+			when(mockS3Client.abortMultipartUpload(any(AbortMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(AbortMultipartUploadResponse.builder().build()));
+			final var upload = initiatedUpload("completion-not-queued");
+
+			try (final var records = new MultipartLifecycleCapture()) {
+				drv.recordUploadLeftOpen(upload, false, "timed out enqueueing MPU completion operation after 500 ms");
+
+				final var record = records.await("completion-not-queued");
+				assertTrue(record.contains(",failed_aborted,true,true,"), record);
+				assertTrue(record.contains("completion not queued: timed out enqueueing MPU completion operation after 500 ms"),
+								record);
+			}
+			verify(mockS3Client).abortMultipartUpload(any(AbortMultipartUploadRequest.class));
+		}
+
+		/** The abort fails: the upload is recorded {@code failed_orphaned}, and the hook does not throw. */
+		@Test
+		void aFailedAbortOutsideTheQueueRecordsTheUploadOrphaned() throws Exception {
+			enableIntegrityMetadata(drv);
+			final S3Exception throttled = (S3Exception) S3Exception.builder().statusCode(503).message("Slow Down").build();
+			when(mockS3Client.abortMultipartUpload(any(AbortMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.failedFuture(throttled));
+			final var upload = initiatedUpload("abort-failed");
+
+			try (final var records = new MultipartLifecycleCapture()) {
+				assertDoesNotThrow(() -> drv.recordUploadLeftOpen(
+								upload, true, "timed out enqueueing MPU abort operation after 500 ms"));
+
+				final var record = records.await("abort-failed");
+				assertTrue(record.contains(",failed_orphaned,true,false,"), record);
+				assertTrue(record.contains("abort not queued: timed out enqueueing MPU abort operation after 500 ms; "
+								+ "abort failed: RESP_FAIL_SVC"), record);
+			}
+			verify(mockS3Client).abortMultipartUpload(any(AbortMultipartUploadRequest.class));
+		}
+
+		@SuppressWarnings("unchecked")
+		private Operation<Item> initiatedUpload(final String key) {
+			final var item = new DataItemImpl(key, 0, 2048);
+			final var upload = new CompositeDataOperationImpl<DataItem>(
+							0, OpType.CREATE, item, null, "/test-bucket", TEST_CRED, null, 0, 1024);
+			upload.put(KEY_UPLOAD_ID, "upload-id-left-open");
+			return (Operation<Item>) (Operation<?>) upload;
+		}
+	}
+
+	/** Captures the {@code multipart.lifecycle.csv} records the engine logs, which it logs asynchronously. */
+	private static final class MultipartLifecycleCapture extends AbstractAppender implements AutoCloseable {
+
+		private final List<String> records = new java.util.concurrent.CopyOnWriteArrayList<>();
+		private final org.apache.logging.log4j.core.Logger logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART_LIFECYCLE.getName());
+
+		MultipartLifecycleCapture() {
+			super("multipart-lifecycle-capture-" + System.nanoTime(), null, null, true, Property.EMPTY_ARRAY);
+			start();
+			logger.addAppender(this);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			records.add(event.getMessage().getFormattedMessage());
+		}
+
+		/** The one record of {@code key}'s upload, once it is logged; a second one fails the test. */
+		String await(final String key) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+			while (matching(key).isEmpty() && System.nanoTime() < deadline) {
+				Thread.sleep(10);
+			}
+			Thread.sleep(100);
+			final var found = matching(key);
+			assertEquals(1, found.size(), () -> "one record of " + key + ": " + records);
+			return found.get(0);
+		}
+
+		private List<String> matching(final String key) {
+			return records.stream().filter(record -> record.contains("," + key + ",")).toList();
+		}
+
+		@Override
+		public void close() {
+			logger.removeAppender(this);
+			stop();
 		}
 	}
 

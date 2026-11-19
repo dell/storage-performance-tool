@@ -12,8 +12,17 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
+// engineRunningStatus is the /status body StatusServlet writes for a running run: run_id is a number.
+const engineRunningStatus = `{"state":"RUNNING","since":"2026-11-18T10:00:00.000Z","run_id":1757500000000,"step_id":"s1"}`
+
 // newReadyEntryServer serves a ready entry node running a test at 42% completion.
 func newReadyEntryServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return newEntryServerWithStatus(t, engineRunningStatus)
+}
+
+// newEntryServerWithStatus serves a ready entry node whose /status answers statusBody.
+func newEntryServerWithStatus(t *testing.T, statusBody string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -25,7 +34,7 @@ func newReadyEntryServer(t *testing.T) *httptest.Server {
 			w.Write([]byte(`{"status":"ok","scope":"node","role":"entry","node_id":"entry-0"}`))
 		case "/status":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"runId":"run-123","state":"running","message":"Active test","progress":37.5}`))
+			w.Write([]byte(statusBody))
 		case "/metrics/json":
 			w.WriteHeader(http.StatusOK)
 			sample := time.Now().UTC().Format(time.RFC3339)
@@ -69,8 +78,8 @@ func TestStatusCommand_SingleHostReady(t *testing.T) {
 	if !strings.Contains(output, "✅ [entry]") {
 		t.Fatalf("expected success icon in output, got: %s", output)
 	}
-	if !strings.Contains(output, "run: state=RUNNING") {
-		t.Fatalf("expected run state in output, got: %s", output)
+	if !strings.Contains(output, "run: state=RUNNING, run=1757500000000") {
+		t.Fatalf("expected run state and numeric run id in output, got: %s", output)
 	}
 	if !strings.Contains(output, "completion=42%") {
 		t.Fatalf("expected completion percentage in output, got: %s", output)
@@ -157,4 +166,51 @@ func extractPort(t *testing.T, rawURL string) string {
 		t.Fatalf("no port found in URL %s", rawURL)
 	}
 	return port
+}
+
+func runStatusCommandAgainst(t *testing.T, statusBody string) string {
+	t.Helper()
+	server := newEntryServerWithStatus(t, statusBody)
+	port := extractPort(t, server.URL)
+
+	isolateLoggingGlobals(t)
+	logFile = filepath.Join(t.TempDir(), "status.log")
+	logAppend = false
+	logLevel = "info"
+
+	root := GetTestRootCmd()
+	helper := NewTestHelper(t)
+	_, output, err := helper.ExecuteCommand(root, "status", "--api-port", port, "--test-hosts", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("status command returned error: %v\noutput: %s", err, output)
+	}
+	return output
+}
+
+// A completed run keeps its run id in /status until the next run, so status still names it.
+func TestStatusCommand_PrintsRunIDOfCompletedRun(t *testing.T) {
+	output := runStatusCommandAgainst(t,
+		`{"state":"COMPLETED","since":"2026-11-18T10:05:00.000Z","run_id":1757500000000,"step_id":"s2"}`)
+	if !strings.Contains(output, "run: state=COMPLETED, run=1757500000000") {
+		t.Fatalf("expected the completed run's id in output, got: %s", output)
+	}
+}
+
+// A string runId, the shape status read before, is still printed.
+func TestStatusCommand_AcceptsLegacyStringRunID(t *testing.T) {
+	output := runStatusCommandAgainst(t, `{"runId":"run-123","state":"running","message":"Active test"}`)
+	if !strings.Contains(output, `run: state=RUNNING, run=run-123, message="Active test"`) {
+		t.Fatalf("expected the legacy run id in output, got: %s", output)
+	}
+}
+
+// An idle node's /status carries no run id, and status prints none.
+func TestStatusCommand_IdleNodeShowsNoRunID(t *testing.T) {
+	output := runStatusCommandAgainst(t, `{"state":"IDLE","since":"2026-11-18T09:00:00.000Z"}`)
+	if !strings.Contains(output, "run: state=IDLE") {
+		t.Fatalf("expected the idle run state in output, got: %s", output)
+	}
+	if strings.Contains(output, "run=") {
+		t.Fatalf("expected no run id for an idle node, got: %s", output)
+	}
 }
