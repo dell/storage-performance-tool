@@ -49,6 +49,9 @@ type PortChecker struct {
 	// newFinder creates the Docker finder used for container detection;
 	// nil means NewDockerContainerFinder. Tests supply a fake.
 	newFinder func() (*DockerContainerFinder, error)
+	// bind tries to bind the port on every address and returns the listener;
+	// nil means net.Listen. Tests supply a bind that fails as it does on Windows.
+	bind func(address string) (net.Listener, error)
 }
 
 // NewPortChecker creates a new port checker with default settings
@@ -88,8 +91,17 @@ func (p *PortChecker) IsPortInUse() bool {
 }
 
 // isListening reports whether a connection to the port succeeds, giving up when
-// ctx ends.
+// ctx ends. A connection that ctx ended is a failed one, so a caller must check
+// ctx before it reads false as a free port.
 func (p *PortChecker) isListening(ctx context.Context) bool {
+	_, ok := p.answeringAddress(ctx)
+	return ok
+}
+
+// answeringAddress connects to the port and returns the address that accepted
+// the connection, or false if none did before ctx ended. The host may name more
+// than one address, so this is the one a holder must have bound.
+func (p *PortChecker) answeringAddress(ctx context.Context) (net.IP, bool) {
 	address := net.JoinHostPort(p.Host, p.Port)
 
 	logging.LogDebug("portcheck", "checking if port is in use",
@@ -105,14 +117,18 @@ func (p *PortChecker) isListening(ctx context.Context) bool {
 		logging.LogDebug("portcheck", "port appears available",
 			"address", address,
 			"error", err.Error())
-		return false
+		return nil, false
 	}
 
 	// Connection successful - port is in use
 	// Close and ignore error; connection was only used as a probe
+	remote, _ := conn.RemoteAddr().(*net.TCPAddr)
 	_ = conn.Close()
 	logging.LogDebug("portcheck", "port is in use", "address", address)
-	return true
+	if remote == nil {
+		return nil, true
+	}
+	return remote.IP, true
 }
 
 // IsPortHeld reports whether something still holds the port, on any local
@@ -120,9 +136,14 @@ func (p *PortChecker) isListening(ctx context.Context) bool {
 // listener with a full accept queue does not answer, and one bound to another
 // address refuses. So it first tries to bind the port, for an instant, and only
 // a connection refusal after that counts as free. It also counts as held a port
-// that a closing connection still blocks.
+// that a closing connection still blocks. A probe that ctx ended shows nothing,
+// so it counts as held.
 func (p *PortChecker) IsPortHeld(ctx context.Context) bool {
-	listener, err := net.Listen("tcp", net.JoinHostPort("", p.Port))
+	bind := p.bind
+	if bind == nil {
+		bind = func(address string) (net.Listener, error) { return net.Listen("tcp", address) }
+	}
+	listener, err := bind(net.JoinHostPort("", p.Port))
 	if err == nil {
 		_ = listener.Close()
 	} else if errors.Is(err, syscall.EADDRINUSE) {
@@ -135,7 +156,7 @@ func (p *PortChecker) IsPortHeld(ctx context.Context) bool {
 		_ = conn.Close()
 		return true
 	}
-	return ctx.Err() == nil && dialFailureMeansHeld(err)
+	return ctx.Err() != nil || dialFailureMeansHeld(err)
 }
 
 // dialFailureMeansHeld reports whether a failed connection suggests a listener

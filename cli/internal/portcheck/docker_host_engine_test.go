@@ -6,11 +6,13 @@ package portcheck
 
 import (
 	"context"
+	"net"
 	"net/http"
-	"slices"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	containertypes "github.com/docker/docker/api/types/container"
@@ -117,10 +119,10 @@ func failingEngine(t *testing.T) *fakeEngine {
 	return engine
 }
 
-// --force removes the host-network engine that holds the port and nothing else:
-// not a bridge engine that only exposes the port or was told the same run port,
-// and not an engine on another port.
-func TestForceRemovesOnlyTheHostNetworkEngine(t *testing.T) {
+// --force removes no host-network engine: nothing shows that the container, and
+// not another process, holds the port. It names the one with that run port, and
+// not a bridge engine that only exposes the port or an engine on another port.
+func TestForceNamesButLeavesTheHostNetworkEngine(t *testing.T) {
 	engine := failingEngine(t)
 	port := engine.port()
 	portNumber := listenerPort(t, port)
@@ -139,11 +141,12 @@ func TestForceRemovesOnlyTheHostNetworkEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckAndResolveConflicts() error = %v", err)
 	}
-	if !result.Success || result.Strategy != StrategyForceStop {
-		t.Fatalf("result = %+v, want a successful force stop", result)
+	if result.Success || !strings.Contains(result.Message, "Container holder runs on host networking") ||
+		!strings.Contains(result.Message, "docker rm -f holder") {
+		t.Fatalf("result = %+v, want holder named and left running", result)
 	}
-	if _, removed := api.mutations(); !slices.Equal(removed, []string{"holder"}) {
-		t.Errorf("removed = %v, want only holder", removed)
+	if stopped, removed := api.mutations(); len(stopped) != 0 || len(removed) != 0 {
+		t.Errorf("stopped %v, removed %v; want none", stopped, removed)
 	}
 }
 
@@ -165,7 +168,7 @@ func TestForceNeverRemovesAnExposingBridgeContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckAndResolveConflicts() error = %v", err)
 	}
-	if result.Success || !strings.Contains(result.Message, "No containers found using port "+port) {
+	if result.Success || !strings.Contains(result.Message, "No container publishes 127.0.0.1:"+port) {
 		t.Fatalf("result = %+v, want no container found", result)
 	}
 	if stopped, removed := api.mutations(); len(stopped) != 0 || len(removed) != 0 {
@@ -176,11 +179,20 @@ func TestForceNeverRemovesAnExposingBridgeContainer(t *testing.T) {
 // When something other than an engine holds the port, the host-network lookup
 // is not used: that engine cannot be what holds it.
 func TestForceLeavesHostNetworkEngineWhenAnotherServiceHoldsThePort(t *testing.T) {
-	api := fakeDockerWith(hostEngine("engine", "23100"))
-	resolver := &ConflictResolver{Port: "23100", dockerFinder: newFakeFinder(api), clock: NewFakeClock()}
+	other := httptest.NewServer(http.NotFoundHandler())
+	defer other.Close()
+	_, port, err := net.SplitHostPort(other.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := fakeDockerWith(hostEngine("engine", port))
+	resolver := &ConflictResolver{
+		Port: port, checker: NewPortCheckerWithOptions(port, "127.0.0.1", time.Second, time.Second, 1),
+		dockerFinder: newFakeFinder(api), clock: NewFakeClock(),
+	}
 
 	result := resolver.executeForceStop(context.Background(), &ServiceInfo{IsListening: true})
-	if result.Success || !strings.Contains(result.Message, "No containers found") {
+	if result.Success || !strings.Contains(result.Message, "No container publishes") || strings.Contains(result.Message, "engine") {
 		t.Fatalf("result = %+v, want no container found", result)
 	}
 	if _, removed := api.mutations(); len(removed) != 0 {

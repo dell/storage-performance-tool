@@ -46,6 +46,12 @@ type fakeEngine struct {
 	headStatus int
 	// onShutdown, when set, runs before POST /shutdown is answered.
 	onShutdown func(engine *fakeEngine)
+	// statusCode, when non-zero, replaces the answer of GET /status.
+	statusCode int
+	// statusState and statusRunID, when set, replace the state and run_id that
+	// GET /status reports for an active run.
+	statusState string
+	statusRunID int64
 }
 
 func newFakeEngine(t *testing.T, runID int64) *fakeEngine {
@@ -65,15 +71,26 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/metrics/json" && r.Method == http.MethodGet:
 		fmt.Fprint(w, `[{"metrics_schema":5,"scope":"node","role":"entry","node_id":"n0","op_type":"none"}]`)
 	case r.URL.Path == "/status" && r.Method == http.MethodGet:
+		if e.statusCode != 0 {
+			w.WriteHeader(e.statusCode)
+			return
+		}
 		if e.runID == 0 || e.worker {
 			fmt.Fprint(w, `{"state":"IDLE"}`)
 			return
 		}
+		state, runID := "RUNNING", e.runID
+		if e.statusState != "" {
+			state = e.statusState
+		}
+		if e.statusRunID != 0 {
+			runID = e.statusRunID
+		}
 		if e.since != "" {
-			fmt.Fprintf(w, `{"state":"RUNNING","run_id":%d,"since":%q}`, e.runID, e.since)
+			fmt.Fprintf(w, `{"state":%q,"run_id":%d,"since":%q}`, state, runID, e.since)
 			return
 		}
-		fmt.Fprintf(w, `{"state":"RUNNING","run_id":%d}`, e.runID)
+		fmt.Fprintf(w, `{"state":%q,"run_id":%d}`, state, runID)
 	case r.URL.Path == "/run" && r.Method == http.MethodHead:
 		if e.onHead != nil {
 			e.onHead(e)

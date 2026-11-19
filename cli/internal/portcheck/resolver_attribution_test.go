@@ -52,6 +52,14 @@ func unrelatedPublisher(t *testing.T, port string) engineContainer {
 	}
 }
 
+// publishedEngine is an SPT engine node container that publishes port on ip.
+func publishedEngine(t *testing.T, id, ip, port string) engineContainer {
+	return engineContainer{
+		id: id, state: containertypes.StateRunning, labels: nodeLabels(), network: "bridge",
+		ports: []containertypes.Port{{IP: ip, PublicPort: listenerPort(t, port), PrivatePort: 23100, Type: "tcp"}},
+	}
+}
+
 func withDocker(resolver *ConflictResolver, api *fakeDockerAPI) {
 	resolver.dockerFinder = newFakeFinder(api)
 	resolver.checker.newFinder = func() (*DockerContainerFinder, error) { return newFakeFinder(api), nil }
@@ -98,11 +106,14 @@ func TestForceRemovesNothingWhenNothingListens(t *testing.T) {
 		result, _ := resolver.executeForceResolution(context.Background(), confirmedEngine())
 		return result
 	})
-	if result.Success || !strings.Contains(result.Message, "no container was removed") {
+	if result.Success || !strings.Contains(result.Message, "No container was removed") {
 		t.Fatalf("result = %+v, want nothing removed", result)
 	}
 	if !strings.Contains(result.Message, "cannot be bound yet") {
 		t.Errorf("Message = %q, want the unbindable port explained", result.Message)
+	}
+	if n := strings.Count(strings.ToLower(result.Message), "nothing accepts connections"); n != 1 {
+		t.Errorf("Message = %q says %d times that nothing accepts connections, want once", result.Message, n)
 	}
 	if stopped, removed := api.mutations(); len(stopped) != 0 || len(removed) != 0 {
 		t.Errorf("stopped %v, removed %v; want none", stopped, removed)
@@ -139,8 +150,14 @@ func TestDaemonIsLocal(t *testing.T) {
 		local bool
 	}{
 		{"unix:///var/run/docker.sock", true},
-		{"UNIX:///var/run/docker.sock", true},
+		// The Docker client dials every scheme but lower-case unix and npipe over TCP.
+		{"UNIX:///var/run/docker.sock", false},
+		{"Unix://127.0.0.1:2375", false},
+		{"UNIX://10.0.0.5:2375", false},
+		{"NPIPE:////./pipe/docker_engine", false},
 		{"npipe:////./pipe/docker_engine", true},
+		// Once the scheme is npipe, the pipe path is a Windows path.
+		{"npipe:////./PIPE/docker_engine", true},
 		{"npipe:////server/pipe/docker_engine", false},
 		{"npipe://server/pipe/docker_engine", false},
 		{"tcp://localhost:2375", false},
@@ -227,7 +244,7 @@ func TestPromptAnswerLeavesALaterRunWithTheSameID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckAndResolveConflicts() error = %v", err)
 	}
-	if result.Success || !strings.Contains(result.Message, "reuses the ID of the run shown") {
+	if result.Success || !strings.Contains(result.Message, "is a later run that reuses the ID; it was not stopped") {
 		t.Fatalf("result = %+v, want the later run reported", result)
 	}
 	assertReadOnly(t, engine.received())
@@ -253,7 +270,7 @@ func TestNoShutdownWhenALaterRunReusesTheStoppedID(t *testing.T) {
 			info.Status.RunningSince = firstStart
 
 			result := gracefulStopWithin(t, context.Background(), resolver, info)
-			if result.Success || !strings.Contains(result.Message, "later run that reuses its ID") {
+			if result.Success || !strings.Contains(result.Message, "cannot be shown to be the run stopped: run 41 is a later run") {
 				t.Fatalf("result = %+v, want the later run reported", result)
 			}
 			if slices.Contains(engine.received(), shutdownRequest) {
@@ -283,55 +300,11 @@ func TestWorkerStopIsReportedAsARequest(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("result = %+v, want success", result)
 	}
-	if !strings.Contains(printed, "Asked the engine to stop run 41; this node is a worker of that run") {
+	if !strings.Contains(printed, "Asked the engine to stop run 41; its status does not name that run, so this node may be a worker of it") {
 		t.Errorf("printed %q, want the worker named", printed)
 	}
 	if strings.Contains(printed, "Stopped SPT run") {
 		t.Errorf("printed %q, which claims the run stopped", printed)
-	}
-}
-
-// unansweredAPI accepts connections and never answers.
-func unansweredAPI(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			t.Cleanup(func() { _ = conn.Close() })
-		}
-	}()
-	_, port, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
-
-// Ctrl-C during the check after a force stop ends it at once.
-func TestForceVerificationEndsWithTheContext(t *testing.T) {
-	port := unansweredAPI(t)
-	checker := NewPortCheckerWithOptions(port, "127.0.0.1", time.Second, time.Minute, 1)
-	api := &fakeDockerAPI{}
-	checker.newFinder = func() (*DockerContainerFinder, error) { return newFakeFinder(api), nil }
-	resolver := &ConflictResolver{Port: port, checker: checker, dockerFinder: newFakeFinder(api), clock: &pollClock{}}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	result := within(t, func() *ResolutionResult { return resolver.verifyResolution(ctx, StrategyForceStop) })
-	if result.Success || !strings.Contains(result.Message, "Interrupted") || !errors.Is(result.Error, context.DeadlineExceeded) {
-		t.Fatalf("result = %+v, want the interruption reported", result)
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("verification took %s after a 200ms deadline", elapsed)
 	}
 }
 
@@ -486,5 +459,64 @@ func TestAnswerReadAtCancellationAborts(t *testing.T) {
 	}
 	if got := changesTo(engine.received()); len(got) != 0 {
 		t.Errorf("engine changes = %+v, want none", got)
+	}
+}
+
+// A detection that the context ended is not a free port: the command stops
+// there, sends nothing and prints no force stop.
+func TestCancelledFirstCheckIsNotAFreePort(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		engine := newFakeEngine(t, 41)
+		resolver := engine.resolver(force, !force)
+		defer resolver.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		var result *ResolutionResult
+		var err error
+		printed := captureStdout(t, func() { result, err = resolver.CheckAndResolveConflicts(ctx) })
+		if result.Success || !errors.Is(err, context.Canceled) || !strings.Contains(result.Message, "Interrupted") {
+			t.Errorf("force %v: result = %+v, %v, want the interruption", force, result, err)
+		}
+		if strings.Contains(printed, "Force stopping") {
+			t.Errorf("force %v: printed %q", force, printed)
+		}
+		if got := changesTo(engine.received()); len(got) != 0 {
+			t.Errorf("force %v: engine changes = %+v, want none", force, got)
+		}
+	}
+}
+
+// A recheck that the context ended is not a free port.
+func TestCancelledRetryIsNotAFreePort(t *testing.T) {
+	engine := newFakeEngine(t, 41)
+	resolver := engine.resolver(false, true)
+	defer resolver.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := resolver.executeRetry(ctx)
+	if result.Success || !errors.Is(result.Error, context.Canceled) {
+		t.Fatalf("result = %+v, want the interruption", result)
+	}
+}
+
+// A release-wait probe that the context ended is neither free nor a reason to
+// wait on: the wait ends as interrupted.
+func TestReleaseWaitEndsOnACancelledProbe(t *testing.T) {
+	engine := newFakeEngine(t, 41)
+	resolver := engine.resolver(false, true)
+	ctx := &answeredAtCancel{Context: context.Background(), cancelled: make(chan struct{})}
+	resolver.clock = &pollClock{onPoll: func(poll int) {
+		if poll == 1 {
+			engine.server.Close()
+			close(ctx.cancelled)
+		}
+	}}
+	defer resolver.Close()
+
+	result := gracefulStopWithin(t, ctx, resolver, confirmedEngine())
+	if result.Success || !strings.Contains(result.Message, "Stopped waiting for port") {
+		t.Fatalf("result = %+v, want the interrupted wait", result)
 	}
 }

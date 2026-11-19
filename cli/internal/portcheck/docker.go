@@ -7,7 +7,9 @@ package portcheck
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,9 +87,65 @@ func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port
 // on another machine (npipe:////host/pipe/...), may run on another host, so its
 // containers need not hold this host's ports. An address of any other form is not
 // taken as local.
+//
+// The scheme is compared as the Docker client's dialer compares it, letter case
+// included: it reaches a socket only for "unix" and "npipe", and dials any other
+// scheme, "UNIX" too, over TCP. Once the scheme is "npipe", the pipe path is a
+// Windows path, so "//./pipe/" is compared without letter case.
 func (d *DockerContainerFinder) DaemonIsLocal() bool {
-	host := strings.ToLower(d.client.DaemonHost())
-	return strings.HasPrefix(host, "unix://") || strings.HasPrefix(host, "npipe:////./pipe/")
+	scheme, path, ok := strings.Cut(d.client.DaemonHost(), "://")
+	if !ok {
+		return false
+	}
+	switch scheme {
+	case "unix":
+		return true
+	case "npipe":
+		return strings.HasPrefix(strings.ToLower(path), "//./pipe/")
+	default:
+		return false
+	}
+}
+
+// FindPublishers returns every running container that publishes TCP port on a
+// binding that covers ip: one on ip itself, or on the wildcard of ip's family
+// (0.0.0.0 for IPv4, :: for IPv6). A binding on another address or of the other
+// family does not accept a connection to ip, and neither does one whose address
+// the daemon does not give.
+func (d *DockerContainerFinder) FindPublishers(ctx context.Context, ip net.IP, port string) ([]*ContainerInfo, error) {
+	if ip == nil {
+		return nil, nil
+	}
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+	var publishers []*ContainerInfo
+	for _, c := range containers {
+		if !containerHoldsPorts(c) {
+			continue
+		}
+		for _, p := range c.Ports {
+			if p.Type == "tcp" && p.PublicPort != 0 && strconv.Itoa(int(p.PublicPort)) == port && bindingCovers(p.IP, ip) {
+				publishers = append(publishers, d.containerToInfo(c))
+				break
+			}
+		}
+	}
+	return publishers, nil
+}
+
+// bindingCovers reports whether a published binding on bindIP accepts a
+// connection to ip.
+func bindingCovers(bindIP string, ip net.IP) bool {
+	bound := net.ParseIP(bindIP)
+	if bound == nil {
+		return false
+	}
+	if bound.IsUnspecified() {
+		return (bound.To4() != nil) == (ip.To4() != nil)
+	}
+	return bound.Equal(ip)
 }
 
 // isEngineNodeContainer reports whether SPT labelled the container as an engine node.

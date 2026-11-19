@@ -73,7 +73,7 @@ func TestStopRunWithoutRunIDSendsNothing(t *testing.T) {
 // sends exactly that ID back.
 func TestStopActiveRunStopsTheReportedRun(t *testing.T) {
 	engine := newFakeEngine(t, 1763456789012)
-	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
 	runID := stopped.ID
 	if err != nil || runID != 1763456789012 {
 		t.Fatalf("StopActiveRun() = %d, %v, want 1763456789012, nil", runID, err)
@@ -91,7 +91,7 @@ func TestStopActiveRunStopsTheReportedRun(t *testing.T) {
 // The remote API accepts any non-zero signed run ID.
 func TestStopActiveRunAcceptsANegativeRunID(t *testing.T) {
 	engine := newFakeEngine(t, -7)
-	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
 	runID := stopped.ID
 	if err != nil || runID != -7 {
 		t.Fatalf("StopActiveRun() = %d, %v, want -7, nil", runID, err)
@@ -103,7 +103,7 @@ func TestStopActiveRunAcceptsANegativeRunID(t *testing.T) {
 
 func TestStopActiveRunWithoutARunSendsNoStop(t *testing.T) {
 	engine := newFakeEngine(t, 0)
-	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
 	runID := stopped.ID
 	if err != nil || runID != 0 {
 		t.Fatalf("StopActiveRun() = %d, %v, want 0, nil", runID, err)
@@ -155,7 +155,7 @@ func TestStopActiveRunWhenTheRunChanges(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			engine := newFakeEngine(t, 41)
 			engine.onDelete = tt.onDelete
-			stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+			stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
 			runID := stopped.ID
 			if runID != 0 {
 				t.Errorf("StopActiveRun() run = %d, want 0", runID)

@@ -430,52 +430,100 @@ func (c *SptAPIClient) getMetricsJSON(ctx context.Context) ([]jsonMetricsStep, e
 
 // RunExecution is one execution of a run, as far as the engine tells executions
 // apart. The engine takes a caller's run ID and lets a later run reuse it, so the
-// ID alone does not identify an execution. Since is the run's start time from
-// /status, which only the engine that started the run reports; it is empty when
-// unknown. Worker marks an engine whose /status names no run or another one,
-// which serves RunID for another engine. A zero ID means no run.
+// ID alone does not identify an execution. A zero ID means no run.
 type RunExecution struct {
-	ID     int64
-	Since  string
+	ID int64
+	// Since is the run's start time: the since of a RUNNING /status that names
+	// this run. Only the engine that started the run reports it; it is empty when
+	// unknown. The shipped engine writes it as canonical UTC from milliseconds, so
+	// two reads of one execution give the same string, and they are compared as
+	// strings.
+	Since string
+	// Worker marks an engine whose /status names no run or another one. That is a
+	// worker of the run, or an entry engine whose status a refused POST /run
+	// overwrote; the CLI cannot tell the two apart.
 	Worker bool
+	// Terminal marks a /status that names this run in a terminal state: the run
+	// ended and its cleanup still runs. Its since is then the end, not the start.
+	Terminal bool
+	// Known is set when /status was read and parsed; without it, nothing above
+	// but ID is known, and statusErr says why.
+	Known     bool
+	statusErr error
+	// statusRunID is the run /status named.
+	statusRunID int64
+}
+
+// confirmedEntry reports whether /status showed this engine running or ending
+// the run itself, so a stop it accepted is a stop of the run.
+func (e RunExecution) confirmedEntry() bool {
+	return e.Known && !e.Worker
 }
 
 func executionFromStatus(runID int64, status terminalStatus) RunExecution {
-	execution := RunExecution{ID: runID}
+	execution := RunExecution{ID: runID, Known: true, statusRunID: status.RunID}
 	switch {
 	case status.RunID != runID:
 		execution.Worker = true
 	case status.State == constants.StateRunning:
 		execution.Since = status.Since
+	case isTerminalState(status.State):
+		execution.Terminal = true
 	}
 	return execution
 }
 
+func isTerminalState(state string) bool {
+	return state == constants.StateCompleted || state == constants.StateStopped || state == constants.StateFailed
+}
+
 // execution describes the active run runID from /status. A failed read leaves it
-// with only its ID.
+// with only its ID, not Known.
 func (c *SptAPIClient) execution(ctx context.Context, runID int64) RunExecution {
 	status, err := c.getStatusDetail(ctx)
 	if err != nil {
 		logging.LogDebug("portcheck", "no status for the active run", "run_id", runID, "error", err.Error())
-		return RunExecution{ID: runID}
+		return RunExecution{ID: runID, statusErr: err}
 	}
 	return executionFromStatus(runID, status)
 }
 
-// isLaterExecution reports whether now, with the same ID as known, is a later run
-// that reuses it. Without a start time for known it cannot tell, and says no.
-func isLaterExecution(known, now RunExecution) bool {
-	if known.Since == "" {
-		return false
+// unconfirmedReason says why now cannot be shown to be the execution expected,
+// which has the same ID, or returns "" when it is. Without a start time for
+// expected, the ID is all there is to compare, but a /status that cannot be read
+// still leaves the run unknown. With one, only a RUNNING /status of this run with
+// that start time confirms it; allowEnded also accepts the run in a terminal
+// state, as a run just stopped shows during its cleanup.
+func unconfirmedReason(expected, now RunExecution, allowEnded bool) string {
+	switch {
+	case !now.Known:
+		return fmt.Sprintf("the engine's /status could not be read (%v)", now.statusErr)
+	case expected.Since == "":
+		if expected.Worker && now.Since != "" {
+			return fmt.Sprintf("run %d now has a start time on this engine and had none before, so it is a later run that reuses the ID", now.ID)
+		}
+		return ""
+	case now.Worker:
+		return fmt.Sprintf("the engine's /status names run %d, not run %d", now.statusRunID, now.ID)
+	case now.Terminal && allowEnded:
+		return ""
+	case now.Since == "":
+		return fmt.Sprintf("the engine's /status gives no start time for run %d", now.ID)
+	case now.Since != expected.Since:
+		return fmt.Sprintf("run %d is a later run that reuses the ID", now.ID)
 	}
-	return now.Worker || (now.Since != "" && now.Since != known.Since)
+	return ""
 }
 
 // StopActiveRun stops the run the engine reports as active when called, whichever
 // it is, and returns it, or a zero ID when no run is active. If another run takes
 // over between that read and the stop, the stop does not reach it, and the
-// replacement is returned as an error.
-func (c *SptAPIClient) StopActiveRun(ctx context.Context) (RunExecution, error) {
+// replacement is returned as an error. shown is the run detection reported: when
+// /status cannot be read now and the active run has its ID, the run keeps
+// detection's worker mark, so a worker's stop is not reported as the run's end.
+// A run whose /status cannot be read is not shut down afterwards (see
+// ConfirmNoOtherRun).
+func (c *SptAPIClient) StopActiveRun(ctx context.Context, shown RunExecution) (RunExecution, error) {
 	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
 		return RunExecution{}, err
@@ -483,13 +531,17 @@ func (c *SptAPIClient) StopActiveRun(ctx context.Context) (RunExecution, error) 
 	if !active {
 		return RunExecution{}, nil
 	}
-	return c.stopReportedRun(ctx, c.execution(ctx, runID))
+	now := c.execution(ctx, runID)
+	if !now.Known && runID == shown.ID {
+		now.Worker = shown.Worker
+	}
+	return c.stopReportedRun(ctx, now)
 }
 
 // StopShownRun stops the active run only if it is shown, the run the operator was
 // shown (a zero ID for none). Another run is left alone and returned as an error,
-// and so is a later run that reuses the shown ID, where the engine reports a start
-// time for both. It returns the stopped run, or a zero ID when no run is active.
+// and so is a run that cannot be shown to be the same execution: see
+// unconfirmedReason. It returns the stopped run, or a zero ID when no run is active.
 func (c *SptAPIClient) StopShownRun(ctx context.Context, shown RunExecution) (RunExecution, error) {
 	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
@@ -505,20 +557,20 @@ func (c *SptAPIClient) StopShownRun(ctx context.Context, shown RunExecution) (Ru
 		return RunExecution{}, fmt.Errorf("run %d replaced the run shown, %d; it was not stopped", runID, shown.ID)
 	}
 	now := c.execution(ctx, runID)
-	if isLaterExecution(shown, now) {
-		return RunExecution{}, fmt.Errorf("run %d is a later run that reuses the ID of the run shown; it was not stopped", runID)
-	}
-	if now.Since == "" {
-		now.Since = shown.Since
+	if reason := unconfirmedReason(shown, now, false); reason != "" {
+		return RunExecution{}, fmt.Errorf("run %d cannot be shown to be the run shown: %s; it was not stopped. "+
+			"Retry, or stop the run yourself", runID, reason)
 	}
 	return c.stopReportedRun(ctx, now)
 }
 
-// ConfirmNoOtherRun returns an error if a run other than stopped is active: another
-// ID, or a later run with the same ID where the engine reports start times. A
-// stopped run may stay active until its cleanup returns, so it is allowed. The
-// engine's shutdown takes no run ID: a run that starts after this check is not
-// seen, nor is a later run that reuses the ID on an engine without start times.
+// ConfirmNoOtherRun returns an error unless the only run active is stopped, or
+// none is. A stopped run may stay active until its cleanup returns, so it is
+// allowed, in a terminal state. A run with another ID, a later run with the same
+// ID, and a run that cannot be shown to be stopped (see unconfirmedReason) are
+// errors. The engine's shutdown takes no run ID: a run that starts after this
+// check is not seen, nor is a later run that reuses the ID on an engine without
+// start times.
 func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stopped RunExecution) error {
 	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
@@ -530,8 +582,8 @@ func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stopped RunExecuti
 	if runID != stopped.ID {
 		return fmt.Errorf("run %d is active on the engine", runID)
 	}
-	if isLaterExecution(stopped, c.execution(ctx, runID)) {
-		return fmt.Errorf("run %d is active on the engine again, in a later run that reuses its ID", runID)
+	if reason := unconfirmedReason(stopped, c.execution(ctx, runID), true); reason != "" {
+		return fmt.Errorf("run %d is still active and cannot be shown to be the run stopped: %s", runID, reason)
 	}
 	return nil
 }

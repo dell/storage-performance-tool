@@ -321,7 +321,7 @@ func TestForceVerificationWaitEndsWithTheContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	engine := newFakeEngine(t, 41)
-	api := fakeDockerWith(hostEngine("holder", engine.port()))
+	api := fakeDockerWith(publishedEngine(t, "holder", "127.0.0.1", engine.port()))
 	api.onRemove = func(string) { cancel() }
 	resolver := engine.resolver(true, false)
 	resolver.dockerFinder = newFakeFinder(api)
@@ -329,10 +329,7 @@ func TestForceVerificationWaitEndsWithTheContext(t *testing.T) {
 	defer resolver.Close()
 
 	result := within(t, func() *ResolutionResult {
-		return resolver.executeForceStop(ctx, &ServiceInfo{
-			IsListening: true, IsSpt: true, APIConfirmed: true,
-			Container: &ContainerInfo{ID: "holder", Name: "holder", Labels: nodeLabels()},
-		})
+		return resolver.executeForceStop(ctx, &ServiceInfo{IsListening: true, IsSpt: true, APIConfirmed: true})
 	})
 	if result.Success || !errors.Is(result.Error, context.Canceled) || !strings.Contains(result.Message, "Stopped waiting") {
 		t.Fatalf("result = %+v, want the cancelled wait", result)

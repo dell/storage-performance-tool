@@ -221,7 +221,7 @@ func TestForce_ExposedOnlySptContainerIsNotTouched(t *testing.T) {
 	if result.Success {
 		t.Errorf("CheckAndResolveConflicts() Success = true, want false")
 	}
-	if !strings.Contains(result.Message, "No containers found using port "+portStr) {
+	if !strings.Contains(result.Message, "No container publishes 127.0.0.1:"+portStr) {
 		t.Errorf("CheckAndResolveConflicts() Message = %q, want the no-containers message", result.Message)
 	}
 

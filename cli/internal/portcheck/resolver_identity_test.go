@@ -52,7 +52,7 @@ func newLookalikeHolder(t *testing.T) *lookalikeHolder {
 	holder.docker = &fakeDockerAPI{containers: []containertypes.Summary{{
 		ID: "dashboard", Names: []string{"/dashboard"}, Image: "spt-dashboard",
 		State: containertypes.StateRunning,
-		Ports: []containertypes.Port{{PublicPort: listenerPort(t, port), PrivatePort: 80, Type: "tcp"}},
+		Ports: []containertypes.Port{{IP: "0.0.0.0", PublicPort: listenerPort(t, port), PrivatePort: 80, Type: "tcp"}},
 	}}}
 	return holder
 }
