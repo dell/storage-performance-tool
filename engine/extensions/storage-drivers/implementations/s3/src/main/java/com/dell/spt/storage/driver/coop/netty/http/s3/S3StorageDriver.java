@@ -1333,8 +1333,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * {@link #requestPath}'s encoding. When no character needs encoding, as in every generated name,
-	 * it returns {@code path} itself and allocates nothing. The search uses {@link String#indexOf(int)},
-	 * which the JIT compiles to a vectorized scan, instead of a loop over the characters.
+	 * it returns {@code path} itself and allocates nothing. The search uses {@link String#indexOf(int)}
+	 * for each character.
 	 */
 	static String encodeKeyQueryChars(final String path) {
 		final int first = firstOf(firstOf(path.indexOf('?'), path.indexOf('#')), path.indexOf(' '));
