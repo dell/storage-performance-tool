@@ -68,6 +68,52 @@ var weightedReadConfig = {
 > * Full example may be found in the `example/scenario/js/types/weighted.js` scenario file.
 > * Weight throttle will never permit the operations if the corresponding weight is 0
 
+## Step ids
+
+A weighted load step can set `load.step.id` with `config()`, and each context passed to
+`append()` can set its own. These ids decide the folders under `log/` that hold the step's
+results:
+
+* A context that sets `load.step.id` in its `append()` map writes its metrics files and
+  `result.xml` under `log/<that id>/`.
+* The id of the last context also names the step, so the step's own files, such as the
+  operation lifecycle files, go to that folder too.
+* A context that sets no id of its own writes under the id set on the step with `config()`, or
+  else under a generated `weighted_<yyyyMMdd.HHmmss.SSS>` id. It does not take the last
+  context's id. When the last context sets no id, the step's own files go to that folder too.
+
+For example, with no id set by `config()`:
+
+```javascript
+WeightedLoad
+    .append({"load": {"op": {"weight": 50, "limit": {"count": 20}}}})
+    .append({"load": {"op": {"weight": 50, "limit": {"count": 20}}, "step": {"id": "ctx_b"}}})
+    .run();
+```
+
+writes:
+
+```
+log/
+├── none-<timestamp>/       engine start-up files
+├── weighted_<timestamp>/   first context: metrics*.csv, result.xml
+└── ctx_b/                  last context: metrics*.csv, result.xml; and the step's own files
+```
+
+The exact files in each folder depend on the step and its configuration.
+
+A context's id is used as given each time a step with that context runs:
+
+* When the scenario runs such a step again and the context is not the last, both steps run and
+  the scenario exits 0, but both write that context's results to one folder: its `result.xml`
+  holds two `<result>` documents, and its `metrics.total.csv` and `metrics.steady.total.csv`
+  repeat their header.
+* When the context is the last, its id names the step, so the second step is refused, as any
+  step whose id is already used in the log directory is (`StepIdInUseException`), and the
+  scenario fails.
+
+So give a context a different id on each run, or set no id in the contexts.
+
 ## Limitations
 
 1. Weighted load step should contain at least 2 configuration elements.
