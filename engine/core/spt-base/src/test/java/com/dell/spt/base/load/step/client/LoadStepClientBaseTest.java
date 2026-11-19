@@ -120,6 +120,91 @@ class LoadStepClientBaseTest {
 		return new TestLoadStepClient(testConfig, List.of(factory), ctxConfigs, mockMetricsManager);
 	}
 
+	private static final String STOPPED_STEP_REFUSAL = "this step object has been stopped and cannot be started again; a step object runs once. "
+					+ "Build a new step from a prototype with config() and run that.";
+
+	private static void assertStoppedStepRefusal(final TestLoadStepClient client, final RunTerminalException failure) {
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals(client.loadStepId(), failure.stepId());
+		assertEquals(STOPPED_STEP_REFUSAL, failure.getMessage());
+	}
+
+	/** A NOOP step: it has no lifecycle artifact, which a mocked slice would not write. */
+	private TestLoadStepClient noopClientWithLocalSlice(final LoadStep slice) {
+		testConfig.val("load-op-type", "noop");
+		return clientWithLocalSlice(slice);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static int stepSliceCount(final LoadStepClientBase<?> client) throws Exception {
+		final Field field = LoadStepClientBase.class.getDeclaredField("stepSlices");
+		field.setAccessible(true);
+		return ((List<LoadStep>) field.get(client)).size();
+	}
+
+	@Test
+	void aStoppedStepRefusesAnotherStartAndStillCloses() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		final var client = noopClientWithLocalSlice(slice);
+		client.start();
+		client.stop();
+		final var slices = stepSliceCount(client);
+
+		final var failure = assertThrows(RunTerminalException.class, client::start);
+
+		assertStoppedStepRefusal(client, failure);
+		assertTrue(client.isStopped(), "the refused start leaves the step stopped");
+		assertEquals(1, client.getInitCallCount());
+		assertEquals(slices, stepSliceCount(client));
+		verify(slice, times(1)).start();
+		client.close();
+		assertTrue(client.isClosed());
+		verify(slice, times(1)).close();
+	}
+
+	@Test
+	void runOnAStoppedStepEndsTheRunWithTheRefusalAndClosesTheStep() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		final var client = noopClientWithLocalSlice(slice);
+		client.start();
+		client.stop();
+
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+
+		assertStoppedStepRefusal(client, failure);
+		assertSame(failure, client.runFailure());
+		assertEquals(1, client.getInitCallCount());
+		verify(slice, times(1)).start();
+		assertTrue(client.isClosed());
+		verify(slice, times(1)).close();
+	}
+
+	@Test
+	void aStepStoppedBeforeItStartedIsRefusedTheSameWay() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		final var client = noopClientWithLocalSlice(slice);
+		client.stop();
+
+		final var failure = assertThrows(RunTerminalException.class, client::start);
+
+		assertStoppedStepRefusal(client, failure);
+		assertEquals(0, client.getInitCallCount());
+		verify(slice, never()).start();
+		client.close();
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void aStepStoppedAndClosedWithoutARestartIsNotRefused() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		final var client = noopClientWithLocalSlice(slice);
+		client.start();
+		client.stop();
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+		assertNull(client.runFailure());
+	}
+
 	@Test
 	void aSliceThatFailsToStartFailsTheRun() throws Exception {
 		final LoadStep slice = mock(LoadStep.class);
