@@ -108,9 +108,11 @@ A context's id is used as given each time a step with that context runs:
   the scenario exits 0, but both write that context's results to one folder: its `result.xml`
   holds two `<result>` documents, and its `metrics.total.csv` and `metrics.steady.total.csv`
   repeat their header.
-* When the context is the last, its id names the step, so the second step is refused, as any
-  step whose id is already used in the log directory is (`StepIdInUseException`), and the
-  scenario fails.
+* When the context is the last, its id names the step, so the second step is handled as any
+  step whose id is already used in the log directory: it is refused (`StepIdInUseException`)
+  and the scenario fails when a result file it would write under that id already exists, as for
+  a CREATE after a CREATE; otherwise it runs and can add a second `<result>` to that
+  `result.xml`, as a CREATE after a NOOP does.
 
 So give a context a different id on each run, or set no id in the contexts.
 
