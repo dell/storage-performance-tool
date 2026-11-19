@@ -78,6 +78,8 @@ final class S3KeyReservedCharsTest {
 		assertEquals("x%23y%3Fz%20", S3StorageDriver.encodeKeyQueryChars("x#y?z "));
 		assertEquals("x%20y%23z%3F", S3StorageDriver.encodeKeyQueryChars("x y#z?"));
 		assertEquals("%20", S3StorageDriver.encodeKeyQueryChars(" "));
+		// a repeated character: every occurrence is encoded, not only the first or the last
+		assertEquals("a%3Fb%3F%3Fc%23%23d%20%20", S3StorageDriver.encodeKeyQueryChars("a?b??c##d  "));
 		assertEquals("a%23", S3StorageDriver.encodeKeyQueryChars("a#"));
 		assertEquals("", S3StorageDriver.encodeKeyQueryChars(""));
 	}
