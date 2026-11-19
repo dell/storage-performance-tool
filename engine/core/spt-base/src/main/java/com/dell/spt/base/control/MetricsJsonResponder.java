@@ -42,20 +42,32 @@ import com.dell.spt.base.logging.Loggers;
 final class MetricsJsonResponder {
 
 	private static final int METRICS_SCHEMA_VERSION = 5;
+	private static final String ROLE_ENTRY = "entry";
+	private static final String ROLE_WORKER = "worker";
+	private static final String ROLE_AGGREGATE = "aggregate";
 
 	private final MetricsManager metricsManager;
 	private final ObjectMapper objectMapper = new ObjectMapper();
 	private final String nodeId;
 	private final String clusterId;
 	private final long configuredRunId;
-	private final boolean entryRoleHint;
+	private final ApiStatus apiStatus;
 
+	/** A responder for a node that has accepted no run through {@code POST /run}: its node rows read {@code worker}. */
 	MetricsJsonResponder(final MetricsManager metricsManager, final Config config) {
+		this(metricsManager, config, new ApiStatus());
+	}
+
+	/**
+	 * @param apiStatus the node's {@code /status} holder; a node row reads {@code entry} when this node
+	 *     accepted the row's run through {@code POST /run}, otherwise {@code worker}
+	 */
+	MetricsJsonResponder(final MetricsManager metricsManager, final Config config, final ApiStatus apiStatus) {
 		this.metricsManager = metricsManager;
 		this.nodeId = resolveNodeId(config);
 		this.clusterId = resolveClusterId(config);
 		this.configuredRunId = resolveConfiguredRunId(config);
-		this.entryRoleHint = resolveEntryRoleHint(config);
+		this.apiStatus = apiStatus;
 	}
 
 	ArrayNode buildNodeMetrics(final boolean verbose) {
@@ -102,7 +114,6 @@ final class MetricsJsonResponder {
 				continue;
 			}
 			final ObjectNode jsonObj = buildDistributedNode(ctx, snapshot, distributed, allContexts, verbose);
-			jsonObj.put("role", "aggregate");
 			jsonArray.add(jsonObj);
 			activeStepIds.add(ctx.loadStepId());
 		}
@@ -159,7 +170,12 @@ final class MetricsJsonResponder {
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
 
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
-		applyCommonMetadata(jsonObj, "node", ctx.runId(), (String) ctx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
+		applyCommonMetadata(
+						jsonObj,
+						"node",
+						nodeRowRole(ctx.runId()),
+						ctx.runId(),
+						(String) ctx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
 		jsonObj.put("step_id", ctx.loadStepId());
 		jsonObj.put("op_type", ctx.opType().name());
 		jsonObj.put("timestamp", System.currentTimeMillis());
@@ -232,7 +248,12 @@ final class MetricsJsonResponder {
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
 
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
-		applyCommonMetadata(jsonObj, "fleet", ctx.runId(), (String) ctx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
+		applyCommonMetadata(
+						jsonObj,
+						"fleet",
+						ROLE_AGGREGATE,
+						ctx.runId(),
+						(String) ctx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
 		jsonObj.put("step_id", ctx.loadStepId());
 		jsonObj.put("op_type", ctx.opType().name());
 		jsonObj.put("timestamp", System.currentTimeMillis());
@@ -741,7 +762,7 @@ final class MetricsJsonResponder {
 	private ObjectNode buildIdleNodeSample() {
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
 		// Common metadata; override run_id to empty string for pre-run idle state
-		applyCommonMetadata(jsonObj, "node", configuredRunId);
+		applyCommonMetadata(jsonObj, "node", idleSampleRole(), configuredRunId, null);
 		jsonObj.put("run_id", "");
 
 		// Required identifiers
@@ -803,7 +824,7 @@ final class MetricsJsonResponder {
 			}
 			final ObjectNode jsonObj = objectMapper.createObjectNode();
 			final long runId = entry.runId > 0 ? entry.runId : configuredRunId;
-			applyCommonMetadata(jsonObj, "node", runId, entry.clusterId);
+			applyCommonMetadata(jsonObj, "node", nodeRowRole(runId), runId, entry.clusterId);
 			jsonObj.put("step_id", entry.stepId);
 			jsonObj.put("op_type", entry.opType.name());
 			jsonObj.put("timestamp", entry.recordedAtMillis);
@@ -896,8 +917,7 @@ final class MetricsJsonResponder {
 			}
 			final ObjectNode jsonObj = objectMapper.createObjectNode();
 			final long runId = entry.runId > 0 ? entry.runId : configuredRunId;
-			applyCommonMetadata(jsonObj, "fleet", runId, entry.clusterId);
-			jsonObj.put("role", "aggregate");
+			applyCommonMetadata(jsonObj, "fleet", ROLE_AGGREGATE, runId, entry.clusterId);
 			jsonObj.put("step_id", entry.stepId);
 			jsonObj.put("op_type", entry.opType.name());
 			jsonObj.put("timestamp", entry.recordedAtMillis);
@@ -1151,14 +1171,15 @@ final class MetricsJsonResponder {
 						|| metadataLong(meta, MetricsConstants.METADATA_LIMIT_TIME_SEC) > 0L;
 	}
 
-	private void applyCommonMetadata(final ObjectNode jsonObj, final String scope, final long runId) {
-		applyCommonMetadata(jsonObj, scope, runId, null);
-	}
-
-	private void applyCommonMetadata(final ObjectNode jsonObj, final String scope, final long runId, final String runClusterId) {
+	private void applyCommonMetadata(
+					final ObjectNode jsonObj,
+					final String scope,
+					final String role,
+					final long runId,
+					final String runClusterId) {
 		jsonObj.put("metrics_schema", METRICS_SCHEMA_VERSION);
 		jsonObj.put("scope", scope);
-		jsonObj.put("role", resolveRole());
+		jsonObj.put("role", role);
 		jsonObj.put("node_id", nodeId);
 		final String effectiveClusterId = runClusterId == null || runClusterId.isBlank() ? clusterId : runClusterId;
 		if (effectiveClusterId != null && !effectiveClusterId.isBlank()) {
@@ -1168,16 +1189,27 @@ final class MetricsJsonResponder {
 		jsonObj.put("sample_ts", Instant.now().toString());
 	}
 
-	private String resolveRole() {
-		if (!metricsManager.getDistributedContexts().isEmpty() || entryRoleHint) {
-			return "entry";
-		}
-		return "worker";
+	/**
+	 * A node row, live or terminal, is {@code entry} when this node runs the row's run as its entry, that is
+	 * when it accepted the run through {@code POST /run}; every row of a slice an entry started here is
+	 * {@code worker}. The run id is recorded before the run's first step starts, so the role does not change
+	 * between a row's first appearance and its expiry.
+	 */
+	private String nodeRowRole(final long runId) {
+		return apiStatus.acceptedRun(runId) ? ROLE_ENTRY : ROLE_WORKER;
 	}
 
-	private static boolean resolveEntryRoleHint(final Config config) {
-		final Boolean value = safeBoolean(config, "run-node");
-		return Boolean.TRUE.equals(value);
+	/** The idle sample is {@code entry} while a distributed context is live or a distributed terminal is retained. */
+	private String idleSampleRole() {
+		if (!metricsManager.getDistributedContexts().isEmpty()) {
+			return ROLE_ENTRY;
+		}
+		for (final TerminalStepEntry entry : metricsManager.getTerminalSteps()) {
+			if (entry.distributed) {
+				return ROLE_ENTRY;
+			}
+		}
+		return ROLE_WORKER;
 	}
 
 	private static String resolveNodeId(final Config config) {
@@ -1244,15 +1276,6 @@ final class MetricsJsonResponder {
 			return config.longVal(path);
 		} catch (final RuntimeException e) {
 			Loggers.MSG.debug("MetricsJsonResponder: unable to read long config \"{}\": {}", path, e.getMessage());
-			return null;
-		}
-	}
-
-	private static Boolean safeBoolean(final Config config, final String path) {
-		try {
-			return config.boolVal(path);
-		} catch (final RuntimeException e) {
-			Loggers.MSG.debug("MetricsJsonResponder: unable to read boolean config \"{}\": {}", path, e.getMessage());
 			return null;
 		}
 	}

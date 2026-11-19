@@ -9,6 +9,13 @@ public final class ApiStatus {
 
 	public static final int MAX_FAILURE_MESSAGE_LENGTH = 1024;
 
+	/**
+	 * How many of the latest run ids {@link #acceptedRun(long)} remembers. A run's terminal metrics rows are
+	 * retained for {@code api-linger-sec} after it ends, so a few runs started inside that window are all a
+	 * node needs to keep labelling its earlier rows {@code entry}.
+	 */
+	static final int ACCEPTED_RUN_IDS = 16;
+
 	public enum State {
 		IDLE, RUNNING, COMPLETED, STOPPED, FAILED
 	}
@@ -24,11 +31,15 @@ public final class ApiStatus {
 	private final AtomicReference<Snapshot> snapshotRef = new AtomicReference<>(
 					new Snapshot(State.IDLE, Instant.now().toEpochMilli(), 0L, null, null, null));
 
+	private final long[] acceptedRunIds = new long[ACCEPTED_RUN_IDS];
+	private int nextAcceptedRunId;
+
 	public void setIdle() {
 		snapshotRef.set(new Snapshot(State.IDLE, System.currentTimeMillis(), 0L, null, null, null));
 	}
 
 	public void setRunning(final String stepId, final long runId) {
+		rememberAcceptedRun(runId);
 		snapshotRef.set(new Snapshot(
 						State.RUNNING, System.currentTimeMillis(), runId, stepId, null, null));
 	}
@@ -67,6 +78,42 @@ public final class ApiStatus {
 		snapshotRef.updateAndGet(current -> current.state() == State.RUNNING
 						? withState(current, State.COMPLETED)
 						: current);
+	}
+
+	/**
+	 * Whether this node accepted a run with this id through {@code POST /run}, as that run's entry. The id is
+	 * recorded before the run's first step starts and kept after the run ends, so a node's metrics rows for
+	 * the run read the same role from their first appearance to their expiry. A slice an entry starts on this
+	 * node over RMI never reaches here. Zero is never a run id.
+	 */
+	public boolean acceptedRun(final long runId) {
+		if (runId == 0L) {
+			return false;
+		}
+		synchronized (acceptedRunIds) {
+			return holdsAcceptedRun(runId);
+		}
+	}
+
+	private void rememberAcceptedRun(final long runId) {
+		if (runId == 0L) {
+			return;
+		}
+		synchronized (acceptedRunIds) {
+			if (!holdsAcceptedRun(runId)) {
+				acceptedRunIds[nextAcceptedRunId] = runId;
+				nextAcceptedRunId = (nextAcceptedRunId + 1) % acceptedRunIds.length;
+			}
+		}
+	}
+
+	private boolean holdsAcceptedRun(final long runId) {
+		for (final long accepted : acceptedRunIds) {
+			if (accepted == runId) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public Snapshot snapshot() {
