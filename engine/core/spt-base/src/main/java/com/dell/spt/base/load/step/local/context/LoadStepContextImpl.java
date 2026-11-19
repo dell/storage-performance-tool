@@ -553,6 +553,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	/**
+	 * Counts a finished split read. It sends no request of its own: each of its ranges has already
+	 * added a duration, latency and time-to-first-byte sample, so it adds none. Its time from start to
+	 * last range stays on the operation, for the operation trace.
+	 */
+	private void markSplitReadSucc(final O opResult, final long bytes) {
+		markSucc(opResult, bytes, 0L, 0L, 0L);
+	}
+
 	private void markPartSucc(
 					final O opResult, final long bytes, final long duration, final long latency, final long ttfb) {
 		resolveMetrics(opResult.type()).markPartSucc(bytes, duration, latency, ttfb);
@@ -876,7 +885,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final Status status = opResult.status();
 		// account the completed composite ops only, and the failed ones: a composite that fails unfinished
 		// (its initiation, or its abort after a part ran out of retries) is counted once as a failure
-		if (opResult instanceof CompositeOperation
+		final boolean composite = opResult instanceof CompositeOperation;
+		if (composite
 						&& !((CompositeOperation) opResult).allSubOperationsDone()
 						&& !isFailure(status)) {
 			return true;
@@ -941,6 +951,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				outputTimingMetrics(opResult);
 				if (opResult instanceof ListOperation) {
 					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency, timeToFirstByte);
+				} else if (composite && OpType.READ.equals(opResult.type())) {
+					markSplitReadSucc(opResult, countBytesDone);
 				} else {
 					markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				}
@@ -996,12 +1008,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		long timeToFirstByte;
 		long countBytesDone = 0;
 		ListOperation<?> listOpResult = null;
+		boolean composite;
 		int i;
 		for (i = from; i < to; i++) {
 			opResult = opResults.get(i);
 			status = opResult.status();
 			// account the completed composite ops only, and the failed ones (see put(O))
-			if (opResult instanceof CompositeOperation
+			composite = opResult instanceof CompositeOperation;
+			if (composite
 							&& !((CompositeOperation) opResult).allSubOperationsDone()
 							&& !isFailure(status)) {
 				continue;
@@ -1070,6 +1084,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					outputTimingMetrics(opResult);
 					if (listOpResult != null) {
 						markListSuccess(listOpResult, reqDuration, respLatency, timeToFirstByte);
+					} else if (composite && OpType.READ.equals(opResult.type())) {
+						markSplitReadSucc(opResult, countBytesDone);
 					} else {
 						markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 					}
