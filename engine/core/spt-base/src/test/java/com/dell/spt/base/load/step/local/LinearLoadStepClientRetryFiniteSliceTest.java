@@ -38,7 +38,7 @@ class LinearLoadStepClientRetryFiniteSliceTest {
 	private static final int C = 8;
 	private static final long L_MILLIS = 25;
 	private static final int ITEMS_PER_SLICE = 12 * C;
-	private static final long TAIL_MILLIS = 800;
+	private static final long TAIL_MILLIS = 1_500;
 	private static final long TERMINAL_RETENTION_MILLIS = TimeUnit.MINUTES.toMillis(10);
 
 	@TempDir

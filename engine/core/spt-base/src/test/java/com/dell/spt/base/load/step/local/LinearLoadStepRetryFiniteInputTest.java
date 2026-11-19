@@ -32,7 +32,7 @@ class LinearLoadStepRetryFiniteInputTest {
 	private static final int C = 8;
 	private static final long L_MILLIS = 25;
 	private static final int ITEMS = 24 * C;
-	private static final long TAIL_MILLIS = 800;
+	private static final long TAIL_MILLIS = 1_500;
 	private static final String EXHAUSTION = "scheduling exhaustion";
 
 	@TempDir
@@ -45,7 +45,7 @@ class LinearLoadStepRetryFiniteInputTest {
 		final Config config = finiteReadConfig("retry-finite-slow-" + retry, retry, 3);
 		final Outcome outcome = run(config, driver(0));
 		assertEquals(EXHAUSTION, outcome.steady.cause(), outcome.steady.toString());
-		assertTrue(outcome.window.successSnapshot().count() < ITEMS, "window " + outcome.window.successSnapshot().count());
+		assertTailOutsideWindow(outcome);
 		assertEquals(ITEMS, outcome.total.successSnapshot().count());
 		final double capacity = C * 1_000.0 / L_MILLIS;
 		assertTrue(
@@ -61,7 +61,7 @@ class LinearLoadStepRetryFiniteInputTest {
 		assertEquals(ITEMS + 1, driver.dispatchedCount(), "the retry was dispatched after the signal");
 		assertEquals(ITEMS, outcome.total.successSnapshot().count());
 		assertEquals(0, outcome.total.failsSnapshot().count());
-		assertTrue(outcome.window.successSnapshot().count() < ITEMS, "window " + outcome.window.successSnapshot().count());
+		assertTailOutsideWindow(outcome);
 		assertEquals(0, outcome.window.failsSnapshot().count());
 	}
 
@@ -84,6 +84,16 @@ class LinearLoadStepRetryFiniteInputTest {
 		final Outcome outcome = run(config, driver(0).listing(ITEMS));
 		assertEquals(EXHAUSTION, outcome.steady.cause(), outcome.steady.toString());
 		assertEquals(ITEMS, outcome.total.successSnapshot().count());
+	}
+
+	/**
+	 * Warm-up successes leave the window, so its success count stays below the input's size even
+	 * with the tail in it. Only the tail takes this long, so the longest duration identifies it.
+	 */
+	private static void assertTailOutsideWindow(final Outcome outcome) {
+		assertTrue(
+						outcome.window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(TAIL_MILLIS),
+						"the slow last operation is in the window: " + outcome.steady);
 	}
 
 	private static LatencyStorageDriver<?, ?> driver(final int tailFailures) {

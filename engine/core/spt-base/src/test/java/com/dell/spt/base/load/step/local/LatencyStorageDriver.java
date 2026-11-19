@@ -534,6 +534,9 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 					final I lastPrevItem,
 					final int count)
 					throws IOException {
+		if (listedItemCount == 0) {
+			return List.of();
+		}
 		final int first = lastPrevItem == null
 						? 0
 						: Integer.parseInt(lastPrevItem.name().substring(lastPrevItem.name().lastIndexOf('-') + 1)) + 1;
