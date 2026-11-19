@@ -2,7 +2,6 @@ package integrity
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -46,24 +45,17 @@ func savedItemRowError(recordNumber int) error {
 		recordNumber, strings.Join(canonicalHeader, ","))
 }
 
-// RefuseSavedItemsUnderHeader returns an error when path starts with the canonical header, which
-// makes the engine read it as a manifest, and its first data row is a saved engine items row. It
-// reads no further than that row. A file it cannot read or parse is left for the engine to judge.
+// RefuseSavedItemsUnderHeader returns an error when the engine would read path as a canonical
+// manifest whose first data row is a saved engine items row. It reads the file by the engine's own
+// CSV rules (engineCSVReader), no further than that row, so a row the canonical reader refuses,
+// such as one with a quote inside its object path or with bare-CR line ends, is still judged. A
+// file from which the engine itself takes no object is left to the engine (see
+// findSavedItemRowAsEngineReads).
 func RefuseSavedItemsUnderHeader(path string) error {
-	in, err := os.Open(path) // #nosec G304 -- explicit user-selected local input file
-	if err != nil {
+	const firstDataRecordOnly = 1
+	record, underHeader, found := findSavedItemRowAsEngineReads(path, firstDataRecordOnly)
+	if !found || !underHeader {
 		return nil
 	}
-	defer func() { _ = in.Close() }()
-	reader := newIdentityCSVReader(in)
-	header, err := reader.Read()
-	if err != nil || !equalFields(header, canonicalHeader) {
-		return nil
-	}
-	const firstDataRecord = 2
-	fields, err := reader.Read()
-	if err != nil || !isSavedItemRow(fields, firstDataRecord) {
-		return nil
-	}
-	return savedItemRowError(firstDataRecord)
+	return savedItemRowError(record)
 }

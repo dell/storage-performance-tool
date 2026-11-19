@@ -69,6 +69,10 @@ func TestStageRefusesSavedEngineItemRowsUnderCanonicalHeader(t *testing.T) {
 		{"canonical rows then an engine row", "b,s0/a,1024,\nb,s1/b,1024,\n" + path + ",2a0f,1024,0/0\n", "4"},
 		{"an engine row then canonical rows", path + ",2a0f,1024,0/0\nb,s0/a,1024,\n", "2"},
 		{"accepted false positive: plain bucket", "b,2a0f,1024,0/0\n", "2"},
+		{"quote inside the object path", `/sample/pre"fix/s0000000/item,2a0f,1024,0/0` + "\n", "2"},
+		{"canonical row then a quote inside an object path", "b,k,1024,\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n", "3"},
+		{"bare-CR line ends", path + ",2a0f,1024,0/0\r" + path + "2,2a10,1024,0/0\r", "2"},
+		{"bare-CR line ends after canonical rows", "b,k,1024,\rb,k2,1024,\r" + path + ",2a0f,1024,0/0\r", "4"},
 		{"accepted false positive: hex key and hex/hex version", "b,abcd,16,ab/cd\n", "2"},
 	}
 	for _, test := range tests {
@@ -107,10 +111,54 @@ func TestStageHeaderRefusalExplainsSavedItemsFile(t *testing.T) {
 			content: "/b/s0/name,2a0f,1024,0/0\n/b/s0/other,2a10,1024,0/0\n",
 			want:    headerMessage + ": " + savedItemRowMessage("1"),
 		},
+		{
+			name:    "bare-CR saved items file",
+			content: "/b/s0/name,2a0f,1024,0/0\r/b/s0/other,2a10,1024,0/0\r",
+			want:    headerMessage + ": " + savedItemRowMessage("1"),
+		},
+		{
+			name:    "header and rows on bare-CR line ends",
+			content: "bucket,key,size,version_id\r/b/s0/name,2a0f,1024,0/0\r",
+			want:    savedItemRowMessage("2"),
+		},
 		{name: "canonical rows", content: "b,k,1024,\n", want: headerMessage},
 		{name: "canonical row with hex key", content: "b,2a0f,1024,\n", want: headerMessage},
 		{name: "plain item list", content: "obj-1\n", want: headerMessage},
 		{name: "invalid size", content: "/b/s0/name,2a0f,big,0/0\n", want: headerMessage},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stageThroughEveryRoute(t, test.content, func(t *testing.T, tempDir, _ string, err error) {
+				if err == nil || err.Error() != test.want {
+					t.Fatalf("error = %v, want %q", err, test.want)
+				}
+				requireEmptyDir(t, tempDir)
+			})
+		})
+	}
+}
+
+func TestStageKeepsTheCanonicalReadersErrorWhenNoSavedRowIsFound(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "quote inside a canonical key",
+			content: "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n",
+			want:    "stage canonical input: parse canonical record 2: unexpected quote in unquoted field",
+		},
+		{
+			name:    "bare-CR canonical rows",
+			content: "bucket,key,size,version_id\rb,k,1024,\r",
+			want:    `items file must use exact header ["bucket" "key" "size" "version_id"]`,
+		},
+		{
+			name:    "five fields",
+			content: "bucket,key,size,version_id\n/b/s0/name,2a0f,1024,0/0,x\n",
+			want:    "stage canonical input: canonical record 2 has 5 fields, want 4",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

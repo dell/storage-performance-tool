@@ -69,10 +69,13 @@ to every row. Omitting it permits a multi-bucket manifest, but multi-bucket inpu
 
 A saved `items.csv` (`--save-items` output) is not a manifest, and putting this header on it does
 not convert it: its rows hold an object path, a hex offset, a size and a layer/mask. The CLI refuses
-any row whose `key` is a hex number and whose `version_id` is `<hex>/<hex>`, before anything starts,
-with exit 1 and no request sent. Write each object as `<bucket>,<key>,<size>,<version_id or empty>`.
-A real object with a hex key and a `<hex>/<hex>` version ID would be refused too; no S3 server tried
-issues such an ID.
+any row whose `key` is a hexadecimal offset that fits a signed 64-bit integer and whose `version_id`
+is `<layer>/<mask>`, the layer a hexadecimal number that fits a signed 32-bit integer and the mask
+hexadecimal digits or none (so `0/` counts); either number may carry a sign. It reads the file as
+the engine does, so a quote inside an object path or bare-CR line ends do not hide such a row. The
+refusal comes before anything starts, with exit 1 and no request sent. Write each object as
+`<bucket>,<key>,<size>,<version_id or empty>`. A real object with such a key and version ID would
+be refused too; no S3 server tried issues such an ID.
 
 ```bash
 spt run delete \

@@ -146,13 +146,12 @@ func stageInputManifestWithPolicyAndOperations(
 	defer func() { _ = in.Close() }()
 	reader := newIdentityCSVReader(in)
 	header, err := reader.Read()
-	if err != nil {
-		return "", "", "", fmt.Errorf("read canonical header: %w", err)
-	}
-	if !equalFields(header, canonicalHeader) {
-		if isSavedItemRow(header, 1) {
-			return "", "", "", fmt.Errorf(
-				"items file must use exact header %q: %w", canonicalHeader, savedItemRowError(1))
+	if err != nil || !equalFields(header, canonicalHeader) {
+		if savedErr := savedItemRowRefusal(source); savedErr != nil {
+			return "", "", "", savedErr
+		}
+		if err != nil {
+			return "", "", "", fmt.Errorf("read canonical header: %w", err)
 		}
 		return "", "", "", fmt.Errorf("items file must use exact header %q", canonicalHeader)
 	}
@@ -174,12 +173,20 @@ func stageInputManifestWithPolicyAndOperations(
 		}
 		if readErr != nil {
 			writeErr = fmt.Errorf("parse canonical record %d: %w", sourceCount+2, readErr)
+			if savedErr := savedItemRowRefusal(source); savedErr != nil {
+				_ = raw.Close()
+				return "", "", "", savedErr
+			}
 			break
 		}
 		sourceCount++
 		record, parseErr := parseManifestRecord(fields, sourceCount+1)
 		if parseErr != nil {
 			writeErr = parseErr
+			if savedErr := savedItemRowRefusal(source); savedErr != nil {
+				_ = raw.Close()
+				return "", "", "", savedErr
+			}
 			break
 		}
 		if IsSavedItemFields(record.key, record.version) {
@@ -275,6 +282,22 @@ func stageInputManifestWithPolicyAndOperations(
 	}
 	success = true
 	return stagingDir, manifestPath, completionPath, nil
+}
+
+// savedItemRowRefusal explains a file the canonical reader refused when the engine's CSV rules
+// find a saved engine items row in it: under the canonical header, the saved-row refusal with the
+// engine's record number; without the header, the header refusal with the saved-row explanation.
+// It returns nil when they find none, and the caller keeps its own error.
+func savedItemRowRefusal(source string) error {
+	record, underHeader, found := findSavedItemRowAsEngineReads(source, 0)
+	switch {
+	case !found:
+		return nil
+	case underHeader:
+		return savedItemRowError(record)
+	default:
+		return fmt.Errorf("items file must use exact header %q: %w", canonicalHeader, savedItemRowError(record))
+	}
 }
 
 func selectCanonicalManifestPrefix(path, tempDir string, maxRecords int) (string, error) {

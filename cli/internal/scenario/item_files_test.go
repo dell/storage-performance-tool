@@ -127,15 +127,27 @@ func writeItemFile(t *testing.T, content string) string {
 }
 
 func TestPrepareExternalItemFilesRefusesSavedItemsUnderHeaderOnMountedRoutes(t *testing.T) {
+	// The check reads the file as the engine does, so rows the canonical reader refuses are
+	// judged too: a quote inside an object path is literal, and a bare CR ends a record.
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"LF line ends", canonicalItemsHeader + savedItemRow},
+		{"quote inside the object path", canonicalItemsHeader + `/sample/pre"fix/s0000000/item,2a0f,1024,0/0` + "\n"},
+		{"bare-CR line ends", "bucket,key,size,version_id\r/b/s0000000/name,2a0f5ed8eab22f7e,1024,0/0\r"},
+	}
 	for _, route := range mountedItemFileRoutes {
-		t.Run(route.flag, func(t *testing.T) {
-			path := writeItemFile(t, canonicalItemsHeader+savedItemRow)
-			_, err := PrepareExternalItemFiles(route.params(path))
-			want := route.flag + ": " + savedItemRowRefusal
-			if err == nil || err.Error() != want {
-				t.Fatalf("PrepareExternalItemFiles() error = %v, want %q", err, want)
-			}
-		})
+		for _, test := range tests {
+			t.Run(route.flag+"/"+test.name, func(t *testing.T) {
+				path := writeItemFile(t, test.content)
+				_, err := PrepareExternalItemFiles(route.params(path))
+				want := route.flag + ": " + savedItemRowRefusal
+				if err == nil || err.Error() != want {
+					t.Fatalf("PrepareExternalItemFiles() error = %v, want %q", err, want)
+				}
+			})
+		}
 	}
 }
 
@@ -150,6 +162,9 @@ func TestPrepareExternalItemFilesKeepsOtherFilesOnMountedRoutes(t *testing.T) {
 		{"engine row after the first data row", canonicalItemsHeader + "b,k,1024,\n" + savedItemRow},
 		{"header only", canonicalItemsHeader},
 		{"first data row does not parse", canonicalItemsHeader + "\"unterminated\n"},
+		{"canonical row with a quoted field", canonicalItemsHeader + `b,"dir/k,""1""",1024,` + "\n"},
+		{"hex key with an AWS-style version", canonicalItemsHeader +
+			"b,deadbeef,1024,3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo\n"},
 	}
 	for _, route := range mountedItemFileRoutes {
 		for _, test := range tests {

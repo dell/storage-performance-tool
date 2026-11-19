@@ -3,6 +3,7 @@ package integrity
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +70,12 @@ func TestRefuseSavedItemsUnderHeader(t *testing.T) {
 		{"engine row first, CRLF", "bucket,key,size,version_id\r\n/b/s0/name,2a0f,1024,0/0\r\n", true},
 		{"engine row without final newline", header + "/b/s0/name,2a0f,1024,0/0", true},
 		{"quoted header, as the engine reads it", `"bucket","key","size","version_id"` + "\n" + engineRow, true},
+		{"white space after a quoted header field", `"bucket" ,key,size,version_id` + "\n" + engineRow, true},
+		{"quote inside the object path", header + `/sample/pre"fix/s0000000/item,2a0f,1024,0/0` + "\n", true},
+		{"bare-CR line ends", "bucket,key,size,version_id\r/b/s0/name,2a0f,1024,0/0\r/b/s0/two,2a10,1024,0/0\r", true},
+		{"bare-CR line ends after the header only", "bucket,key,size,version_id\r" + engineRow, true},
+		{"quoted object path", header + `"/b/s0/a,b",2a0f,1024,0/0` + "\n", true},
+		{"object path longer than a canonical record", header + "/b/" + strings.Repeat("n", 1<<20) + ",2a0f,1024,0/0\n", true},
 
 		{"canonical row first", header + "b,k,1,\n", false},
 		{"only the first data row is read", header + "b,k,1,\n" + engineRow, false},
@@ -81,6 +88,17 @@ func TestRefuseSavedItemsUnderHeader(t *testing.T) {
 		{"first data row does not parse as CSV", header + "\"unterminated\n", false},
 		{"first data row has too few fields", header + "b,2a0f,0/0\n", false},
 		{"first data row has an invalid size", header + "b,2a0f,big,0/0\n", false},
+		{"canonical row with a quoted field", header + `b,"dir/k,""1""",1024,` + "\n", false},
+		{"canonical row with a quote inside the key", header + `b,dir/k"1,1024,` + "\n", false},
+		{"hex key with an AWS-style version", header + "b,deadbeef,1024,3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo\n", false},
+		{"bare-CR canonical rows", "bucket,key,size,version_id\rb,k,1024,\r/b/s0/name,2a0f,1024,0/0\r", false},
+		// Files from which the engine itself takes no object.
+		{"text after a closing quote", header + `"/b/s0/name"x,2a0f,1024,0/0` + "\n", false},
+		{"unterminated quote in the first data row", header + `"/b/s0/name,2a0f,1024,0/0` + "\n", false},
+		{"first data row with five fields", header + "/b/s0/name,2a0f,1024,0/0,x\n", false},
+		{"first data row with an empty bucket", header + ",2a0f,1024,0/0\n", false},
+		{"invalid UTF-8 before the first data row ends", header + "/b/s0/n\xffame,2a0f,1024,0/0\n", false},
+		{"mask longer than a canonical record", header + "/b/s0/name,2a0f,1024,0/" + strings.Repeat("0", 1<<20) + "\n", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
