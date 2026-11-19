@@ -6,6 +6,7 @@ import com.dell.spt.base.logging.Loggers;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryIteratorException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -54,9 +55,9 @@ public interface ListingHelper {
 	/**
 	 * Lists the regular files among the directory entries, following symbolic links: directories, other
 	 * non-regular entries, broken links, entries removed since the directory was read and entries whose
-	 * attributes cannot be read are skipped and do not count toward {@code count}. One attribute read per
-	 * examined entry gives both the type and the size. Entries that could not be read are logged as a
-	 * warning. The skipped non-regular entries are logged once per page, except on a page after the
+	 * attributes cannot be read, also through a link, are skipped and do not count toward
+	 * {@code count}. One attribute read per examined entry gives both the type and the size. Entries
+	 * that could not be read are logged as a warning. The skipped non-regular entries are logged once per page, except on a page after the
 	 * last item: the page before it may already have counted them.
 	 */
 	static <I extends Item> List<I> listEntries(
@@ -89,7 +90,7 @@ public interface ListingHelper {
 					skipped++;
 					continue;
 				} catch (final IOException e) {
-					if (Files.isSymbolicLink(nextPath)) {
+					if (!(e instanceof AccessDeniedException) && Files.isSymbolicLink(nextPath)) {
 						skipped++; // a broken link, such as a loop
 					} else {
 						// skipped, not thrown: File.length() let the listing go on, so one entry must not end it

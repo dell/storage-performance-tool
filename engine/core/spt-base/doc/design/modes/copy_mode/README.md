@@ -43,8 +43,9 @@ so it lands under the output path with that full path, as for `s3`: `/src/dir/f0
 `/dst/src/dir/f0`. Missing directories under the output path are created.
 
 A listed path covers the regular files of one directory level. Its subdirectories, and other entries that are not
-regular files, are skipped, and each listing page that skips entries logs their number once; a symbolic link to a
-regular file is copied with the target's content. Nested directories are copied with one step each.
+regular files, are skipped, and the log notes how many; an entry whose attributes cannot be read is skipped with a
+warning. A symbolic link to a regular file is copied with the target's content. Nested directories are copied with
+one step each.
 
 ### 2.3. HTTP Storage Case
 

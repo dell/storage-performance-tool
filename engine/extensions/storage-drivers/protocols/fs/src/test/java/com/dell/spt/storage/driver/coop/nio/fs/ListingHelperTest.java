@@ -307,7 +307,7 @@ public class ListingHelperTest {
 		Files.createDirectory(dir.resolve("emp"));
 		writeFile(cleanDir, "g0", 1);
 
-		final List<String> lines = captureSkipLines(() -> {
+		final List<String> lines = captureSkipLines(dir, () -> {
 			try {
 				assertEquals(2, listAll(dir, null, null).size());
 				assertEquals(1, listAll(cleanDir, null, null).size());
@@ -334,7 +334,7 @@ public class ListingHelperTest {
 		final List<Path> entries = List.of(d0, f0, d1, f1, d2);
 		final DataItemFactoryImpl<DataItem> factory = new DataItemFactoryImpl<>();
 
-		final List<String> lines = captureSkipLines(() -> {
+		final List<String> lines = captureSkipLines(dir, () -> {
 			final List<DataItem> first = ListingHelper.listEntries(factory, entries, dir.toString(), 0, RADIX, null, 1);
 			final List<DataItem> second = ListingHelper.listEntries(
 							factory, entries, dir.toString(), 0, RADIX, first.get(0), 1);
@@ -352,15 +352,16 @@ public class ListingHelperTest {
 		final Path locked = Files.createDirectory(dir.resolve("locked"));
 		final Path hidden = writeFile(locked, "hidden", 1);
 		final Path f0 = writeFile(dir, "f0", 1);
+		final Path linkToHidden = Files.createSymbolicLink(dir.resolve("lnh"), hidden);
 		Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("rw-------"));
 		try {
 			Assumptions.assumeTrue(cannotReadAttributes(hidden), "this user can read any file's attributes");
 			final List<DataItem> listed = new ArrayList<>();
-			final List<String> warnings = captureLines(Loggers.ERR.getName(), "Listing \"", () -> {
+			final List<String> warnings = captureLines(Loggers.ERR.getName(), "Listing \"" + dir + "\"", () -> {
 				try {
-					final List<String> skipLines = captureSkipLines(() -> {
-						listed.addAll(ListingHelper.listEntries(
-										new DataItemFactoryImpl<>(), List.of(hidden, f0), dir.toString(), 0, RADIX, null, 2));
+					final List<String> skipLines = captureSkipLines(dir, () -> {
+						listed.addAll(ListingHelper.listEntries(new DataItemFactoryImpl<>(), List.of(hidden, linkToHidden, f0),
+										dir.toString(), 0, RADIX, null, 3));
 						return null;
 					});
 					assertEquals(List.of(), skipLines, "an unreadable entry is not reported as a non-regular one");
@@ -372,10 +373,34 @@ public class ListingHelperTest {
 			assertEquals(List.of(f0.toFile().getAbsolutePath()), listed.stream().map(Item::name).toList());
 			assertEquals(1, warnings.size(), warnings::toString);
 			assertTrue(warnings.get(0).startsWith("Listing \"" + dir + "\" skipped entries whose attributes could not be "
-							+ "read: 1. The first: java.nio.file.AccessDeniedException"), warnings.get(0));
+							+ "read: 2. The first: java.nio.file.AccessDeniedException"), warnings.get(0));
 		} finally {
 			Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("rwx------"));
 		}
+	}
+
+	@Test
+	public void listCountsBrokenLinksAsNotRegularAndLogsAPageWithNoItem(@TempDir final Path dir) throws Exception {
+		final Path loop = Files.createSymbolicLink(dir.resolve("loop"), dir.resolve("loop"));
+		final Path dangling = Files.createSymbolicLink(dir.resolve("dang"), dir.resolve("missing"));
+		final Path sub = Files.createDirectory(dir.resolve("sub"));
+		final List<DataItem> listed = new ArrayList<>();
+		final List<String> warnings = captureLines(Loggers.ERR.getName(), "Listing \"" + dir + "\"", () -> {
+			try {
+				final List<String> skipLines = captureSkipLines(dir, () -> {
+					listed.addAll(ListingHelper.listEntries(
+									new DataItemFactoryImpl<>(), List.of(loop, dangling, sub), dir.toString(), 0, RADIX, null, 3));
+					return null;
+				});
+				assertEquals(List.of("Listing \"" + dir + "\" skipped entries that are not regular files, such as "
+								+ "subdirectories: 3. A listing covers the regular files of one directory level"), skipLines);
+			} catch (final Exception e) {
+				throw new AssertionError(e);
+			}
+			return null;
+		});
+		assertTrue(listed.isEmpty());
+		assertEquals(List.of(), warnings, "a broken link is not an unreadable entry");
 	}
 
 	private static boolean cannotReadAttributes(final Path path) {
@@ -387,8 +412,9 @@ public class ListingHelperTest {
 		}
 	}
 
-	private static List<String> captureSkipLines(final Supplier<Void> action) throws Exception {
-		return captureLines(Loggers.MSG.getName(), SKIP_LOG_START, action).stream()
+	/** The skip lines logged for this directory only, so that a line another test's listing logs late is not kept. */
+	private static List<String> captureSkipLines(final Path dir, final Supplier<Void> action) throws Exception {
+		return captureLines(Loggers.MSG.getName(), SKIP_LOG_START + dir + "\"", action).stream()
 						.filter(line -> line.contains("not regular files"))
 						.toList();
 	}
