@@ -60,6 +60,8 @@ final class S3SplitReadTimingStepTest {
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private final RangeSamples rangeSamples = new RangeSamples();
+	/** How long the last {@link #readStep} took, setup included, on the requests' monotonic clock. */
+	private long stepNanos;
 
 	@TempDir
 	Path tempDir;
@@ -124,10 +126,10 @@ final class S3SplitReadTimingStepTest {
 		final var duration = snapshot.durationSnapshot();
 		assertEquals(ranges, duration.count(), "duration samples");
 		rangeSamples.assertHeldBy(duration, snapshot.latencySnapshot());
-		// The sum equals the ranges' exactly (above); this bounds it by the time the step had. A parent's
-		// queue time once made it many times that. Twice the budget, plus a millisecond for truncation,
-		// leaves room for the wall clock that times the step against the monotonic one that times requests.
-		final var busyMicros = 2 * (snapshot.elapsedTimeMillis() + 1) * 1_000 * CONCURRENCY;
+		// The sum equals the ranges' exactly (above); this bounds it by the time the step had, on the
+		// monotonic clock that times requests too. A parent's queue time once made it many times that;
+		// twice the budget leaves room for a request that starts its clock before it holds a permit.
+		final var busyMicros = 2 * (stepNanos / 1_000 + 1) * CONCURRENCY;
 		assertTrue(duration.sum() <= busyMicros, () -> duration.sum() + " us of durations in " + busyMicros + " us");
 	}
 
@@ -137,6 +139,15 @@ final class S3SplitReadTimingStepTest {
 	}
 
 	private AllMetricsSnapshot readStep(final boolean batch) throws Exception {
+		final long start = System.nanoTime();
+		try {
+			return runReadStep(batch);
+		} finally {
+			stepNanos = System.nanoTime() - start;
+		}
+	}
+
+	private AllMetricsSnapshot runReadStep(final boolean batch) throws Exception {
 		final var items = tempDir.resolve("items.csv");
 		Files.writeString(items, IntStream.range(0, OBJECTS)
 						.mapToObj(i -> "/bucket/split-" + i + "," + Long.toHexString(0x1000L + i) + "," + RANGES * RANGE_SIZE + ",0/")
