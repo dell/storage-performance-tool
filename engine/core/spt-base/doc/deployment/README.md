@@ -142,7 +142,6 @@ host, node or Entry Node, needs its own log directory**: its own working directo
 `-Dspt.log.dir`. Two engines started from the same directory with neither set share one `log/` directory, and then:
 
 * every CREATE or READ step fails, and the run exits 1;
-* the node may keep the failed step's resources: its queued operations, a thread and its periodic metrics output;
 * an operation lifecycle file of another run's step can be merged into the run's `operation.lifecycle.csv`.
 
 With `java -jar` (or `run.sh`), start each engine from its own working directory:
