@@ -91,6 +91,35 @@ that succeeded still count toward the byte total, of a read that fails and of a 
 retried whole. A split read ignores a requested version ID, as on `s3`: each part reads the current
 object. Through 5.17.0 the driver failed such a read without a request.
 
+### Requests the Client Adds
+
+The AWS CRT client sends requests and bytes that SPT does not report, so the target sees more from
+`s3-aws` than SPT counts, and more than it sees from the Netty `s3` driver for the same workload:
+
+- **A HEAD before each whole-object GET.** The client validates response checksums by default. A
+  READ of a whole object is a HEAD with `x-amz-checksum-mode: enabled`, then a ranged GET
+  (`Range: bytes=0-<size - 1>`, answered 206) with `x-amz-checksum-mode` and `If-Match` set to the
+  HEAD's ETag. A GET that already carries a range has no HEAD, so each part of a
+  [split read](#reads-split-by-the-part-size) is one request. A READ of an exact version ID goes
+  through the ordinary SDK client and has no HEAD.
+- **A HEAD before each copy.** The client looks up the copy source with a HEAD before it sends the
+  copy. No client option removes it.
+- **A CRC trailer on each PUT.** The client sends a PUT body with `aws-chunked` framing and a
+  checksum trailer, even with `checksumEnabled` off (the default): 45 bytes more per one-part object.
+
+Neither HEAD counts as an SPT operation, but the HEAD before a GET is part of that GET's reported
+latency. Compare `s3-aws` GET latency with `s3` with the extra round trip in mind.
+
+Measured on SPT 5.17.0 (AWS SDK 2.57.11, CRT 0.50.0) against a loopback fake S3 target, not a real
+one:
+
+- 20 READs reached the target as 20 HEADs and 20 ranged GETs on `s3-aws`, and as 20 plain GETs on
+  `s3`. 20 copies reached it as 20 HEADs and 20 copies.
+- With the fake delaying each HEAD by 20 ms, 200 READs of 64 KiB objects at concurrency 1: the
+  `s3-aws` READ p50 latency went from 3.0 ms to 26.4 ms; the `s3` READ p50 went from about 0.4 ms to
+  0.5 ms.
+- PUTs carried 45 bytes more per one-part object.
+
 ### UPDATE
 
 An UPDATE rewrites the whole object with one PutObject of the item's current content, and counts
