@@ -17,7 +17,9 @@ import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.junit.jupiter.api.Test;
@@ -157,6 +159,40 @@ class S3FailedConstructionTest {
 	@Test
 	void aRefusedControlClientOnNioLeavesNoDescriptorThreadOrRegistration() throws Exception {
 		refusedThroughTargetBucketControl("nio");
+	}
+
+	/** Live threads running an asynchronous expression, the highest of a few samples. */
+	private static long expressionWorkers() {
+		long max = 0;
+		for (int i = 0; i < 5; i++) {
+			final long count = Thread.getAllStackTraces().entrySet().stream()
+							.filter(entry -> entry.getKey().isAlive() && Arrays.stream(entry.getValue())
+											.anyMatch(frame -> frame.getClassName().endsWith(".AsyncExpressionInputImpl")))
+							.count();
+			max = Math.max(max, count);
+			try {
+				Thread.sleep(5);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
+		return max;
+	}
+
+	@Test
+	void aRefusedDriverStopsItsUriArgumentsExpressionWorker() throws Exception {
+		final var stepId = "failed-uri-args";
+		final var storage = storage(3, "nio");
+		storage.val("net-http-uri-args", Map.of("probe", "#{this.expr()}"));
+		assertThrows(AssertionError.class, () -> instance(storage, stepId));
+		final long workers = settleTo(0, S3FailedConstructionTest::expressionWorkers);
+		for (int i = 0; i < CONSTRUCTIONS; i++) {
+			assertThrows(AssertionError.class, () -> instance(storage, stepId));
+		}
+		final long workersAfter = settleTo(workers, S3FailedConstructionTest::expressionWorkers);
+		assertTrue(workersAfter <= workers, () -> "expression workers went from " + workers + " to " + workersAfter);
+		assertFalse(driverRegistered(stepId));
 	}
 
 	@Test

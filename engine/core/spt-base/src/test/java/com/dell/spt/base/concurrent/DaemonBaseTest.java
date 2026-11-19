@@ -6,6 +6,9 @@ import com.dell.spt.base.concurrent.AsyncRunnable.State;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 
 class DaemonBaseTest {
@@ -213,6 +216,39 @@ class DaemonBaseTest {
 		assertEquals(List.of(throwing, survivor), released);
 		assertFalse(registered(throwing));
 		assertFalse(registered(survivor));
+	}
+
+	@Test
+	void aLogHandlerThatThrowsDoesNotStopTheRelease() {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final Handler throwingHandler = new Handler() {
+			@Override
+			public void publish(final LogRecord record) {
+				throw new IllegalStateException("simulated log handler failure");
+			}
+
+			@Override
+			public void flush() {}
+
+			@Override
+			public void close() {}
+		};
+		final Logger logger = Logger.getLogger(DaemonBase.class.getSimpleName());
+		logger.addHandler(throwingHandler);
+		final ReleaseRecordingDaemon earlier;
+		final ReleaseRecordingDaemon throwing;
+		try {
+			try (final var scope = DaemonBase.openConstructionScope()) {
+				earlier = new ReleaseRecordingDaemon(released, false);
+				throwing = new ReleaseRecordingDaemon(released, true);
+			}
+		} finally {
+			logger.removeHandler(throwingHandler);
+		}
+
+		assertEquals(List.of(throwing, earlier), released);
+		assertFalse(registered(throwing));
+		assertFalse(registered(earlier));
 	}
 
 	@Test

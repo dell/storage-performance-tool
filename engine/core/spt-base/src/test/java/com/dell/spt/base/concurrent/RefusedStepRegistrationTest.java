@@ -84,18 +84,22 @@ class RefusedStepRegistrationTest {
 			logger.removeHandler(handler);
 		}
 		return records.stream()
-						.filter(RefusedStepRegistrationTest::comesFromARefusedStep)
+						.filter(RefusedStepRegistrationTest::comesFromAStep)
 						.toList();
 	}
 
-	private static boolean comesFromARefusedStep(final LogRecord record) {
+	/**
+	 * Whether a record comes from closing a step, not another kind of daemon an earlier test class
+	 * left registered. A step another class left open, whose close throws, would still show here.
+	 */
+	private static boolean comesFromAStep(final LogRecord record) {
 		final var thrown = record.getThrown();
 		if (thrown == null) {
 			return false;
 		}
-		return thrown instanceof NullPointerException
-						|| Arrays.stream(thrown.getStackTrace())
-										.anyMatch(frame -> frame.getClassName().equals(LoadStepClientBase.class.getName()));
+		final var stepPackage = LoadStepClientBase.class.getPackageName().replaceFirst("\\.client$", ".");
+		return Arrays.stream(thrown.getStackTrace())
+						.anyMatch(frame -> frame.getClassName().startsWith(stepPackage));
 	}
 
 	@Test

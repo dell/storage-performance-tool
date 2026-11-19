@@ -324,15 +324,16 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 								IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS);
 			}
 		} finally {
-			if (connPool != null) {
-				try {
+			try {
+				if (connPool != null) {
 					connPool.close();
-				} catch (final IOException e) {
-					LogUtil.exception(Level.WARN, e, "{}: failed to close the connection pool", stepId);
 				}
+			} catch (final IOException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to close the connection pool", stepId);
+			} finally {
+				super.releaseAfterFailedConstruction();
 			}
 		}
-		super.releaseAfterFailedConstruction();
 	}
 
 	/** Runs first in {@link #doStop()}, before any event-loop group shuts down. */
