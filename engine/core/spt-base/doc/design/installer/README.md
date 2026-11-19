@@ -30,7 +30,9 @@ removed on JVM shutdown.
 custom content files, scenarios and extensions.
 
 **Note:** the file is not overwritten if the file with the same name already exists in the Spt home directory and
-has the same MD5 checksum.
+has the same Adler32 checksum. Any other file is written to a temporary file in the same directory and moved over the
+installed one atomically, so engines sharing a home never read a half-written file. If the installed file is still
+missing or different after that, the start fails with exit status 1 and a message naming the file and the directory.
 
 2. Initial configuration schema is being resolved and loaded.
 
