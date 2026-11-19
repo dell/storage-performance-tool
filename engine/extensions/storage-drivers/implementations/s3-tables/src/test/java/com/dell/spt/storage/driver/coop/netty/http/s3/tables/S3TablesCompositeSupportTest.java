@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.tables;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,7 +20,7 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
-import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.io.collection.ListInput;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -39,38 +40,45 @@ import org.junit.jupiter.api.Test;
  * never through the inherited S3 multipart route, so it has no composite (multipart) support and a
  * step refuses a ranges threshold on it at start.
  */
+@SuppressWarnings({"rawtypes", "unchecked"
+})
 class S3TablesCompositeSupportTest {
 
 	/**
-	 * A composite CREATE or READ above the threshold is run as one table write, like any other
-	 * operation: no multipart upload is initiated, no part is addressed, and no range is read.
+	 * With the threshold at 0 a step builds no composite, and its operation runs as a table write, as
+	 * before: one data operation on one driver, with no multipart request and no range read. It
+	 * builds the operation the way a step's builder does, so the builder's accepting the threshold
+	 * of 0 is checked too.
 	 */
 	@Test
-	void aCompositeCreateOrReadIsRunAsATableWriteWithoutMultipartRequests() throws Exception {
-		for (final OpType opType : List.of(OpType.CREATE, OpType.READ)) {
-			final var drv = new S3TablesStorageDriverTest.TestDriver(S3TablesStorageDriverTest.baseConfig("tableWrite", "127.0.0.1"));
-			try {
-				final var composite = composite(opType);
-
-				assertTrue(drv.submit((Operation) composite), opType.name());
-
-				assertEquals(Operation.Status.SUCC, composite.status(), opType.name());
-				assertFalse(composite.allSubOperationsDone(), opType + ": no part of the composite was run");
-				assertFalse(drv.log().isEmpty(), opType.name());
-				boolean dataPut = false;
-				for (final FullHttpRequest request : drv.log()) {
-					final String uri = request.uri();
-					assertFalse(uri.contains("uploads") || uri.contains("uploadId") || uri.contains("partNumber"),
-									opType + ": " + request.method() + " " + uri);
-					assertNull(request.headers().get(HttpHeaderNames.RANGE), opType + ": " + request.method() + " " + uri);
-					assertFalse(HttpMethod.GET.equals(request.method()) && uri.contains("obj1"),
-									opType + ": the item itself was read: " + uri);
-					dataPut |= HttpMethod.PUT.equals(request.method()) && uri.endsWith(".parquet");
+	void anOperationAtThresholdZeroIsRunAsATableWrite() throws Exception {
+		final Config driverConfig = S3TablesStorageDriverTest.baseConfig("tableWrite", "127.0.0.1");
+		driverConfig.val("storage-driver-type", "s3-tables");
+		final var drv = new S3TablesStorageDriverTest.TestDriver(driverConfig);
+		try {
+			for (final String opType : List.of("create", "read")) {
+				try (var generator = builder(drv, stepConfig(opType, 0)).build()) {
+					assertNotNull(generator, opType);
 				}
-				assertTrue(dataPut, opType + ": a Parquet data file was written instead: " + uris(drv));
-			} finally {
-				drv.close();
 			}
+			final DataItem item = new DataItemImpl("obj1", 0, 4096);
+			item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
+			final var op = new DataOperationImpl<>(0, OpType.CREATE, item, null, "/bucket", null, null, 0);
+
+			assertTrue(drv.submit((Operation) op));
+
+			assertEquals(Operation.Status.SUCC, op.status());
+			boolean dataPut = false;
+			for (final FullHttpRequest request : drv.log()) {
+				final String uri = request.uri();
+				assertFalse(uri.contains("uploads") || uri.contains("uploadId") || uri.contains("partNumber"),
+								request.method() + " " + uri);
+				assertNull(request.headers().get(HttpHeaderNames.RANGE), request.method() + " " + uri);
+				dataPut |= HttpMethod.PUT.equals(request.method()) && uri.endsWith(".parquet");
+			}
+			assertTrue(dataPut, "a Parquet data file is written: " + uris(drv));
+		} finally {
+			drv.close();
 		}
 	}
 
@@ -101,12 +109,6 @@ class S3TablesCompositeSupportTest {
 			uris.add(request.method() + " " + request.uri());
 		}
 		return uris;
-	}
-
-	private static CompositeDataOperationImpl<DataItem> composite(final OpType opType) throws Exception {
-		final DataItem item = new DataItemImpl("obj1", 0, 4096);
-		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
-		return new CompositeDataOperationImpl<>(0, opType, item, null, "/bucket", null, null, 0, 1024);
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"
