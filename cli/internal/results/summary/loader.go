@@ -52,7 +52,9 @@ type RunData struct {
 
 // StepData captures per-step artifact availability and metrics totals.
 type StepData struct {
-	RangeRead         *RangeReadEvidence
+	RangeRead *RangeReadEvidence
+	// RangeReadExpected marks a partial READ step, also when its evidence is missing or unusable.
+	RangeReadExpected bool
 	StepID            string
 	Manifest          *results.StepManifest
 	Metrics           *MetricsTotals
@@ -259,6 +261,7 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 
 		rangeEvidence, rangeErr := loadRangeRead(runDir, sm)
 		rangeExpected, rangeConfigErr := l.rangeReadExpected(runDir, sm, params, step.Metrics)
+		step.RangeReadExpected = rangeExpected
 		if rangeErr == nil && rangeConfigErr != nil {
 			rangeErr = rangeConfigErr
 		}
