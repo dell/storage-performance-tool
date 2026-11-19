@@ -507,6 +507,9 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.MissingPhases = append(totals.MissingPhases, label)
 			warnings = append(warnings, fmt.Sprintf("%s metrics unavailable (status: %s)", label, statusLabel))
 		}
+		if warning := unresolvedOperationsWarning(nonEmpty(summary.PhaseLabel, stepData.StepID), stepData); warning != "" {
+			warnings = append(warnings, warning)
+		}
 
 		steps = append(steps, summary)
 	}
