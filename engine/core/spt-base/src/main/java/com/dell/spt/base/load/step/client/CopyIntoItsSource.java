@@ -12,6 +12,9 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.confuse.Config;
+import java.io.File;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Paths;
 
 /**
  * Refuses, or warns about, a copy whose constant output path overlaps the storage path it lists.
@@ -25,11 +28,12 @@ import com.github.akurilov.confuse.Config;
  * their destinations item by item.
  *
  * <p>On {@code fs} a listed name is the file's absolute path, and a destination equal to its source
- * opens the source for writing and truncates it, so an output path that is the input path, or one of
- * its parent directories, is refused. The paths compare as written: an {@code fs} path without a
- * leading slash is relative, and {@code .} and {@code ..} segments name other directories, which copy
- * correctly. A relative input path lists names that are absolute, so a textual compare says nothing
- * about it and it is not checked. Symlink and hard-link aliases are not checked either.
+ * opens the source for writing and truncates it, so an output path that is the listed directory, or
+ * one of its parent directories, is refused. The listed directory is the input path as the listing
+ * names it: doubled and trailing slashes dropped, and a relative input path made absolute against the
+ * working directory. The output path compares as written, as the driver compares it with each name: a
+ * relative output path never holds an absolute name, and {@code .} and {@code ..} segments are compared
+ * as written on both sides. Symlink and hard-link aliases are not checked.
  *
  * <p>Other drivers compare the paths without their leading and trailing slashes. Equal paths copy
  * every object onto itself, so they are refused. An output path under the input path copies correctly
@@ -70,8 +74,9 @@ final class CopyIntoItsSource {
 			return;
 		}
 		if (FS_DRIVER_TYPE.equals(storageConfig.stringVal("driver-type"))) {
-			if (inputPath.charAt(0) == SEPARATOR
-							&& ItemNamePaths.startsWithPath(withoutTrailingSlashes(inputPath) + "/x", outputPath)) {
+			final var listedDir = listedDirectory(inputPath);
+			if (listedDir != null
+							&& ItemNamePaths.startsWithPath(withoutTrailingSlashes(listedDir) + "/x", outputPath)) {
 				throw refusal(stepId, "The copy output path \"" + outputPath + "\" is the item input path \"" + inputPath
 								+ "\" or one of its parent directories: each copy would write over its own source file and "
 								+ "empty it. Choose an output path outside the input path");
@@ -115,6 +120,20 @@ final class CopyIntoItsSource {
 			return null;
 		}
 		return path;
+	}
+
+	/**
+	 * Returns the directory part of the names an {@code fs} listing of {@code inputPath} gives, as the
+	 * listing builds them: the path parsed, which drops doubled and trailing slashes, then made absolute
+	 * against the working directory. Dot segments stay as written. Null when the path cannot be parsed,
+	 * which fails the listing anyway.
+	 */
+	private static String listedDirectory(final String inputPath) {
+		try {
+			return new File(Paths.get(inputPath).toString()).getAbsolutePath();
+		} catch (final InvalidPathException e) {
+			return null;
+		}
 	}
 
 	private static RunTerminalException refusal(final String stepId, final String message) {

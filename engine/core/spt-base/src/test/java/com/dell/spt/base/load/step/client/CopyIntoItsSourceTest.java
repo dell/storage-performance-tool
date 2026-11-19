@@ -168,8 +168,24 @@ class CopyIntoItsSourceTest {
 		check("fs", "/D/src", "D/src");
 		check("fs", "/D/src", "/D/src/..");
 		check("fs", "/D/src", "/D/./src");
-		// a relative input path lists absolute names, which a textual compare says nothing about
+		// a relative input path lists absolute names, which a relative output path never holds
 		check("fs", "D/src", "D");
+
+		assertEquals(List.of(), warningsSoFar());
+	}
+
+	// The listing names each file by its absolute path, built from the input path parsed and made
+	// absolute, so the input is compared in that form and the output as written, as the driver does.
+	@Test
+	void fsComparesTheInputPathAsTheListingNamesItsFiles() throws Exception {
+		final var cwd = System.getProperty("user.dir");
+		final var failure = refused("fs", cwd + "/data//src", cwd + "/data/src");
+		assertTrue(failure.getMessage().contains("input path \"" + cwd + "/data//src\""), failure.getMessage());
+		refused("fs", "/" + cwd + "/data/src", cwd + "/data");
+		refused("fs", "data/src", cwd + "/data");
+		refused("fs", "data/src/", cwd + "/data/src");
+		// the doubled slash stays in the output path, which so never holds a listed name
+		check("fs", cwd + "/data//src", cwd + "/data//src");
 
 		assertEquals(List.of(), warningsSoFar());
 	}

@@ -161,6 +161,140 @@ class LoadStepClientBaseTest {
 		verify(slice, never()).start();
 	}
 
+	/** The step types that keep {@code create} as the type of a configuration whose input they list. */
+	private enum StepShape {
+		/** Operations mixed by weight, as the mixed step: the input is only the GET, STAT and DELETE pool. */
+		MIXED,
+		/** Each context runs its own sub-load, as the weighted step; the base is unused. */
+		WEIGHTED,
+		/** Each context runs a sub-step, as the pipeline step; only the first reads its input. */
+		PIPELINE
+	}
+
+	private static final class ShapedClient extends TestLoadStepClient {
+		private final StepShape shape;
+
+		ShapedClient(final StepShape shape, final Config config, final List<Extension> extensions,
+						final List<Config> ctxConfigs, final MetricsManager metricsMgr) {
+			super(config, extensions, ctxConfigs, metricsMgr);
+			this.shape = shape;
+		}
+
+		@Override
+		protected boolean mixesOperations() {
+			return shape == StepShape.MIXED;
+		}
+
+		@Override
+		protected boolean controlsOperations(final int contextIndex) {
+			return shape == StepShape.MIXED ? contextIndex == BASE_CONFIG : contextIndex != BASE_CONFIG;
+		}
+
+		@Override
+		protected boolean suppliesItems(final int contextIndex) {
+			return shape == StepShape.PIPELINE ? contextIndex == 0 : controlsOperations(contextIndex);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private ShapedClient shapedClientWithLocalSlice(final StepShape shape, final LoadStep slice) {
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn("test-load-step");
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(slice);
+		return new ShapedClient(shape, testConfig, List.of(factory), ctxConfigs, mockMetricsManager);
+	}
+
+	/** Sets an {@code fs} copy of {@code tempDir/src} onto {@code tempDir}, which empties every source. */
+	private Config fsCopyOntoItsSource(final Config config, final String opType) {
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		config.val("storage-driver-type", "fs");
+		config.val("load-op-type", opType);
+		config.val("item-input-file", null);
+		config.val("item-input-path", tempDir.resolve("src").toString());
+		config.val("item-output-path", tempDir.toString());
+		return config;
+	}
+
+	/** A slice that reports its start, so a run that reaches the engines fails as an engine failure. */
+	private static LoadStep sliceThatReportsItsStart() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.start()).thenThrow(new IllegalStateException("the engine was started"));
+		return slice;
+	}
+
+	private static void assertTheEngineWasStarted(final LoadStep slice, final RunTerminalException failure)
+					throws Exception {
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category(), failure.getMessage());
+		assertEquals("engine 1 of 1 did not start; see the engine log", failure.getMessage());
+		verify(slice).start();
+	}
+
+	// A mixed step keeps the default create type, but its PUTs name new items: the listed input is
+	// only its pool, so an output path equal to the pool's path is not a copy onto the source.
+	@Test
+	void aMixedStepWhosePoolPathIsItsOutputPathIsNotRefused() throws Exception {
+		final var slice = sliceThatReportsItsStart();
+		fsCopyOntoItsSource(testConfig, "create");
+		final var client = shapedClientWithLocalSlice(StepShape.MIXED, slice);
+
+		assertTheEngineWasStarted(slice, assertThrows(RunTerminalException.class, client::run));
+	}
+
+	// The weighted step runs its contexts and leaves the base unused, so only a context that copies is
+	// refused, whatever the base says.
+	@Test
+	void aWeightedStepIsCheckedOnlyInItsContextsThatCopy() throws Exception {
+		fsCopyOntoItsSource(testConfig, "create");
+		ctxConfigs = List.of(fsCopyOntoItsSource(TestConfigBuilder.config(), "read"),
+						fsCopyOntoItsSource(TestConfigBuilder.config(), "noop"));
+		final var reads = sliceThatReportsItsStart();
+		assertTheEngineWasStarted(reads, assertThrows(RunTerminalException.class,
+						shapedClientWithLocalSlice(StepShape.WEIGHTED, reads)::run));
+
+		ctxConfigs = List.of(fsCopyOntoItsSource(TestConfigBuilder.config(), "read"),
+						fsCopyOntoItsSource(TestConfigBuilder.config(), "create"));
+		final var copies = sliceThatReportsItsStart();
+		final var failure = assertThrows(RunTerminalException.class,
+						shapedClientWithLocalSlice(StepShape.WEIGHTED, copies)::run);
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category(), failure.getMessage());
+		verify(copies, never()).start();
+	}
+
+	// Each later pipeline sub-step reads the results of the one before, not its item input, so only the
+	// first sub-step is checked.
+	@Test
+	void aPipelineIsCheckedOnlyInItsFirstSubStep() throws Exception {
+		fsCopyOntoItsSource(testConfig, "create");
+		ctxConfigs = List.of(fsCopyOntoItsSource(TestConfigBuilder.config(), "read"),
+						fsCopyOntoItsSource(TestConfigBuilder.config(), "create"));
+		final var later = sliceThatReportsItsStart();
+		assertTheEngineWasStarted(later, assertThrows(RunTerminalException.class,
+						shapedClientWithLocalSlice(StepShape.PIPELINE, later)::run));
+
+		ctxConfigs = List.of(fsCopyOntoItsSource(TestConfigBuilder.config(), "create"),
+						fsCopyOntoItsSource(TestConfigBuilder.config(), "read"));
+		final var first = sliceThatReportsItsStart();
+		final var failure = assertThrows(RunTerminalException.class,
+						shapedClientWithLocalSlice(StepShape.PIPELINE, first)::run);
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category(), failure.getMessage());
+		verify(first, never()).start();
+	}
+
+	// A linear step that does not create lists its input as the items it reads or changes.
+	@Test
+	void aLinearStepThatDoesNotCreateIsNotRefused() throws Exception {
+		for (final var opType : List.of("read", "noop")) {
+			setUp();
+			final var slice = sliceThatReportsItsStart();
+			fsCopyOntoItsSource(testConfig, opType);
+			final var client = clientWithLocalSlice(slice);
+
+			assertTheEngineWasStarted(slice, assertThrows(RunTerminalException.class, client::run));
+		}
+	}
+
 	@Test
 	void aFailureOnOneEngineOfSeveralSaysWhichEngine() throws Exception {
 		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
