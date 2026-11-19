@@ -35,6 +35,9 @@ type fakeEngine struct {
 	onDelete func(engine *fakeEngine, w http.ResponseWriter)
 	// shutdownStatus, when non-zero, replaces the 202 answer of POST /shutdown.
 	shutdownStatus int
+	// worker makes /status answer IDLE while HEAD /run reports the run, as a
+	// worker engine of a distributed run does.
+	worker bool
 }
 
 func newFakeEngine(t *testing.T, runID int64) *fakeEngine {
@@ -54,7 +57,7 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/metrics/json" && r.Method == http.MethodGet:
 		fmt.Fprint(w, `[{"metrics_schema":5,"scope":"node","role":"entry","node_id":"n0","op_type":"none"}]`)
 	case r.URL.Path == "/status" && r.Method == http.MethodGet:
-		if e.runID == 0 {
+		if e.runID == 0 || e.worker {
 			fmt.Fprint(w, `{"state":"IDLE"}`)
 			return
 		}

@@ -36,6 +36,14 @@ func (c *pollClock) After(d time.Duration) <-chan time.Time {
 	return fired
 }
 
+// confirmedEngine is detection's result for an engine running run 41.
+func confirmedEngine() *ServiceInfo {
+	return &ServiceInfo{
+		IsListening: true, IsSpt: true, APIConfirmed: true,
+		Status: &SptStatus{RunID: "41", State: "RUNNING", RunActive: true},
+	}
+}
+
 // closeAfterPolls makes the engine's port close at the given poll.
 func closeAfterPolls(engine *fakeEngine, polls int) *pollClock {
 	return &pollClock{onPoll: func(poll int) {
@@ -121,7 +129,7 @@ func TestGracefulStopReportsTheDeadline(t *testing.T) {
 	resolver.clock = clock
 	defer resolver.Close()
 
-	result := resolver.executeGracefulStop(context.Background(), &ServiceInfo{IsListening: true, IsSpt: true})
+	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
 	if result.Success {
 		t.Fatal("Success = true while the port stays open")
 	}
@@ -151,7 +159,7 @@ func TestGracefulStopWaitEndsWithTheContext(t *testing.T) {
 		}
 		cancel()
 	}()
-	result := resolver.executeGracefulStop(ctx, &ServiceInfo{IsListening: true, IsSpt: true})
+	result := resolver.executeGracefulStop(ctx, confirmedEngine())
 	if result.Success || !strings.Contains(result.Message, "Stopped waiting for port") {
 		t.Fatalf("result = %+v, want the cancelled wait reported", result)
 	}
@@ -173,7 +181,7 @@ func TestGracefulStopReportsARefusedShutdown(t *testing.T) {
 	resolver.clock = clock
 	defer resolver.Close()
 
-	result := resolver.executeGracefulStop(context.Background(), &ServiceInfo{IsListening: true, IsSpt: true})
+	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
 	if result.Success || !strings.Contains(result.Message, "Failed to shut down the SPT engine") {
 		t.Fatalf("result = %+v, want the refused shutdown reported", result)
 	}
@@ -192,7 +200,7 @@ func TestGracefulStopLeavesAReplacementRunAlone(t *testing.T) {
 	resolver := engine.resolver(false, true)
 	defer resolver.Close()
 
-	result := resolver.executeGracefulStop(context.Background(), &ServiceInfo{IsListening: true, IsSpt: true})
+	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
 	if result.Success || !strings.Contains(result.Message, "replaced by run 42") {
 		t.Fatalf("result = %+v, want the replacement reported", result)
 	}

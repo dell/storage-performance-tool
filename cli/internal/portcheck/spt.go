@@ -95,7 +95,8 @@ func (c *SptAPIClient) GetStatus(ctx context.Context) (*SptStatus, error) {
 
 	// /status answers without a run ID; GET /run would need one in If-Match.
 	detail, err := c.getStatusDetail(ctx)
-	if err == nil {
+	statusKnown := err == nil
+	if statusKnown {
 		status.State = detail.State
 		if detail.RunID != 0 {
 			status.RunID = strconv.FormatInt(detail.RunID, 10)
@@ -104,15 +105,24 @@ func (c *SptAPIClient) GetStatus(ctx context.Context) (*SptStatus, error) {
 		logging.LogDebug("portcheck", "failed to get status from Spt API",
 			"baseURL", c.BaseURL,
 			"error", err.Error())
-		runID, active, headErr := c.activeRunID(ctx)
-		if headErr != nil {
-			logging.LogDebug("portcheck", "failed to get the active run from Spt API",
-				"baseURL", c.BaseURL,
-				"error", headErr.Error())
-		} else if active {
-			status.RunID = strconv.FormatInt(runID, 10)
-		}
 		// Continue - we might still get some info from metrics
+	}
+
+	// /status describes only runs this engine started, or its last one: a worker
+	// of a distributed run reports IDLE. HEAD /run names the run active now.
+	runID, active, err := c.activeRunID(ctx)
+	if err != nil {
+		logging.LogDebug("portcheck", "failed to get the active run from Spt API",
+			"baseURL", c.BaseURL,
+			"error", err.Error())
+	} else if active {
+		status.RunActive = true
+		if activeID := strconv.FormatInt(runID, 10); status.RunID != activeID {
+			status.RunID = activeID
+			if statusKnown {
+				status.State = constants.StateRunning
+			}
+		}
 	}
 
 	// Try to get metrics for performance data
@@ -165,7 +175,7 @@ func (c *SptAPIClient) activeRunID(ctx context.Context) (runID int64, active boo
 	case http.StatusOK:
 		etag := strings.TrimSpace(resp.Header.Get("ETag"))
 		runID, err = strconv.ParseInt(etag, 10, 64)
-		if err != nil || runID <= 0 {
+		if err != nil || runID == 0 {
 			return 0, false, fmt.Errorf("active run has an invalid ETag %q", etag)
 		}
 		return runID, true, nil
@@ -453,7 +463,7 @@ func (c *SptAPIClient) StopActiveRun(ctx context.Context) (int64, error) {
 // anything, and both return stopped false with a nil error, so the caller's
 // terminal reconciliation decides how the run ended.
 func (c *SptAPIClient) StopRun(ctx context.Context, runID int64) (stopped bool, err error) {
-	if runID <= 0 {
+	if runID == 0 {
 		return false, fmt.Errorf("stop run: run ID is unknown")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/run", nil)

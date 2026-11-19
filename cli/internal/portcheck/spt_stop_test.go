@@ -85,6 +85,18 @@ func TestStopActiveRunStopsTheReportedRun(t *testing.T) {
 	}
 }
 
+// The remote API accepts any non-zero signed run ID.
+func TestStopActiveRunAcceptsANegativeRunID(t *testing.T) {
+	engine := newFakeEngine(t, -7)
+	runID, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+	if err != nil || runID != -7 {
+		t.Fatalf("StopActiveRun() = %d, %v, want -7, nil", runID, err)
+	}
+	if !slices.Contains(engine.received(), engineRequest{http.MethodDelete, "/run", "-7"}) {
+		t.Errorf("requests = %+v, want DELETE /run If-Match -7", engine.received())
+	}
+}
+
 func TestStopActiveRunWithoutARunSendsNoStop(t *testing.T) {
 	engine := newFakeEngine(t, 0)
 	runID, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())

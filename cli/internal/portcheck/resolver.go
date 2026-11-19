@@ -12,7 +12,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -177,24 +176,29 @@ func (r *ConflictResolver) abortUnattended(info *ServiceInfo) *ResolutionResult 
 }
 
 func (r *ConflictResolver) unattendedAbortMessage(info *ServiceInfo) string {
-	if info.IsSpt {
+	if info.APIConfirmed {
 		return fmt.Sprintf("port %s is held by an SPT engine%s; it was left running. "+
 			"Use --force to stop it and free the port, or --api-port with --rmi-registry-port to run alongside it",
 			r.Port, engineRunDetails(info.Status))
+	}
+	if info.IsSpt {
+		return fmt.Sprintf("port %s is held by a container that looks like SPT, but no SPT API answered there (%s); "+
+			"it was left running. Use --force to remove it and free the port, "+
+			"or --api-port with --rmi-registry-port to run alongside it",
+			r.Port, info.GetServiceDescription())
 	}
 	return fmt.Sprintf("port %s is in use (%s); it was left running. "+
 		"Free the port, or use --api-port with --rmi-registry-port to run alongside it",
 		r.Port, info.GetServiceDescription())
 }
 
-// engineRunDetails formats the engine's run ID and state for a message. Only a
-// numeric ID is an engine's: container detection fills in a placeholder.
+// engineRunDetails formats the engine's run ID and state for a message.
 func engineRunDetails(status *SptStatus) string {
 	if status == nil {
 		return ""
 	}
 	var details []string
-	if _, err := strconv.ParseInt(status.RunID, 10, 64); err == nil {
+	if status.RunID != "" {
 		details = append(details, "run "+status.RunID)
 	}
 	if status.State != "" {
@@ -241,7 +245,7 @@ func (r *ConflictResolver) displayConflictInfo(info *ServiceInfo) {
 func (r *ConflictResolver) getUserChoice(_ context.Context, info *ServiceInfo) (ResolutionStrategy, error) {
 	fmt.Printf("\nResolution Options:\n")
 
-	if info.IsSpt {
+	if info.APIConfirmed {
 		fmt.Printf("  1) [g] Graceful stop - Stop the run and shut the engine down via its API (recommended)\n")
 		fmt.Printf("  2) [f] Force stop - Forcefully stop/remove containers\n")
 	} else {
@@ -272,12 +276,19 @@ func (r *ConflictResolver) getUserChoice(_ context.Context, info *ServiceInfo) (
 		choice := strings.ToLower(strings.TrimSpace(input))
 
 		switch choice {
-		case "1", "g", "graceful":
-			if info.IsSpt {
+		case "1":
+			if info.APIConfirmed {
 				return StrategyGracefulStop, nil
 			}
-			// For non-Spt services, option 1 is force stop
+			// Without an SPT API to ask, option 1 is force stop
 			return StrategyForceStop, nil
+
+		case "g", "graceful":
+			if info.APIConfirmed {
+				return StrategyGracefulStop, nil
+			}
+			// Not offered here, and it must not turn into a force stop.
+			fmt.Printf("Graceful stop needs an SPT API on the port. Please enter 1-4 or f/r/a: ")
 
 		case "2", "f", "force":
 			return StrategyForceStop, nil
@@ -299,8 +310,8 @@ func (r *ConflictResolver) executeForceResolution(ctx context.Context, info *Ser
 	logging.LogInfo("portcheck", "executing force resolution", "port", r.Port)
 	fmt.Printf("[FORCE] Port %s conflict - attempting automated resolution\n", r.Port)
 
-	// For Spt services, try graceful first, then force
-	if info.IsSpt {
+	// When the SPT API answers, try graceful first, then force
+	if info.APIConfirmed {
 		fmt.Printf("[FORCE] Attempting graceful stop of Spt test...\n")
 		result := r.executeGracefulStop(ctx, info)
 		if result.Success {
@@ -355,6 +366,13 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 			Strategy: StrategyGracefulStop,
 			Success:  false,
 			Message:  "Graceful stop only works for Spt services",
+		}
+	}
+	if !info.APIConfirmed {
+		return &ResolutionResult{
+			Strategy: StrategyGracefulStop,
+			Success:  false,
+			Message:  fmt.Sprintf("Graceful stop needs an SPT API answering on port %s", r.Port),
 		}
 	}
 
@@ -471,7 +489,7 @@ func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *Servic
 	if err != nil {
 		return nil, lookupFailure(err)
 	}
-	if container == nil && info.IsSpt {
+	if container == nil && info.APIConfirmed {
 		container, err = r.dockerFinder.FindHostNetworkEngine(ctx, r.Port)
 		if err != nil {
 			return nil, lookupFailure(err)

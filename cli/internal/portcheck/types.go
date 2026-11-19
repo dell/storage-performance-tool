@@ -11,10 +11,14 @@ import (
 
 // ServiceInfo represents information about a service using a port
 type ServiceInfo struct {
-	IsListening bool           // Whether the port is listening
-	IsSpt       bool           // Whether the service appears to be Spt
-	Status      *SptStatus     // Spt status if detected (nil if not Spt)
-	Container   *ContainerInfo // Docker container info if found (nil if none)
+	IsListening bool // Whether the port is listening
+	IsSpt       bool // Whether the service appears to be Spt
+	// APIConfirmed is true when the SPT API answered on the port. IsSpt alone
+	// may rest on a container's name, image or labels, which is enough to
+	// describe the holder but not to send it API requests that change anything.
+	APIConfirmed bool
+	Status       *SptStatus     // Spt status if detected (nil if not Spt)
+	Container    *ContainerInfo // Docker container info if found (nil if none)
 }
 
 // SptStatus represents the status of a running Spt test
@@ -29,6 +33,7 @@ type SptStatus struct {
 	TotalItems     int64         `json:"totalItems,omitempty"`     // Total operations (if known)
 	StartTime      time.Time     `json:"startTime,omitempty"`      // When the test started
 	EndTime        time.Time     `json:"endTime,omitempty"`        // When the test ended (if completed)
+	RunActive      bool          `json:"-"`                        // HEAD /run reports an active run with RunID
 }
 
 // ContainerInfo represents information about a Docker container

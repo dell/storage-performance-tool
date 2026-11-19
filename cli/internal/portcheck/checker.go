@@ -139,6 +139,7 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 
 	if sptStatus != nil {
 		info.IsSpt = true
+		info.APIConfirmed = true
 		info.Status = sptStatus
 		logging.LogInfo("portcheck", "detected Spt service via HTTP API",
 			"port", p.Port,
@@ -372,6 +373,9 @@ func (info *ServiceInfo) IsTestActive() bool {
 	if !info.IsSpt || info.Status == nil {
 		return false
 	}
+	if info.Status.RunActive {
+		return true
+	}
 
 	// Consider test active if it's in a running state
 	activeStates := []string{constants.StateRunning, constants.StateStarting, constants.StateInitializing}
@@ -425,7 +429,7 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 		logging.LogInfo("portcheck", "identified Spt container",
 			"port", p.Port, "container_name", container.Name, "image", container.Image)
 		if info.Status == nil {
-			info.Status = &SptStatus{RunID: "detected", State: constants.StateRunning, Message: fmt.Sprintf("Spt container detected: %s", container.Name)}
+			info.Status = &SptStatus{Message: fmt.Sprintf("Spt container detected: %s", container.Name)}
 		}
 	} else {
 		logging.LogDebug("portcheck", "container is not Spt",

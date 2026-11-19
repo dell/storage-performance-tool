@@ -123,13 +123,18 @@ func TestPromptEndOfInputWithOtherServiceAborts(t *testing.T) {
 	}
 }
 
-// Container detection's placeholder run ID is not shown as a run.
-func TestUnattendedMessageOmitsPlaceholderRunID(t *testing.T) {
-	resolver := &ConflictResolver{Port: "9999"}
-	message := resolver.unattendedAbortMessage(&ServiceInfo{
-		IsListening: true, IsSpt: true, Status: &SptStatus{RunID: "detected", State: "RUNNING"},
-	})
-	if strings.Contains(message, "run detected") || !strings.Contains(message, "(state RUNNING)") {
-		t.Errorf("message = %q", message)
+// A container that only looks like SPT is not reported as an engine with a run.
+func TestUnattendedMessageForALookalikeContainer(t *testing.T) {
+	holder := newLookalikeHolder(t)
+	resolver := holder.resolver(false, false)
+	defer resolver.Close()
+
+	result, err := resolver.CheckAndResolveConflicts(context.Background())
+	assertUnattendedAbort(t, result, err, "looks like SPT")
+	for _, invented := range []string{"state RUNNING", "run detected", "held by an SPT engine"} {
+		if strings.Contains(result.Message, invented) {
+			t.Errorf("Message = %q, must not contain %q", result.Message, invented)
+		}
 	}
+	holder.assertUntouched(t)
 }
