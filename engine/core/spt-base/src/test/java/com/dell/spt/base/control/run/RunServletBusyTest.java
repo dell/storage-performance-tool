@@ -20,7 +20,6 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.client.TestLoadStepClient;
-import com.dell.spt.base.load.step.service.LoadStepService;
 import com.github.akurilov.confuse.Config;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -282,7 +281,7 @@ class RunServletBusyTest {
 
 	@Test
 	void aBusyWorkerRefusesBeforeReadingTheRequest() throws Exception {
-		when(stepSvc.getStepService()).thenReturn(mock(LoadStepService.class));
+		when(stepSvc.busySliceRunIds()).thenReturn(List.of(RUN_A));
 		final var before = status.snapshot();
 		final var req = mock(HttpServletRequest.class);
 		final var resp = mock(HttpServletResponse.class);
@@ -298,13 +297,118 @@ class RunServletBusyTest {
 
 	@Test
 	void aWorkerSliceCreatedWhileTheRequestWasReadRefusesItToo() throws Exception {
-		when(stepSvc.getStepService()).thenReturn(null, mock(LoadStepService.class));
+		when(stepSvc.busySliceRunIds()).thenReturn(List.of(), List.of(RUN_A));
 		final var before = status.snapshot();
 
 		assertEquals(409, post(RUN_B, "runB", HOLDING_SCENARIO).status);
 
 		assertEquals(before, status.snapshot());
 		assertEquals(0, probes.created.get());
+	}
+
+	@Test
+	void aBusySliceIsReportedAndRefusesARunUntilItEnds() throws Exception {
+		final var busy = busySlices(RUN_A);
+		final var before = status.snapshot();
+
+		final var whileBusy = head();
+		assertEquals(200, whileBusy.status);
+		assertEquals(String.valueOf(RUN_A), whileBusy.etag);
+		assertEquals(200, get(RUN_A));
+		assertEquals(204, get(RUN_B));
+		assertEquals(409, post(RUN_B, "runB", HOLDING_SCENARIO).status);
+		assertEquals(before, status.snapshot());
+		assertEquals(0, probes.created.get());
+
+		// Stopped or closed: the manager lists it no more, whether or not the service is still open
+		busy.set(List.of());
+		when(stepSvc.hasOpenSlices()).thenReturn(true);
+		assertEquals(204, head().status);
+		assertEquals(204, get(RUN_A));
+		assertEquals(202, post(RUN_B, "runB", HOLDING_SCENARIO).status);
+		probes.awaitHeld();
+		assertEquals(ApiStatus.State.RUNNING, status.state());
+		assertEquals(RUN_B, status.runId());
+	}
+
+	@Test
+	void theNewestBusySliceNamesTheRunAndEveryBusySliceMatches() throws Exception {
+		busySlices(RUN_B, RUN_A);
+
+		assertEquals(String.valueOf(RUN_B), head().etag);
+		assertEquals(200, get(RUN_A));
+		assertEquals(200, get(RUN_B));
+		assertEquals(204, get(RUN_A + RUN_B));
+	}
+
+	@Test
+	void aRunningScenarioAndABusySliceAreBothMatched() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_SCENARIO).status);
+		probes.awaitHeld();
+		busySlices(RUN_B);
+
+		assertEquals(String.valueOf(RUN_A), head().etag);
+		assertEquals(200, get(RUN_A));
+		assertEquals(200, get(RUN_B));
+		assertEquals(204, get(RUN_A + RUN_B));
+	}
+
+	@Test
+	void deleteStopsTheMatchingSlicesAndClosesNothing() throws Exception {
+		when(stepSvc.stopSlicesOfRun(RUN_A)).thenReturn(true);
+		when(stepSvc.hasOpenSlices()).thenReturn(true);
+
+		assertEquals(200, delete(RUN_A));
+
+		verify(stepSvc).stopSlicesOfRun(RUN_A);
+		verify(stepSvc, never()).close();
+		assertEquals(ApiStatus.State.IDLE, status.state());
+	}
+
+	@Test
+	void deleteOfAnotherRunAnswersNotFoundWhileASliceIsOpen() throws Exception {
+		when(stepSvc.hasOpenSlices()).thenReturn(true);
+
+		assertEquals(404, delete(RUN_B));
+	}
+
+	@Test
+	void deleteOnANodeWithNothingOpenAnswersNoContent() throws Exception {
+		assertEquals(204, delete(RUN_A));
+	}
+
+	@Test
+	void deleteOfASliceLeavesTheRunningScenarioAlone() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_SCENARIO).status);
+		probes.awaitHeld();
+		when(stepSvc.stopSlicesOfRun(RUN_B)).thenReturn(true);
+
+		assertEquals(200, delete(RUN_B));
+
+		assertEquals(String.valueOf(RUN_A), head().etag);
+		assertEquals(ApiStatus.State.RUNNING, status.state());
+		assertEquals(404, delete(RUN_A + RUN_B));
+		assertEquals(ApiStatus.State.RUNNING, status.state());
+	}
+
+	@Test
+	void deleteOfTheRunningScenarioStillStopsIt() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_CLEANUP_SCENARIO).status);
+		probes.awaitBody();
+		when(stepSvc.stopSlicesOfRun(RUN_A)).thenReturn(true);
+
+		assertEquals(200, delete(RUN_A));
+
+		probes.awaitCleanup();
+		probes.releaseCleanup();
+		awaitIdle();
+		assertEquals(ApiStatus.State.STOPPED, status.state());
+	}
+
+	private AtomicReference<List<Long>> busySlices(final Long... runIds) throws Exception {
+		final var busy = new AtomicReference<>(List.of(runIds));
+		when(stepSvc.busySliceRunIds()).thenAnswer(invocation -> busy.get());
+		return busy;
 	}
 
 	@Test

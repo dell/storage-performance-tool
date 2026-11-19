@@ -108,7 +108,7 @@ public class RunServlet extends HttpServlet {
 	@Override
 	protected final void doPost(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException, ServletException {
-		if (scenarioStepSvc.getStepService() != null) {
+		if (!scenarioStepSvc.busySliceRunIds().isEmpty()) {
 			resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			return;
 		}
@@ -145,7 +145,7 @@ public class RunServlet extends HttpServlet {
 					throws RemoteException {
 		runStartLock.lock();
 		try {
-			if (activeTask() != null || scenarioStepSvc.getStepService() != null) {
+			if (activeTask() != null || !scenarioStepSvc.busySliceRunIds().isEmpty()) {
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 				return;
 			}
@@ -211,38 +211,68 @@ public class RunServlet extends HttpServlet {
 	@Override
 	protected final void doGet(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		extractRequestTimestampAndApply(
-						req, resp, (run, runId) -> setRunMatchesResponse(run, resp, runId));
+		extractRequestTimestampAndApply(req, resp, (run, runId) -> {
+			if (busySliceRunIds().contains(runId)) {
+				resp.setStatus(HttpServletResponse.SC_OK);
+			} else {
+				setRunMatchesResponse(run, resp, runId);
+			}
+		});
 	}
 
 	@Override
 	protected final void doDelete(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		extractRequestTimestampAndApply(
-						req,
-						resp,
-						(run, runId) -> stopRunIfMatchesAndSetResponseInst(run, resp, runId));
+		final var runId = requestedRunId(req, resp);
+		if (runId == null) {
+			return;
+		}
+		final var sliceMatched = scenarioStepSvc.stopSlicesOfRun(runId);
+		final var activeTask = activeTask();
+		if (activeTask instanceof Run activeRun && (!sliceMatched || activeRun.runId() == runId)) {
+			stopRunIfMatchesAndSetResponse(activeRun, resp, runId, scenarioExecutor);
+		} else if (sliceMatched) {
+			resp.setStatus(HttpServletResponse.SC_OK);
+		} else if (scenarioStepSvc.hasOpenSlices()) {
+			resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
+		} else {
+			if (activeTask != null) {
+				Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
+			}
+			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+		}
+	}
+
+	/** A local call on the node's own manager, so the remote failure it declares does not happen here. */
+	private List<Long> busySliceRunIds() {
+		try {
+			return scenarioStepSvc.busySliceRunIds();
+		} catch (final RemoteException e) {
+			throw new IllegalStateException("Failed to read the node's step slices", e);
+		}
 	}
 
 	static void setRunTimestampHeader(final Run task, final HttpServletResponse resp) {
 		resp.setHeader(HttpHeader.ETAG.name(), String.valueOf(task.runId()));
 	}
 
+	/** Applies the action to the run in progress or else to the newest running worker slice's run. */
 	void applyForActiveRunIfAny(
 					final HttpServletResponse resp, final BiConsumer<Run, HttpServletResponse> action) throws RemoteException {
 		final var activeTask = activeTask();
-		final var activeService = scenarioStepSvc.getStepService();
-		if (null == activeTask && activeService == null) {
-			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
-		} else if (activeTask instanceof Run activeRun) {
+		if (activeTask instanceof Run activeRun) {
 			action.accept(activeRun, resp);
-		} else if (activeService != null) {
-			final var activeRun = new RunImpl("", "", null, activeService.runId());
-			action.accept(activeRun, resp);
-		} else {
-			Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
-			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+			return;
 		}
+		final var sliceRunIds = scenarioStepSvc.busySliceRunIds();
+		if (!sliceRunIds.isEmpty()) {
+			action.accept(new RunImpl("", "", null, sliceRunIds.get(0)), resp);
+			return;
+		}
+		if (activeTask != null) {
+			Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
+		}
+		resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
 	}
 
 	void extractRequestTimestampAndApply(
@@ -250,21 +280,27 @@ public class RunServlet extends HttpServlet {
 					final HttpServletResponse resp,
 					final BiConsumer<Run, Long> runRespRunIdConsumer)
 					throws IOException {
+		final var runId = requestedRunId(req, resp);
+		if (runId != null) {
+			applyForActiveRunIfAny(resp, (run, resp_) -> runRespRunIdConsumer.accept(run, runId));
+		}
+	}
+
+	/** The run id in the {@code If-Match} header, or {@code null} after answering 400. */
+	private static Long requestedRunId(final HttpServletRequest req, final HttpServletResponse resp)
+					throws IOException {
 		final var rawIncomingRunId = Collections.list(req.getHeaders(HttpHeader.IF_MATCH.toString())).stream()
 						.findAny()
 						.orElse(null);
-
 		if (rawIncomingRunId == null) {
 			resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Missing header: " + HttpHeader.IF_MATCH);
-		} else {
-			try {
-				final var incomingRunId = Long.parseLong(rawIncomingRunId);
-				applyForActiveRunIfAny(
-								resp, (run, resp_) -> runRespRunIdConsumer.accept(run, incomingRunId));
-			} catch (final NumberFormatException e) {
-				resp.sendError(
-								HttpServletResponse.SC_BAD_REQUEST, "Invalid run ID format: " + rawIncomingRunId);
-			}
+			return null;
+		}
+		try {
+			return Long.parseLong(rawIncomingRunId);
+		} catch (final NumberFormatException e) {
+			resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Invalid run ID format: " + rawIncomingRunId);
+			return null;
 		}
 	}
 
@@ -300,13 +336,6 @@ public class RunServlet extends HttpServlet {
 		} else {
 			resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
 		}
-	}
-
-	private void stopRunIfMatchesAndSetResponseInst(
-					final Run run,
-					final HttpServletResponse resp,
-					final long runId) {
-		stopRunIfMatchesAndSetResponse(run, resp, runId, scenarioExecutor);
 	}
 
 	/**
