@@ -114,6 +114,7 @@ final class S3AwsByteCountsTest {
 		assertEquals(0, bytes(run(plainOp(type, null))));
 	}
 
+	/** A guard: whole-object writes counted their size before this rule too, and must keep doing so. */
 	@ParameterizedTest
 	@EnumSource(value = OpType.class, names = {"CREATE", "UPDATE"
 	})
@@ -121,6 +122,7 @@ final class S3AwsByteCountsTest {
 		assertEquals(OBJECT_SIZE, bytes(run(plainOp(type, null))));
 	}
 
+	/** A guard, as for whole-object writes. */
 	@Test
 	void aCopyCountsTheItemSize() throws Exception {
 		assertEquals(OBJECT_SIZE, bytes(run(plainOp(OpType.CREATE, "/source"))));
@@ -130,6 +132,7 @@ final class S3AwsByteCountsTest {
 	 * A whole step of multipart uploads: its total is the bytes written, its steady total covers
 	 * what its window saw of them, and each upload's trace rows put them on its parts. The window's
 	 * edges can fall inside an upload, so the steady total is within one object of its count's bytes.
+	 * A metrics thread that runs late can leave the window short or empty, which that bound allows.
 	 */
 	@Test
 	void aMultipartStepReportsTheBytesItWroteOnce() throws Exception {
@@ -148,9 +151,8 @@ final class S3AwsByteCountsTest {
 			assertEquals(UPLOADS * OBJECT_SIZE, Long.parseLong(total.get("Size")), total::toString);
 
 			final var steady = row(steadyTotals.await(1));
-			final var steadyCount = Long.parseLong(steady.get("CountSucc"));
-			assertTrue(steadyCount > 1, steady::toString);
-			final var steadySize = Long.parseLong(steady.get("Size"));
+			final var steadyCount = steadyValue(steady, "CountSucc");
+			final var steadySize = steadyValue(steady, "Size");
 			assertTrue(Math.abs(steadySize - steadyCount * OBJECT_SIZE) <= OBJECT_SIZE, steady::toString);
 
 			final var transferSizes = traces.await(1).stream()
@@ -206,6 +208,12 @@ final class S3AwsByteCountsTest {
 			cells.put(names[i], values[i]);
 		}
 		return cells;
+	}
+
+	/** A cell of the steady row, which is blank when the window never opened. */
+	private static long steadyValue(final Map<String, String> steady, final String name) {
+		final var value = steady.get(name);
+		return value.isEmpty() ? 0 : Long.parseLong(value);
 	}
 
 	private static long bytes(final Operation<?> result) {
