@@ -84,36 +84,42 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					final List<Extension> extensions,
 					final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
-		final var buildInfo = EngineBuildInfoProvider.global();
-		this.config = buildInfo.copyWithProjectedVersion(config);
-		this.extensions = extensions;
-		this.ctxConfigs = ctxConfigs == null ? null
-						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
-		// Before anything reads or records the step configuration, so drivers, worker slices and config.yaml agree.
-		HttpVersioningSynonym.resolve(this.config, this.ctxConfigs);
-		this.metricsMgr = metricsMgr;
-		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
-		// Validate local steps immediately, and clients only when selected for execution.
-		if (!(this instanceof LoadStepClient<?>)) {
-			validateRangeConfiguration();
-			validateNicSetConfiguration();
-		}
 		try {
-			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
-		} catch (final RuntimeException e) {
-			throw new IntegrityTerminalException(
-							IntegrityTerminalException.Category.CONFIGURATION,
-							safeStepId(config),
-							"invalid storage.integrity configuration",
-							e);
+			final var buildInfo = EngineBuildInfoProvider.global();
+			this.config = buildInfo.copyWithProjectedVersion(config);
+			this.extensions = extensions;
+			this.ctxConfigs = ctxConfigs == null ? null
+							: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
+			// Before anything reads or records the step configuration, so drivers, worker slices and config.yaml agree.
+			HttpVersioningSynonym.resolve(this.config, this.ctxConfigs);
+			this.metricsMgr = metricsMgr;
+			// Script bindings eagerly construct dormant client prototypes for every operation/step type.
+			// Validate local steps immediately, and clients only when selected for execution.
+			if (!(this instanceof LoadStepClient<?>)) {
+				validateRangeConfiguration();
+				validateNicSetConfiguration();
+			}
+			try {
+				this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
+			} catch (final RuntimeException e) {
+				throw new IntegrityTerminalException(
+								IntegrityTerminalException.Category.CONFIGURATION,
+								safeStepId(config),
+								"invalid storage.integrity configuration",
+								e);
+			}
+			final StandaloneDeleteConfig standaloneDelete = StandaloneDeleteConfig.from(
+							this.config.configVal("load"));
+			this.standaloneDeleteEnabled = standaloneDelete.enabled();
+			this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
+			this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
+			this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
+			Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
+		} catch (final RuntimeException | Error e) {
+			// DaemonBase() has registered this object: the exit hook must not close a half-built step.
+			abandonRegistration();
+			throw e;
 		}
-		final StandaloneDeleteConfig standaloneDelete = StandaloneDeleteConfig.from(
-						this.config.configVal("load"));
-		this.standaloneDeleteEnabled = standaloneDelete.enabled();
-		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
-		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
-		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
-		Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
 	private void validateRangeConfiguration() {
@@ -414,6 +420,41 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void doStart() throws IllegalStateException {
 
 		refuseStartAtJvmExit();
+		try {
+			startStep();
+		} catch (final Throwable cause) {
+			final var stop = startStop(cause);
+			if (stop == null) {
+				throw cause;
+			}
+			// Here, not in run(): the shutdown hook's close waits for this start, so the line is queued
+			// before the hook drains the logs.
+			if (JvmExit.claimStartStopReport()) {
+				try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+					Loggers.MSG.info("{}: step start stopped, the engine is exiting", loadStepId());
+				}
+			}
+			throwUnchecked(stop);
+		}
+	}
+
+	/**
+	 * The stop that ended a start with {@code cause}, or null when it is a failure of the start. An
+	 * interrupt can surface as any failure of what it cut short; a typed terminal failure stays one.
+	 */
+	private InterruptedException startStop(final Throwable cause) {
+		if (cause instanceof InterruptedException interrupted) {
+			return interrupted;
+		}
+		if (!Thread.currentThread().isInterrupted() || RunTerminalException.find(cause) != null) {
+			return null;
+		}
+		final var stop = new InterruptedException(loadStepId() + ": stopped while starting");
+		stop.initCause(cause);
+		return stop;
+	}
+
+	private void startStep() {
 		validateRangeConfiguration();
 		validateNicSetConfiguration();
 		// A configured id is tested on this node before the target is touched, so a refused step leaves
@@ -465,7 +506,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	}
 
 	private RuntimeException startFailed(final Throwable cause) {
-		throwUncheckedIfInterrupted(cause);
+		final var stop = startStop(cause);
+		if (stop != null) {
+			throwUnchecked(stop);
+		}
 		final var terminalCause = lifecycleTerminalFailure(
 						IntegrityTerminalException.Category.EXECUTION,
 						"metadata-mode step failed to start",

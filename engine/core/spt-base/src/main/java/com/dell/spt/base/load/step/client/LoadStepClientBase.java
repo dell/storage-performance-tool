@@ -193,10 +193,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
 		super(config, extensions, ctxConfigs, metricsMgr);
-		this.failureBudgetController = standaloneDeleteEnabled()
-						? new ObjectFailureBudgetController(
-										ObjectFailureBudgetConfig.from(this.config.configVal("load")))
-						: null;
+		try {
+			this.failureBudgetController = standaloneDeleteEnabled()
+							? new ObjectFailureBudgetController(
+											ObjectFailureBudgetConfig.from(this.config.configVal("load")))
+							: null;
+		} catch (final RuntimeException | Error e) {
+			// The base constructor finished, so this object is registered; a subclass's fields are not set.
+			abandonRegistration();
+			throw e;
+		}
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {
@@ -682,6 +688,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		for (final var nodeAddr : nodeAddrs) {
 			final var fileMgr = resolveFileManager(nodeAddr);
 			if (null == fileMgr) {
+				if (Thread.currentThread().isInterrupted()) {
+					// A stop ended the retries, and the node may yet have been reachable.
+					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while resolving the file manager service @ " + nodeAddr));
+				}
 				throw new IllegalStateException(
 								"Failed to resolve the file manager service @ " + nodeAddr
 												+ ". Ensure the remote node is running with --run-node");

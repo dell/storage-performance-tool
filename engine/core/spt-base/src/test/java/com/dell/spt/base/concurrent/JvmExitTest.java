@@ -22,6 +22,14 @@ class JvmExitTest {
 	}
 
 	@Test
+	void onlyTheFirstStoppedStartOfAnExitReportsIt() {
+		assertFalse(JvmExit.claimStartStopReport(), "no exit has begun");
+		JvmExit.markBegun();
+		assertTrue(JvmExit.claimStartStopReport());
+		assertFalse(JvmExit.claimStartStopReport());
+	}
+
+	@Test
 	void closingEveryDaemonIsNotAJvmExit() {
 		DaemonBase.closeAll();
 		assertFalse(JvmExit.begun(), "only the shutdown hook's thread marks the exit");
