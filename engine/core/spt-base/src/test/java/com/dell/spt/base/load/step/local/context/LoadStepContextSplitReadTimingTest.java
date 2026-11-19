@@ -205,6 +205,30 @@ final class LoadStepContextSplitReadTimingTest {
 		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
 	}
 
+	/**
+	 * The mark is read for a READ only: a composite of another type keeps its sample even if marked, as
+	 * an extension's own composite could be, so its 5.17.0 timing does not change.
+	 */
+	@ParameterizedTest(name = "batch={0}")
+	@ValueSource(booleans = {false, true
+	})
+	void aMarkedUploadKeepsItsCompletionSample(final boolean batch) {
+		final var upload = new Published(OpType.CREATE, "marked-upload").starts().marksRequestless();
+		for (var part = 0; part < PARTS; part++) {
+			upload.partSucceeds(part);
+		}
+		upload.ends(Status.SUCC);
+		ranges.add(upload.last());
+
+		put(context(), batch, upload);
+
+		final var snapshot = metrics.terminalSnapshot();
+		assertEquals(1, snapshot.successSnapshot().count());
+		assertEquals(PARTS + 1, ranges.count);
+		ranges.assertHeldBy(snapshot.durationSnapshot(), snapshot.latencySnapshot());
+		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
+	}
+
 	/** The rule is for reads: an upload's finished parent is its completion request, which keeps its sample. */
 	@ParameterizedTest(name = "batch={0}")
 	@ValueSource(booleans = {false, true
@@ -407,7 +431,7 @@ final class LoadStepContextSplitReadTimingTest {
 		Published starts() {
 			if (OpType.READ.equals(operation.type())) {
 				passesWithoutData();
-				operation.markRequestless();
+				operation.markRangesSentAsRequests();
 			} else {
 				respond(operation, Status.SUCC);
 			}
@@ -425,7 +449,7 @@ final class LoadStepContextSplitReadTimingTest {
 
 		/** The driver marks the parent requestless after a pass that has a first-byte stamp. */
 		Published marksRequestless() {
-			operation.markRequestless();
+			operation.markRangesSentAsRequests();
 			return this;
 		}
 

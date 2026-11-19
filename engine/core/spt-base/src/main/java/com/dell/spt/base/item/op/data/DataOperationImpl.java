@@ -320,10 +320,9 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 	 * byte count, the data-response start and the range cursor (its index and cached slice) return to
 	 * a fresh operation's values. Unlike {@link #reset()}, it keeps the range marks, the content size
 	 * and the response's version, request ID and integrity result. Only the cooperative driver base's
-	 * part retry calls it, after a part attempt failed. A subclass that keeps more of an attempt's
-	 * progress clears it too.
+	 * part retry calls it, after a part attempt failed.
 	 */
-	public void resetAttemptProgress() {
+	public final void resetAttemptProgress() {
 		countBytesDone = 0;
 		respDataTimeStart = 0;
 		currRange = null;

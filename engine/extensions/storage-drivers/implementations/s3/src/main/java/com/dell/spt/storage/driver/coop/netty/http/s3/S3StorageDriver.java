@@ -36,6 +36,7 @@ import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
@@ -2285,8 +2286,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				concurrencyThrottle.release();
 				op.status(Operation.Status.SUCC);
 				op.startResponse();
-				// Its ranges are this attempt's only requests: the step takes their timings only.
-				compositeReadOp.markRequestless();
+				// Its ranges are this attempt's only requests: the step takes their timings only. An
+				// extension's own composite type is not marked, and keeps its parent sample.
+				if (compositeReadOp instanceof CompositeDataOperationImpl<?> marked) {
+					marked.markRangesSentAsRequests();
+				}
 				complete(null, op);
 				return true;
 			} else {

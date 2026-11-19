@@ -17,6 +17,7 @@ import com.dell.spt.base.item.VersionedItem;
 import com.dell.spt.base.item.io.DataItemInputStream;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
@@ -1199,8 +1200,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			op.finishResponse();
 		} else {
 			op.startResponse();
-			// Its parts are this attempt's only requests: the step takes their timings only.
-			op.markRequestless();
+			// Its parts are this attempt's only requests: the step takes their timings only. An
+			// extension's own composite type is not marked, and keeps its parent sample.
+			if (op instanceof CompositeDataOperationImpl<?> marked) {
+				marked.markRangesSentAsRequests();
+			}
 		}
 		return CompletableFuture.completedFuture(null);
 	}

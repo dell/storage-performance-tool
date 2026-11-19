@@ -30,6 +30,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteArtifactRecorder;
 import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
@@ -554,11 +555,24 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Counts a finished composite whose driver marked it {@link CompositeOperation#requestless()}: a read
-	 * split by the size threshold on {@code s3}, {@code s3-rdma} or {@code s3-aws}. Its ranges ran as
-	 * operations of their own, each recording its own timings, so it adds none. A composite that did
-	 * I/O of its own, as an {@code fs} split read does, is not marked and keeps its sample. Its time
-	 * from start to finalization stays on the operation, for the operation trace.
+	 * Whether a finished composite is a READ whose driver marked it
+	 * {@link CompositeDataOperationImpl#rangesSentAsRequests()}: a read split by the size threshold on
+	 * {@code s3}, {@code s3-rdma} or {@code s3-aws}. Any other composite, an extension's own composite
+	 * type included, keeps its timing sample. The step calls it while it still owns the result, before
+	 * the result can be recycled and re-admitted, which clears the mark.
+	 */
+	private static boolean rangesSentAsRequests(final Operation<?> composite) {
+		return composite.type() == OpType.READ
+						&& composite instanceof CompositeDataOperationImpl<?> parent
+						&& parent.rangesSentAsRequests();
+	}
+
+	/**
+	 * Counts a finished split read whose ranges were its only requests (see
+	 * {@link #rangesSentAsRequests}). Its ranges ran as operations of their own, each recording its own
+	 * timings, so it adds none. A composite that did I/O of its own, as an {@code fs} split read does,
+	 * is not marked and keeps its sample. Its time from start to finalization stays on the operation,
+	 * for the operation trace.
 	 */
 	private void markRequestlessSucc(final O opResult, final long bytes) {
 		markSucc(opResult, bytes, 0L, 0L, 0L);
@@ -902,6 +916,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			final long reqDuration = opResult.duration();
 			final long respLatency = opResult.latency();
 			final long timeToFirstByte = timeToFirstByte(opResult);
+			// read while the step owns the result: once recycled, its re-admission clears the mark
+			final boolean rangesOnly = composite && rangesSentAsRequests(opResult);
 			final long countBytesDone;
 			if (opResult instanceof DataOperation) {
 				countBytesDone = ((DataOperation) opResult).countBytesDone();
@@ -953,7 +969,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				outputTimingMetrics(opResult);
 				if (opResult instanceof ListOperation) {
 					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency, timeToFirstByte);
-				} else if (composite && ((CompositeOperation<?>) opResult).requestless()) {
+				} else if (rangesOnly) {
 					markRequestlessSucc(opResult, countBytesDone);
 				} else {
 					markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
@@ -1045,6 +1061,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// see the single-op put(O) above for why this is reset unconditionally on
 				// every terminal success, not just recycle-eligible ones
 				opResult.resetOpRetryCount();
+				// read while the step owns the result: once recycled, its re-admission clears the mark
+				final boolean rangesOnly = composite && rangesSentAsRequests(opResult);
 				if (opResult instanceof PartialOperation) {
 					markPartSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				} else {
@@ -1086,7 +1104,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					outputTimingMetrics(opResult);
 					if (listOpResult != null) {
 						markListSuccess(listOpResult, reqDuration, respLatency, timeToFirstByte);
-					} else if (composite && ((CompositeOperation<?>) opResult).requestless()) {
+					} else if (rangesOnly) {
 						markRequestlessSucc(opResult, countBytesDone);
 					} else {
 						markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);

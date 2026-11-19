@@ -307,26 +307,23 @@ class CompositeDataOperationImplTest {
 		}
 	}
 
-	// ---------- requestless mark ----------
+	// ---------- ranges-sent-as-requests mark ----------
 
 	@Test
-	void aRequestlessMarkLastsOnlyForItsAttempt() throws Exception {
+	void theRangesMarkLastsOnlyForItsAttempt() throws Exception {
 		final var op = newCompositeOp(OpType.READ, 4096, 1024);
-		assertFalse(op.requestless(), "a new read");
-		op.markRequestless();
-		assertTrue(op.requestless());
-		assertTrue(op.result().requestless(), "the attempt's result keeps its mark");
+		assertFalse(op.rangesSentAsRequests(), "a new read");
+		op.markRangesSentAsRequests();
+		assertTrue(op.rangesSentAsRequests());
+		assertTrue(op.result().rangesSentAsRequests(), "the attempt's result keeps its mark");
 		op.reset();
-		assertFalse(op.requestless(), "after reset(), which admission's prepare() calls");
-		op.markRequestless();
+		assertFalse(op.rangesSentAsRequests(), "after reset(), which admission's prepare() calls");
+		op.markRangesSentAsRequests();
 		op.resetSubOperations();
-		assertFalse(op.requestless(), "after a whole retry clears the sub-operations");
-		op.markRequestless();
-		op.resetAttemptProgress();
-		assertFalse(op.requestless(), "after an attempt's progress is cleared");
-		op.markRequestless();
+		assertFalse(op.rangesSentAsRequests(), "after a whole retry clears the sub-operations");
+		op.markRangesSentAsRequests();
 		final var recycled = op.result();
 		recycled.reset();
-		assertFalse(recycled.requestless(), "a recycled copy, once admitted again");
+		assertFalse(recycled.rangesSentAsRequests(), "a recycled copy, once admitted again");
 	}
 }
