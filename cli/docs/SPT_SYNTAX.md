@@ -635,7 +635,7 @@ Available driver values:
 |-------|---------------|-------------|
 | `default` | `s3` (Netty) | The standard REST/Netty-based S3 driver. Default for all workloads |
 | `netty` | `s3` (Netty) | Alias for `default` |
-| `aws` | `s3-aws` | AWS SDK v2 synchronous client. Useful for compatibility testing or environments where the Netty driver is not suitable. Its client adds requests SPT does not count, such as a HEAD before each whole-object GET and copy (see [Requests the Client Adds](../../engine/extensions/storage-drivers/implementations/s3-aws/README.md#requests-the-client-adds)) |
+| `aws` | `s3-aws` | AWS SDK v2 asynchronous client (CRT). Useful for compatibility testing or environments where the Netty driver is not suitable. Its client adds requests SPT does not count, such as a HEAD before each whole-object GET and copy (see [Requests the Client Adds](../../engine/extensions/storage-drivers/implementations/s3-aws/README.md#requests-the-client-adds)) |
 | `rdma` | `s3-rdma` | RDMA-accelerated S3 driver. Equivalent to `--use-rdma` |
 
 **Flag interaction with `--use-rdma`:**

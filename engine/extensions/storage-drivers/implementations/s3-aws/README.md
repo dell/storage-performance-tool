@@ -20,17 +20,17 @@ The driver uses `S3AsyncClient.crtBuilder()` with aws-crt-java bindings, which p
 
 The CRT client is configured with the following performance parameters:
 
-- `targetThroughputInGbps: 20.0` - Target network throughput (adjust based on network capacity)
-- `minimumPartSizeInBytes: 8 MB` - Minimum part size for multipart uploads
+- `storage.crt.targetThroughputGbps: 20.0` - Target network throughput (adjust based on network capacity)
+- `storage.crt.minimumPartSizeBytes: 16777216` (16 MiB) - Minimum part size for multipart uploads
 
-These parameters can be adjusted in `S3AwsStorageDriverFactory.java` to match your network infrastructure.
+Both are configuration settings and can be set like any other to match your network infrastructure.
 
 ## Integration
 
 ### AWS SDK Version
 
-- **Version:** 2.42.28
-- **CRT Version:** 0.44.0
+- **Version:** 2.57.11
+- **CRT Version:** 0.50.0
 - **Compatibility:** Compatible with Amazon S3 and S3-compatible services (MinIO, SeaweedFS, Ceph, etc.)
 
 ### Dependencies
@@ -277,8 +277,8 @@ fake S3 target:
 - A CRT client request answered 500, 503 or 504 every time reached the target up to 6 times before
   SPT saw one failure.
 - That holds while the client's retry budget lasts, about 100 retries per client. Of 60 concurrent
-  PUTs answered 503 on one client, the first 17 reached the target 2 to 6 times each, and the last
-  38 once each.
+  PUTs answered 503 on one client, the earliest reached the target up to 6 times each; once the
+  budget ran out, the last 38 reached it once each.
 - An ordinary SDK client call answered with a 5xx every time reached the target 4 times.
 - A transient 5xx shows as a slower success. A PUT answered 503 once and then 200 was a success on
   `s3-aws`, after 2 requests at the target and 545 ms; on `s3` it was one failure after 1 request.
