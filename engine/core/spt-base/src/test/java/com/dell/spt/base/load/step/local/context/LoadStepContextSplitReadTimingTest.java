@@ -130,6 +130,31 @@ final class LoadStepContextSplitReadTimingTest {
 		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
 	}
 
+	/**
+	 * A parent that read the object itself, as an {@code fs} read split by the threshold does, made a
+	 * read of its own: it keeps its sample, next to its ranges'.
+	 */
+	@ParameterizedTest(name = "batch={0}")
+	@ValueSource(booleans = {false, true
+	})
+	void aSplitReadThatReadTheObjectItselfKeepsItsSample(final boolean batch) {
+		final var read = new Published(OpType.READ, "read-itself").readsTheObject();
+		for (var part = 0; part < PARTS; part++) {
+			read.partSucceeds(part);
+		}
+		read.ends(Status.SUCC);
+		ranges.add(read.last());
+
+		put(context(), batch, read);
+
+		final var snapshot = metrics.terminalSnapshot();
+		assertEquals(1, snapshot.successSnapshot().count());
+		assertEquals(PARTS + 1, ranges.count);
+		ranges.assertHeldBy(snapshot.durationSnapshot(), snapshot.latencySnapshot());
+		assertEquals(PARTS + 1, snapshot.ttfbSnapshot().count(), "the parent's first byte is a real one");
+		ranges.assertHeldBy(bucketRecord().duration(), bucketRecord().latency());
+	}
+
 	/** The rule is for reads: an upload's finished parent is its completion request, which keeps its sample. */
 	@ParameterizedTest(name = "batch={0}")
 	@ValueSource(booleans = {false, true
@@ -324,8 +349,28 @@ final class LoadStepContextSplitReadTimingTest {
 			parts = operation.subOperations();
 		}
 
+		/**
+		 * The initial pass. A split read's sends no request, as on {@code s3} and {@code s3-aws}: it
+		 * has request and response times and no data response. An upload's is its initiation request.
+		 */
 		Published starts() {
+			if (OpType.READ.equals(operation.type())) {
+				operation.startRequest();
+				pause();
+				operation.finishRequest();
+				pause();
+				operation.startResponse();
+				operation.status(Status.SUCC);
+			} else {
+				respond(operation, Status.SUCC);
+			}
+			return publishOperation();
+		}
+
+		/** An initial pass that reads the whole object itself, as {@code fs} does, before the ranges run. */
+		Published readsTheObject() {
 			respond(operation, Status.SUCC);
+			operation.countBytesDone(PARTS * PART_SIZE);
 			return publishOperation();
 		}
 
