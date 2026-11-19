@@ -152,8 +152,8 @@ curl -v -X DELETE -H "If-Match: 1543257350274" http://localhost:9999/run
 ```
 
 A busy node answers `POST /run` with `409 Conflict`, and the request changes nothing: not the run in progress, its
-configuration or `/status`. A node is busy while a run is in progress or finishing its cleanup, or while it holds a
-worker slice. A node holding a worker slice answers `409` without reading the request. On any other node, defaults that
+configuration or `/status`. A node is busy while a run is in progress or finishing its cleanup, or while a worker slice
+on it is busy (see below). A node with a busy worker slice answers `409` without reading the request. On any other node, defaults that
 name an unknown setting or give a value of the wrong type still answer `400`, and defaults that cannot be parsed answer
 `500`.
 
@@ -161,8 +161,9 @@ A stopped run stays the active run until its cleanup returns: `HEAD /run` answer
 `DELETE` with that id answer `200`. After `DELETE /run`, wait for `HEAD /run` to answer `204`, or for a terminal `/status`,
 before posting again. A scenario that never returns after its stop keeps the node at `409` until `/shutdown` or a restart.
 
-A node that serves as a worker holds a **step slice** for each step an entry runs on it. A slice is busy from its start until
-it is stopped or closed; one that was created and not started, or that was stopped and not yet closed, is not busy.
+A node that serves as a worker holds a **step slice** for each step an entry runs on it. A slice is busy from the end of its
+start until it is stopped or closed; one that was created and not started, or that was stopped and not yet closed, is not busy.
+A run posted to a worker while an entry is starting a slice there is therefore accepted, and the two then share the node.
 
 - `HEAD /run` answers `200` with the run id of the newest busy slice, and `204` once no slice is busy and no run is in progress.
 - `GET /run` with `If-Match` answers `200` for the id of the run in progress or of any busy slice, and `204` otherwise.
@@ -449,7 +450,7 @@ Fields:
 - `state`: one of `IDLE`, `RUNNING`, `COMPLETED`, `STOPPED`, `FAILED`.
 - `since`: ISO‑8601 instant indicating when the state was entered.
 - `run_id` and `step_id`: included when known.
-- `/status` reports only runs posted to this node. A worker serving a step slice stays `IDLE`; its slice shows on `/metrics/json` and `HEAD /run`.
+- `/status` reports only runs posted to this node. A step slice does not change it; the slice shows on `/metrics/json` and `HEAD /run`.
 - `category` and `message`: included only when `state` is `FAILED`.
   - `category` is one of `configuration`, `input`, `execution`, `aggregation`, `publication` or `cleanup`. A typed terminal failure of a step sets its own category. A scenario that fails otherwise reads `configuration` for a syntax error in the posted scenario text or a setting that `Load.config(...)` or `.append(...)` refuses, and `execution` for any other failure.
   - `message` is a short description of the cause, at most 1024 characters. For a scenario failure the engine writes it without quoting the scenario: it names a refused setting only by the part of its path the engine defines, never by a value or a key the scenario wrote. A typed terminal failure's message is its own and may name a setting, such as the items file's name. The node's log has the details.

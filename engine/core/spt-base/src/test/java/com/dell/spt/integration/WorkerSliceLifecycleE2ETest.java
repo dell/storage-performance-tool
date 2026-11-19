@@ -100,7 +100,7 @@ class WorkerSliceLifecycleE2ETest {
 		Thread.sleep(1_500);
 		assertEquals(stopped, fileCount(orphanData), "the orphan stopped writing");
 		assertEquals(200, delete(worker, orphanRun), "the stopped slice is still open and still matches");
-		assertEquals(1, countLines(worker, "stopped this node's share of run " + orphanRun), "one warning per stop");
+		await(() -> countLines(worker, "stopped this node's share of run " + orphanRun) == 1, "one warning per stop", worker);
 		assertTrue(worker.process().isAlive());
 
 		assertEquals(202, post(worker, 3004L, "after-stop", null, dir.resolve("after-stop-data"), "1s"));
@@ -109,11 +109,27 @@ class WorkerSliceLifecycleE2ETest {
 		awaitExit(worker);
 	}
 
+	/** The reason a worker's DELETE stops its slice and does not close it: the entry still collects it. */
+	@Test
+	void aLiveEntryCollectsASliceStoppedOnItsWorker() throws Exception {
+		final Node worker = startNode("worker");
+		final Node entry = startNode("entry");
+		assertEquals(202, post(entry, 5001L, "collected-step", worker, dir.resolve("collected-data"), "8s"));
+		await(() -> headStatus(worker) == 200, "the worker reports its slice", worker);
+
+		assertEquals(200, delete(worker, 5001L));
+
+		await(() -> headStatus(worker) == 204, "HEAD /run answers 204 after the stop", worker);
+		awaitStatus(entry, "COMPLETED");
+		assertEntryArtifacts(entry, "collected-step");
+		assertTrue(worker.process().isAlive());
+	}
+
 	@Test
 	void aFormerWorkerIsIdleAndServesAsAnEntry() throws Exception {
 		final Node nodeA = startNode("a");
 		final Node nodeB = startNode("b");
-		assertEquals(202, post(nodeB, 4001L, "first-step", nodeA, dir.resolve("first-data"), "3s"));
+		assertEquals(202, post(nodeB, 4001L, "first-step", nodeA, dir.resolve("first-data"), "8s"));
 		await(() -> headStatus(nodeA) == 200, "the worker reports its slice", nodeA);
 		assertEquals("4001", etag(nodeA));
 		assertEquals(409, post(nodeA, 4999L, "refused-step", null, dir.resolve("refused-data"), "1s"));
