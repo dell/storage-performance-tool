@@ -309,6 +309,55 @@ public class ConfigUtilTest {
 		assertEquals(2, backing.calls.get());
 	}
 
+	/** A backing list whose whole read gives no array, or throws an exception whose message throws. */
+	static final class NoArrayList extends AbstractList<Object> {
+
+		private final boolean throwUnreadable;
+
+		NoArrayList(final boolean throwUnreadable) {
+			this.throwUnreadable = throwUnreadable;
+		}
+
+		@Override
+		public Object get(final int index) {
+			return element();
+		}
+
+		@Override
+		public int size() {
+			return 1;
+		}
+
+		@Override
+		public Object[] toArray() {
+			if (throwUnreadable) {
+				throw new IllegalStateException() {
+					@Override
+					public String getMessage() {
+						throw new UnsupportedOperationException("no message");
+					}
+				};
+			}
+			return null;
+		}
+	}
+
+	@Test
+	public void testMergeAndCopyOfKeepAViewWhoseBackingListGivesNoArrayOrAnUnreadableFailure() {
+		for (final boolean throwUnreadable : new boolean[]{false, true
+		}) {
+			final List<Object> view = Collections.unmodifiableList(new NoArrayList(throwUnreadable));
+			final Config defaults = new BasicConfig(
+							"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", view)));
+
+			final Config merged = assertDoesNotThrow(() -> ConfigUtil.merge("-", List.of(defaults)));
+			final Config copied = assertDoesNotThrow(() -> ConfigUtil.copyOf(defaults));
+
+			assertSame(view, merged.listVal("names"));
+			assertSame(view, copied.listVal("names"));
+		}
+	}
+
 	@Test
 	@SuppressWarnings("unchecked")
 	public void testARunsChangeToAMapInAnUnmodifiableViewStaysOutOfTheNextRun() {

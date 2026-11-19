@@ -392,7 +392,8 @@ public interface ConfigUtil {
 	 *       Otherwise it becomes an unmodifiable view over a new {@link ArrayList}, or a {@link
 	 *       LinkedList} when the source view is not {@link java.util.RandomAccess}, which keeps the
 	 *       view's class. A rebuilt view allows nulls and serializes as its new backing list does. When
-	 *       reading the view throws, it is kept, as before, with one warning naming the setting.
+	 *       reading the view throws or gives no array, it is kept, as before, with one warning naming
+	 *       the setting. The read can block while another thread holds a lock on the backing list.
 	 * </ul>
 	 * Each of these routes reads the source once, into an array with {@code toArray}, and builds the
 	 * copy and any comparison from that array; a rebuilt {@link List#of} list without nulls is also
@@ -430,14 +431,22 @@ public interface ConfigUtil {
 		}
 		final Object[] elements;
 		if (view) {
+			Object[] read;
+			String failure;
 			try {
-				elements = list.toArray();
+				read = list.toArray();
+				failure = read == null ? "toArray returned null" : null;
 			} catch (final RuntimeException e) {
+				read = null;
+				failure = describe(e);
+			}
+			if (failure != null) {
 				Loggers.ERR.warn(
-								"Sharing the read-only list {} with the run: its backing list could not be read: {}",
-								path.isEmpty() ? listClass.getName() : path, e.toString());
+								"Sharing the read-only list {} instead of copying it: its backing list could not be read: {}",
+								path.isEmpty() ? listClass.getName() : path, failure);
 				return list;
 			}
+			elements = read;
 		} else {
 			elements = list.toArray();
 		}
@@ -491,6 +500,15 @@ public interface ConfigUtil {
 		}
 		final String[] text = Arrays.copyOf(copies, copies.length, String[].class);
 		return Arrays.asList((Object[]) text);
+	}
+
+	/** The failure for the warning, by class alone when its own message cannot be read. */
+	private static String describe(final RuntimeException e) {
+		try {
+			return e.toString();
+		} catch (final RuntimeException unreadable) {
+			return e.getClass().getName();
+		}
 	}
 
 	/** Whether the read-only list throws when asked whether it holds null, as a {@link List#of} list does. */
