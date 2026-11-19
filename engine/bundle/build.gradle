@@ -1641,11 +1641,15 @@ tasks.register('verifyEngineExitStatusCanary') {
 			def stepDirs = { ->
 				(new File(signalledLog, 'log').listFiles() ?: [] as File[]).findAll { it.directory && it.name.startsWith('linear_') }
 			}
+			def stepAttempt = 'signal-next-step: starting a step'
+			def stepRunning = 'signal-next-step: step running'
+			def signalledScenario = "var step = Load.config({load: {step: {limit: {time: \"30s\"}}}});\n" +
+				"print('${stepAttempt}');\nstep.start();\nprint('${stepRunning}');\nstep.await();\nstep.close();\n"
 			def signalledBuilder = new ProcessBuilder(javaExecutable,
 					'-Dlog4j2.asyncLoggerWaitStrategy=Sleep',
-					'-Dlog4j2.asyncLoggerSleepTimeNs=60000000000',
+					'-Dlog4j2.asyncLoggerSleepTimeNs=600000000000',
 					'-jar', jarFile.absolutePath,
-					scenario('signal-next-step', 'Load.config({load: {step: {limit: {time: "30s"}}}}).run();\n' * 3),
+					scenario('signal-next-step', signalledScenario * 3),
 					'--storage-driver-type=dummy-mock')
 				.directory(signalledCwd)
 				.redirectOutput(signalledStdout)
@@ -1655,10 +1659,13 @@ tasks.register('verifyEngineExitStatusCanary') {
 			def signalled = signalledBuilder.start()
 			try {
 				def startDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(90)
-				while (stepDirs().isEmpty() && signalled.alive && System.nanoTime() < startDeadline) {
+				// The step directory appears before the step has started: a signal then ends the scenario in
+				// the first start, and it never reaches the second.
+				def firstStepRunning = { -> signalledStdout.getText('UTF-8').contains(stepRunning) }
+				while (!firstStepRunning() && signalled.alive && System.nanoTime() < startDeadline) {
 					Thread.sleep(50)
 				}
-				if (stepDirs().isEmpty()) {
+				if (!firstStepRunning()) {
 					throw new GradleException("Packaged engine 'signal-next-step' started no step:\n${signalledOutput()}")
 				}
 				def signalledAt = System.nanoTime()
@@ -1676,6 +1683,12 @@ tasks.register('verifyEngineExitStatusCanary') {
 				}
 				if (stepDirs().size() != 1) {
 					throw new GradleException("Packaged engine 'signal-next-step' started another step after SIGTERM: ${stepDirs()*.name}")
+				}
+				// The first step ended and the scenario went on to its second, which was refused
+				def stepAttempts = signalledStdout.getText('UTF-8').count(stepAttempt)
+				def stepsRunning = signalledStdout.getText('UTF-8').count(stepRunning)
+				if (stepAttempts != 2 || stepsRunning != 1) {
+					throw new GradleException("Packaged engine 'signal-next-step' reached ${stepAttempts} step starts with ${stepsRunning} running, expected 2 with 1:\n${signalledOutput()}")
 				}
 			} finally {
 				if (signalled.alive) {

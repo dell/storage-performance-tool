@@ -15,6 +15,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
+import com.dell.spt.base.load.step.linear.LinearLoadStepLocal;
 import com.dell.spt.base.load.step.linear.LinearLoadStepExtension;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
@@ -111,6 +112,15 @@ class LoadStepBaseJvmExitTest {
 		final var run = new LinearLoadStepClient(config, extensions, List.of(), mock(MetricsManager.class));
 		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, run::run));
 		assertTrue(run.isClosed());
+		assertNoStepDirectory();
+	}
+
+	@Test
+	void aSliceRefusedOnAWorkerPublishesNothingWhenClosed() throws Exception {
+		JvmExit.markBegun();
+		try (var slice = new LinearLoadStepLocal(config(), List.of(), null, mock(MetricsManager.class))) {
+			assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, slice::start));
+		}
 		assertNoStepDirectory();
 	}
 

@@ -7,6 +7,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.metrics.range.RangeReadArtifact;
 import com.dell.spt.base.nic.EventLoopsArtifact;
@@ -212,6 +213,15 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						verificationCorrectnessFailed,
 						verificationInconclusive,
 						reconciled);
+	}
+
+	/** A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at close. */
+	@Override
+	protected void doStart() {
+		if (JvmExit.begun()) {
+			startRefused = true;
+		}
+		super.doStart();
 	}
 
 	@Override
