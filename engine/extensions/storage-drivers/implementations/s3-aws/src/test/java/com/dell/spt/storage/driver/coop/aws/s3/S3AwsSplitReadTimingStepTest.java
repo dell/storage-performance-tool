@@ -111,7 +111,10 @@ final class S3AwsSplitReadTimingStepTest {
 		final var duration = snapshot.durationSnapshot();
 		assertEquals(ranges, duration.count(), "duration samples");
 		rangeSamples.assertHeldBy(duration, snapshot.latencySnapshot());
-		final var busyMicros = snapshot.elapsedTimeMillis() * 1_000 * CONCURRENCY;
+		// The sum equals the ranges' exactly (above); this bounds it by the time the step had. A parent's
+		// queue time once made it many times that. Twice the budget, plus a millisecond for truncation,
+		// leaves room for the wall clock that times the step against the monotonic one that times requests.
+		final var busyMicros = 2 * (snapshot.elapsedTimeMillis() + 1) * 1_000 * CONCURRENCY;
 		assertTrue(duration.sum() <= busyMicros, () -> duration.sum() + " us of durations in " + busyMicros + " us");
 	}
 
