@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
@@ -23,6 +24,13 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.Vector;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 public class ConfigUtilTest {
 
@@ -157,21 +165,127 @@ public class ConfigUtilTest {
 	}
 
 	@Test
-	public void testCopyOfKeepsAnyOtherListAndTheOrderOfAnyOtherMap() {
-		final Map<String, Object> schema = new HashMap<>(Map.of("names", List.class, "headers", Map.class));
-		final List<Object> names = Collections.unmodifiableList(new ArrayList<>(List.of("a")));
+	public void testCopyOfKeepsTheOrderOfAnyOtherMap() {
+		final Map<String, Object> schema = new HashMap<>(Map.of("headers", Map.class));
 		final Map<String, Object> written = new LinkedHashMap<>();
 		final List<String> headerNames = List.of("X-Zulu", "X-Alpha", "X-Mike", "X-Bravo", "X-Yankee", "X-Charlie");
 		headerNames.forEach(name -> written.put(name, "1"));
 		final Config source = new BasicConfig("-", schema, new HashMap<>(Map.of(
-						"names", names, "headers", Collections.unmodifiableMap(written))));
+						"headers", Collections.unmodifiableMap(written))));
 
 		final Config copy = ConfigUtil.copyOf(source);
 
-		assertSame(names, copy.listVal("names"));
 		assertEquals(headerNames, List.copyOf(copy.mapVal("headers").keySet()));
 		copy.mapVal("headers").put("X-Later", "2");
 		assertEquals(headerNames, List.copyOf(written.keySet()));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void testCopyOfAnUnmodifiableListIsADetachedUnmodifiableList() {
+		final Map<String, Object> element = new LinkedHashMap<>(Map.of("value", "first"));
+		final List<Object> names = Collections.unmodifiableList(new ArrayList<>(List.of("a", element)));
+		final Config source = new BasicConfig(
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", names)));
+
+		final List<Object> copied = ConfigUtil.copyOf(source).listVal("names");
+
+		assertEquals(names.getClass(), copied.getClass());
+		assertNotSame(names, copied);
+		assertEquals(names, copied);
+		assertThrows(UnsupportedOperationException.class, () -> copied.add("b"));
+		assertNotSame(element, copied.get(1));
+		((Map<String, Object>) copied.get(1)).put("value", "changed");
+		assertEquals("first", element.get("value"));
+	}
+
+	/**
+	 * Lists the copy rebuilds, each holding a mutable map where the list takes one. The schema names
+	 * either {@code List} or the list's exact class, as an extension's defaults may, for example with
+	 * {@code Arrays.asList("p", "q").getClass()}.
+	 */
+	@SuppressWarnings("JdkObsolete") // an extension's defaults may hold these classes
+	static Stream<Arguments> listsTheCopyRebuilds() {
+		final List<Supplier<List<Object>>> lists = List.of(
+						() -> new ArrayList<>(List.of("p", element())),
+						() -> new LinkedList<>(List.of("p", element())),
+						() -> Arrays.asList("p", "q"),
+						() -> Arrays.asList("p", element()),
+						() -> List.of(element()),
+						() -> List.of("p", element()),
+						() -> List.of("p", "q", element()),
+						() -> List.copyOf(List.of("p", "q", "r", element())),
+						() -> Stream.<Object> of("p", element()).toList(),
+						() -> Stream.<Object> of("p", null, element()).toList(),
+						() -> Collections.unmodifiableList(new ArrayList<>(List.of("p", element()))),
+						() -> Collections.unmodifiableList(new LinkedList<>(List.of("p", element()))),
+						() -> Collections.singletonList(element()),
+						() -> new Vector<>(List.of("p", "q", element())),
+						() -> new CopyOnWriteArrayList<>(List.of("p", element())));
+		return lists.stream().flatMap(list -> Stream.of(
+						Arguments.of(list.get().getClass().getName() + " as List", list, false),
+						Arguments.of(list.get().getClass().getName() + " as its class", list, true)));
+	}
+
+	private static Map<String, Object> element() {
+		return new LinkedHashMap<>(Map.of("value", "first"));
+	}
+
+	@ParameterizedTest(name = "{0}")
+	@MethodSource("listsTheCopyRebuilds")
+	@SuppressWarnings("unchecked")
+	public void testMergeAndCopyOfRebuildAListOfItsOwnClassThatSharesNothing(
+					final String name, final Supplier<List<Object>> lists, final boolean schemaNamesTheClass) {
+		for (final boolean viaMerge : List.of(true, false)) {
+			final List<Object> source = lists.get();
+			final List<Object> expected = new ArrayList<>(source);
+			final Map<String, Object> schema = new HashMap<>(Map.of("names", schemaNamesTheClass ? source.getClass() : List.class));
+			final Config config = new BasicConfig("-", schema, new HashMap<>(Map.of("names", source)));
+
+			final List<Object> copied = assertDoesNotThrow(
+							() -> viaMerge ? ConfigUtil.merge("-", List.of(config)) : ConfigUtil.copyOf(config))
+							.listVal("names");
+
+			assertEquals(source.getClass(), copied.getClass());
+			assertNotSame(source, copied);
+			assertEquals(source, copied);
+			for (int i = 0; i < source.size(); i++) {
+				if (source.get(i) instanceof Map<?, ?> element) {
+					assertNotSame(element, copied.get(i));
+					((Map<String, Object>) copied.get(i)).put("value", "changed");
+					assertEquals("first", element.get("value"));
+				}
+			}
+			final boolean copySets = changes(() -> copied.set(0, "changed"));
+			assertEquals(expected, source);
+			assertEquals(changes(() -> source.set(0, "changed")), copySets);
+			assertEquals(changes(() -> source.add("added")), changes(() -> copied.add("added")));
+		}
+	}
+
+	/** Runs the change and returns false if the list refuses it. */
+	private static boolean changes(final Runnable change) {
+		try {
+			change.run();
+			return true;
+		} catch (final UnsupportedOperationException e) {
+			return false;
+		}
+	}
+
+	@Test
+	public void testCopyOfKeepsAListItCannotRebuild() {
+		final List<List<Object>> kept = List.of(
+						List.<Object> of("p", "q", "r").subList(0, 2),
+						new ArrayList<Object>(List.of("p", "q")).subList(0, 1),
+						Collections.synchronizedList(new ArrayList<>(List.of("p"))),
+						Collections.checkedList(new ArrayList<>(List.of("p")), Object.class));
+		for (final List<Object> source : kept) {
+			final Config config = new BasicConfig(
+							"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
+
+			assertSame(source, ConfigUtil.copyOf(config).listVal("names"));
+		}
 	}
 
 	@Test

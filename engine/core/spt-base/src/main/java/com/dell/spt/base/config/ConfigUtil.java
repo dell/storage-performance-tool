@@ -22,8 +22,10 @@ import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.RandomAccess;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.openjdk.nashorn.api.scripting.JSObject;
 
 import static com.dell.spt.base.config.ConfigFormat.JSON;
@@ -303,11 +305,10 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Merges the configurations into a new one that shares no nested map, {@link ArrayList} or {@link
-	 * LinkedList} with them (see {@link #copyMap}). {@code
-	 * addBranches} adds to the first tree's maps in place, and {@code deepToMap} keeps a map-typed
-	 * value, such as the HTTP headers, by reference, so merging the original trees would change the
-	 * first configuration.
+	 * Merges the configurations into a new one that shares no nested map or list with them, apart
+	 * from the lists {@link #copyList} keeps by reference. {@code addBranches} adds to the first
+	 * tree's maps in place, and {@code deepToMap} keeps a map-typed value, such as the HTTP headers,
+	 * by reference, so merging the original trees would change the first configuration.
 	 */
 	static Config merge(final String pathSep, final List<Config> configs) {
 		final var schema = configs.stream()
@@ -324,10 +325,10 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Copies the configuration so that it shares no nested map, {@link ArrayList} or {@link LinkedList}
-	 * with the original (see {@link #copyMap}). {@code new
-	 * BasicConfig(config)} copies only the branches and keeps a map- or list-typed value by reference,
-	 * so setting a header on such a copy also sets it on the original.
+	 * Copies the configuration so that it shares no nested map or list with the original, apart from
+	 * the lists {@link #copyList} keeps by reference. {@code new BasicConfig(config)} copies only the
+	 * branches and keeps a map- or list-typed value by reference, so setting a header on such a copy
+	 * also sets it on the original.
 	 */
 	static Config copyOf(final Config config) {
 		return new BasicConfig(config.pathSep(), config.schema(), copyMap(Config.deepToMap(config)));
@@ -353,31 +354,80 @@ public interface ConfigUtil {
 		return copy;
 	}
 
-	/**
-	 * Copies an {@link ArrayList} or a {@link LinkedList} into a list of its own class, and keeps any
-	 * other list by reference, as a configuration did before: a schema may name the list's class as
-	 * the setting's type. A list set from text, such as an engine argument, is an {@link Arrays#asList}
-	 * list, whose elements can be set in place; it is copied into an {@link ArrayList}, which has
-	 * every type that list has that a schema can name.
-	 */
-	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
 	private static Object copyValue(final Object value) {
 		if (value instanceof Map<?, ?> map) {
 			return copyMap(map);
 		}
 		if (value instanceof List<?> list) {
-			final List<Object> copy;
-			if (list.getClass() == ArrayList.class || list.getClass() == Arrays.asList().getClass()) {
-				copy = new ArrayList<>(list.size());
-			} else if (list.getClass() == LinkedList.class) {
-				copy = new LinkedList<>();
-			} else {
-				return value;
-			}
-			list.forEach(element -> copy.add(copyValue(element)));
-			return copy;
+			return copyList(list);
 		}
 		return value;
+	}
+
+	/**
+	 * Copies a list into one of the source list's exact class, with its read-only or fixed-size
+	 * behaviour, whose elements are copied as {@link #copyValue} copies them: a schema may name the
+	 * list's class as the setting's type, and the configuration refuses any other class.
+	 * <ul>
+	 *   <li>An {@link ArrayList} or a {@link LinkedList} becomes a list of that class.
+	 *   <li>An {@link Arrays#asList} list, such as a list set from text, wraps a new array.
+	 *   <li>A {@link List#of} or {@link List#copyOf} list is rebuilt with {@link List#of}, and a
+	 *       {@link java.util.stream.Stream#toList} list, which allows nulls, with that method.
+	 *   <li>A {@link Collections#unmodifiableList} view wraps a new {@link ArrayList}, or a new {@link
+	 *       LinkedList} when the source is not {@link RandomAccess}, which keeps the view's class.
+	 *   <li>A {@link Collections#singletonList} list is rebuilt with that method.
+	 *   <li>Any other list becomes a new instance of its class, through its public no-argument
+	 *       constructor, holding the copied elements.
+	 * </ul>
+	 * A list that none of these can rebuild is kept by reference, as a configuration did before: for
+	 * example a sub-list, a {@link Collections#synchronizedList} or {@link Collections#checkedList}
+	 * view, or a class without a public no-argument constructor. Its elements are shared too.
+	 */
+	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
+	private static Object copyList(final List<?> list) {
+		final Class<?> listClass = list.getClass();
+		final Object[] elements = list.stream().map(ConfigUtil::copyValue).toArray();
+		if (listClass == ArrayList.class) {
+			return new ArrayList<>(Arrays.asList(elements));
+		}
+		if (listClass == LinkedList.class) {
+			return new LinkedList<>(Arrays.asList(elements));
+		}
+		if (listClass == Arrays.asList().getClass()) {
+			return Arrays.asList(elements);
+		}
+		if (listClass == List.of().getClass() || listClass == List.of(1).getClass()) {
+			final List<Object> rebuilt = acceptsNullQuery(list) ? Stream.of(elements).toList() : List.of(elements);
+			return rebuilt.getClass() == listClass ? rebuilt : list;
+		}
+		if (listClass == Collections.unmodifiableList(new ArrayList<>()).getClass()
+						|| listClass == Collections.unmodifiableList(new LinkedList<>()).getClass()) {
+			final List<Object> inner = list instanceof RandomAccess
+							? new ArrayList<>(Arrays.asList(elements))
+							: new LinkedList<>(Arrays.asList(elements));
+			return Collections.unmodifiableList(inner);
+		}
+		if (listClass == Collections.singletonList(null).getClass()) {
+			return Collections.singletonList(elements[0]);
+		}
+		try {
+			@SuppressWarnings("unchecked")
+			final List<Object> copy = (List<Object>) listClass.getConstructor().newInstance();
+			copy.addAll(Arrays.asList(elements));
+			return copy;
+		} catch (final ReflectiveOperationException | UnsupportedOperationException e) {
+			return list;
+		}
+	}
+
+	/** Whether the list answers whether it holds null; a {@link List#of} list throws instead. */
+	private static boolean acceptsNullQuery(final List<?> list) {
+		try {
+			var unused = list.contains(null);
+			return true;
+		} catch (final NullPointerException e) {
+			return false;
+		}
 	}
 
 	static void flatten(
