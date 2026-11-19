@@ -29,6 +29,7 @@ import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -207,6 +208,25 @@ class RunServletBusyTest {
 		assertEquals(409, postDefaults(null, HOLDING_SCENARIO).status);
 
 		assertEquals(before, Config.deepToMap(nodeConfig));
+	}
+
+	@Test
+	void aRefusedRequestAddsNothingToTheNodesMapSettings() throws Exception {
+		nodeConfig.val("storage-net-nodeInterfaces", new HashMap<>(Map.of("node-a", "eth0")));
+		assertEquals(202, post(RUN_A, "runA", HOLDING_SCENARIO).status);
+		probes.awaitHeld();
+
+		final var refused = """
+						run:
+						  id: %d
+						storage:
+						  net:
+						    nodeInterfaces:
+						      node-b: eth1
+						""".formatted(RUN_B);
+		assertEquals(409, postDefaults(refused, HOLDING_SCENARIO).status);
+
+		assertEquals(Map.of("node-a", "eth0"), nodeConfig.mapVal("storage-net-nodeInterfaces"));
 	}
 
 	@Test

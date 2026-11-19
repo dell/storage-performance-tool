@@ -299,13 +299,20 @@ public interface ConfigUtil {
 		return new BasicConfig("-", schema, configTree);
 	}
 
+	/**
+	 * Merges the configurations into a new one that shares no map with them. {@code addBranches} adds
+	 * to the first tree's maps in place, and {@code deepToMap} keeps a map-typed value, such as the
+	 * HTTP headers, by reference, so merging the original trees would change the first configuration.
+	 */
 	static Config merge(final String pathSep, final List<Config> configs) {
 		final var schema = configs.stream()
 						.map(Config::schema)
+						.map(TreeUtil::copyTree)
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		final var configTree = configs.stream()
 						.map(Config::deepToMap)
+						.map(TreeUtil::copyTree)
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		return new BasicConfig(pathSep, schema, configTree);

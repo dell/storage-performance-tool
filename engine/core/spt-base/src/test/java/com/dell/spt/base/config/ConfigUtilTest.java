@@ -9,12 +9,32 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 public class ConfigUtilTest {
+
+	@Test
+	public void testMergeSharesNoMapWithItsInputs() {
+		final Map<String, Object> schema = new HashMap<>(Map.of("headers", Map.class));
+		final Config first = new BasicConfig(
+						"-", schema, new HashMap<>(Map.of("headers", new HashMap<>(Map.of("X-First", "1")))));
+		final Config second = new BasicConfig(
+						"-", schema, new HashMap<>(Map.of("headers", new HashMap<>(Map.of("X-Second", "2")))));
+
+		final Config merged = ConfigUtil.merge("-", List.of(first, second));
+
+		assertEquals(Map.of("X-First", "1", "X-Second", "2"), merged.mapVal("headers"));
+		assertEquals(Map.of("X-First", "1"), first.mapVal("headers"));
+		assertEquals(Map.of("X-Second", "2"), second.mapVal("headers"));
+		merged.mapVal("headers").put("X-Later", "3");
+		assertEquals(Map.of("X-First", "1"), first.mapVal("headers"));
+		assertEquals(Map.of("X-Second", "2"), second.mapVal("headers"));
+	}
 
 	@Test
 	public void testFlatten() throws Exception {
