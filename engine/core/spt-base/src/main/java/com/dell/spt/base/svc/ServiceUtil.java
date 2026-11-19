@@ -16,6 +16,7 @@ import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
+import java.rmi.server.RMIClientSocketFactory;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.Collections;
 import java.util.HashMap;
@@ -31,6 +32,10 @@ public abstract class ServiceUtil {
 	private static final String RMI_SCHEME = "rmi";
 	private static final String KEY_RMI_HOSTNAME = "java.rmi.server.hostname";
 	private static final Map<String, WeakReference<Service>> SVC_MAP = new HashMap<>();
+	/** The longest a {@link #resolveWithConnectTimeout} try waits for its connect to the registry. */
+	private static final int RESOLVE_CONNECT_TIMEOUT_MILLIS = 10_000;
+	/** One shared instance: RMI keys its connections by endpoint and client socket factory. */
+	private static final RMIClientSocketFactory RESOLVE_CONNECT_TIMEOUT_SOCKET_FACTORY = new ConnectTimeoutClientSocketFactory(RESOLVE_CONNECT_TIMEOUT_MILLIS);
 
 	public static void ensureRmiRegistryIsAvailableAt(final int port) throws RemoteException {
 		synchronized (REGISTRY_MAP) {
@@ -163,6 +168,29 @@ public abstract class ServiceUtil {
 					throws NotBoundException, RemoteException, URISyntaxException, MalformedURLException {
 		final String svcUri = getRemoteSvcUri(addr, name).toString();
 		return type.cast(Naming.lookup(svcUri));
+	}
+
+	/**
+	 * Like {@link #resolve(String, String, Class)}, but the connect to the registry at {@code addr}
+	 * gives up after 10 s. A timed-out connect throws {@link java.rmi.ConnectException}, as a refused
+	 * one does. Only the registry lookup uses the timeout; calls on the returned stub connect as
+	 * usual.
+	 */
+	public static <S extends Service> S resolveWithConnectTimeout(
+					final String addr, final String name, final Class<S> type)
+					throws NotBoundException, RemoteException, URISyntaxException {
+		return resolve(addr, name, type, RESOLVE_CONNECT_TIMEOUT_SOCKET_FACTORY);
+	}
+
+	/** Looks {@code name} up in the registry at {@code addr} ({@code host:port}) through {@code csf}. */
+	static <S extends Service> S resolve(
+					final String addr, final String name, final Class<S> type, final RMIClientSocketFactory csf)
+					throws NotBoundException, RemoteException, URISyntaxException {
+		final URI svcUri = getRemoteSvcUri(addr, name);
+		// The host and port Naming.lookup would take from the same URI; a bracketed IPv6 host stays
+		// bracketed, as Naming passes it.
+		final Registry registry = LocateRegistry.getRegistry(svcUri.getHost(), svcUri.getPort(), csf);
+		return type.cast(registry.lookup(name));
 	}
 
 	public static <S extends Service> S resolve(

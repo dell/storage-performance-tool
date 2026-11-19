@@ -38,6 +38,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.ToLongFunction;
 
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
@@ -99,8 +100,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 							Level.DEBUG, e, "Failed to open the output channel for the item \"{}\" in the path \"{}\"",
 							fileItemName, dstPath);
 		} catch (final FileSystemException e) {
-			final var freeSpace = (new File(e.getFile())).getFreeSpace();
-			if (freeSpace > 0) {
+			if (Operation.Status.FAIL_IO.equals(failStatusOf(e))) {
 				dataOp.status(Operation.Status.FAIL_IO);
 				LogUtil.exception(
 								Level.DEBUG, e, "Failed to open the output channel for the item \"{}\" in the path \"{}\"",
@@ -123,6 +123,52 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 							fileItemName, dstPath);
 		}
 		return null;
+	}
+
+	private static final String REASON_NO_SPACE = "No space left on device";
+	private static final String REASON_QUOTA = "Disk quota exceeded";
+
+	// Failure route only: the status of a failure to open an output file.
+	static Operation.Status failStatusOf(final FileSystemException e) {
+		return failStatusOf(e.getReason(), e.getFile(), File::getUsableSpace);
+	}
+
+	// Failure route only: the status of an I/O failure of an operation. Only a CREATE or an UPDATE writes, so only
+	// they can run out of space; the ancestor test uses the operation's destination path.
+	static Operation.Status writeFailStatusOf(final DataOperation<?> op, final IOException e) {
+		final var opType = op.type();
+		if (!OpType.CREATE.equals(opType) && !OpType.UPDATE.equals(opType)) {
+			return Operation.Status.FAIL_IO;
+		}
+		final var dstPath = op.dstPath();
+		final var path = dstPath == null || dstPath.isEmpty() ? op.item().name() : dstPath;
+		final var reason = e instanceof FileSystemException fse ? fse.getReason() : e.getMessage();
+		return failStatusOf(reason, path, File::getUsableSpace);
+	}
+
+	// A space failure (RESP_FAIL_SPACE, not retried) only when the reason is ENOSPC or EDQUOT, or when the nearest
+	// existing ancestor of the path has no usable space; otherwise FAIL_IO (retried with --load-op-retry). The
+	// reason is the host's glibc strerror text, which is localized (and worded otherwise on musl or macOS): on such
+	// a host a space failure is recognized only by the ancestor test, so running out of inodes or over a quota with
+	// blocks still usable is FAIL_IO, on the open route as on the write route. A file system that always reports zero
+	// usable space (squashfs, an ISO image, /proc, /sys), or whose free blocks are all reserved for root, labels any
+	// failure under it as a space failure.
+	static Operation.Status failStatusOf(
+					final String reason, final String path, final ToLongFunction<File> usableSpace) {
+		if (reason != null && (reason.contains(REASON_NO_SPACE) || reason.contains(REASON_QUOTA))) {
+			return Operation.Status.RESP_FAIL_SPACE;
+		}
+		if (path == null) {
+			return Operation.Status.FAIL_IO;
+		}
+		var ancestor = new File(path).getAbsoluteFile();
+		while (ancestor != null && !ancestor.exists()) {
+			ancestor = ancestor.getParentFile();
+		}
+		if (ancestor != null && usableSpace.applyAsLong(ancestor) == 0) {
+			return Operation.Status.RESP_FAIL_SPACE;
+		}
+		return Operation.Status.FAIL_IO;
 	}
 
 	@Override
@@ -301,7 +347,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 			op.status(Operation.Status.INTERRUPTED);
 		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, op.toString());
-			op.status(Operation.Status.FAIL_IO);
+			op.status(writeFailStatusOf(op, e));
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
 			if (!isClosed()) { // shared content source may be already closed from the load generator

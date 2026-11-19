@@ -17,6 +17,8 @@ import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.generator.PacedRateThrottle;
+import com.dell.spt.base.load.generator.RetiringWeightsThrottle;
+import com.dell.spt.base.load.step.local.ContextInitResources;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -31,7 +33,6 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
-import com.github.akurilov.commons.concurrent.throttle.SequentialWeightsThrottle;
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static com.github.akurilov.confuse.Config.deepToMap;
@@ -103,7 +104,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 			weights[originIndex] = weight;
 		}
 
-		final IndexThrottle weightThrottle = new SequentialWeightsThrottle(weights);
+		final IndexThrottle weightThrottle = new RetiringWeightsThrottle(weights);
 
 		// 2nd pass: initialize the sub steps
 		for (int originIndex = 0; originIndex < subStepCount; originIndex++) {
@@ -153,12 +154,13 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 
 				final int batchSize = loadConfig.intVal("batch-size");
 
-				try {
+				try (final var pending = new ContextInitResources()) {
 					NicSetConfig.requireSupportedWorkload(
 									storageConfig, opType, itemConfig.configVal("input").stringVal("path"));
 					final StorageDriver driver = StorageDriver.instance(
 									extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 									com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
+					pending.hold(driver);
 
 					final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 					final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
@@ -180,6 +182,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 							generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));
 						}
 						final LoadGenerator generator = generatorBuilder.build();
+						pending.hold(generator);
 						final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 						final LoadStepContext stepCtx = new LoadStepContextImpl<>(
 										testStepId,
@@ -189,9 +192,11 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 										loadConfig,
 										outputConfig.boolVal("metrics-trace-persist"),
 										shardMetrics);
+						pending.ownedBy(stepCtx, generator, driver);
 						((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
 										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
+						pending.handedOver();
 
 						final String itemOutputFile = itemConfig.stringVal("output-file");
 						if (itemOutputFile != null && itemOutputFile.length() > 0) {

@@ -7,7 +7,8 @@
     &nbsp;&nbsp;&nbsp;&nbsp;3.1.1 [Mount files](#mount-files)<br/>
     3.2. [Distributed Mode](#distributed-mode)<br/>
     &nbsp;&nbsp;&nbsp;&nbsp;3.2.1 [Custom ports](#custom-ports)<br/>
-    &nbsp;&nbsp;&nbsp;&nbsp;3.2.2 [2 docker containers on 1 machine](#2-docker-containers-on-1-machine)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;3.2.2 [One log directory per engine](#one-log-directory-per-engine)<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;3.2.3 [2 docker containers on 1 machine](#2-docker-containers-on-1-machine)<br/>
     3.3 [Additional Notes](#additional-notes)<br/>
     &nbsp;&nbsp;&nbsp;&nbsp;3.3.1 [Logs Sharing](#logs-sharing)<br/>
     &nbsp;&nbsp;&nbsp;&nbsp;3.3.2 [Debugging](#debugging)<br/>
@@ -127,10 +128,55 @@ docker run \
 **NOTE** 
 > If port didn't specified, then `1099` will be used by default.
 
+#### One log directory per engine
+
+An engine writes its logs and step artifacts (metrics, operation lifecycle files) under `<DIR>/log/<STEP ID>/`,
+where `<DIR>` is, in this order:
+
+1. the `SPT_LOG_DIR` environment variable, if it is set and not empty;
+2. else the `spt.log.dir` Java system property, if it is set and not empty;
+3. else the engine's working directory.
+
+In distributed mode every node runs a step under the same step id as the Entry Node. So **each engine process on a
+host, node or Entry Node, needs its own log directory**: its own working directory, or its own `SPT_LOG_DIR` or
+`-Dspt.log.dir`. Two engines started from the same directory with neither set share one `log/` directory, and then:
+
+* every CREATE or READ step fails, and the run exits 1;
+* an operation lifecycle file of another run's step can be merged into the run's `operation.lifecycle.csv`.
+
+With `java -jar` (or `run.sh`), start each engine from its own working directory:
+
+```bash
+# shell 1: the node
+mkdir -p ~/spt-node && cd ~/spt-node
+java -jar /path/to/spt.jar --run-node --load-step-node-port=1100 --run-port=9998
+
+# shell 2: the Entry Node
+mkdir -p ~/spt-entry && cd ~/spt-entry
+java -jar /path/to/spt.jar --load-step-node-addrs=localhost:1100 [<SPT CLI ARGS>]
+```
+
+or give each its own `SPT_LOG_DIR` (or `-Dspt.log.dir`) from the same working directory:
+
+```bash
+SPT_LOG_DIR="$PWD/node" java -jar /path/to/spt.jar --run-node --load-step-node-port=1100 --run-port=9998
+SPT_LOG_DIR="$PWD/entry" java -jar /path/to/spt.jar --load-step-node-addrs=localhost:1100 [<SPT CLI ARGS>]
+```
+
+The same holds for a node and an Entry Node started on one client node with `run.sh`: start them from different
+directories, or set a different `SPT_LOG_DIR` for each.
+
+Each container has its own file system (the image's working directory is `/opt/spt`), so engines in different
+containers keep their logs apart, unless they bind-mount the same host directory as their log directory: see
+[Logs Sharing](#logs-sharing).
+
 #### 2 docker containers on 1 machine
 > Note 1: E = Entry node, A = Additional node, D = Address used in defaults.yaml
 
 > Note 2: To get Internal IP of container: `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' [DOCKER ID/NAME]`
+
+> Note 3: Each container writes its logs in its own file system. Don't bind-mount the same host directory as the log
+> directory of both containers: see [One log directory per engine](#one-log-directory-per-engine).
 
 | It works | It doesn't work |
 | --- | --- |
@@ -153,6 +199,12 @@ docker run \
     ghcr.io/dell/storage-performance-tool \
     [<SPT CLI ARGS>]
 ```
+
+**Caution**
+> Give each container on a host its own host directory. Two engines, such as a node and an Entry Node, whose
+> containers mount the same host directory at `/opt/spt/log` share one log directory, which breaks their steps:
+> see [One log directory per engine](#one-log-directory-per-engine). For example, mount `"$(pwd)"/log-node` for the
+> node and `"$(pwd)"/log-entry` for the Entry Node.
 
 #### Debugging
 
@@ -198,7 +250,7 @@ f671b77ffd27        ghcr.io/dell/storage-performance-tool:latest           "/opt
 ...
 ```
 
-#### Start entry-node (or with [REST API](doc/interfaces/api/remote)):
+#### Start entry-node (or with [REST API](../usage/api/remote/README.md)):
 ```bash
 docker run -d --name spt \
               --network host \

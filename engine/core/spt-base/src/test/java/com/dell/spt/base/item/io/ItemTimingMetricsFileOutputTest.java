@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -107,6 +108,48 @@ public class ItemTimingMetricsFileOutputTest {
 		assertTrue(Files.exists(out));
 		List<String> lines = Files.readAllLines(out);
 		assertTrue(lines.isEmpty());
+	}
+
+	/** The poison's index is absolute; the rows before it in the range are written, then the file closes. */
+	@Test
+	void putRangeFromAnOffsetWritesUpToThePoisonAndCloses() throws Exception {
+		Path out = tempDir.resolve("metrics5.txt");
+		ItemTimingMetricsFileOutput<Item, Operation<Item>> output = new ItemTimingMetricsFileOutput<>(out);
+
+		List<Operation<Item>> ops = Arrays.asList(
+						mockOperation(1L, 2L),
+						mockOperation(3L, 4L),
+						mockOperation(5L, 6L),
+						null,
+						mockOperation(7L, 8L));
+		assertEquals(2, output.put(ops, 1, 4));
+
+		assertEquals(List.of("3 4", "5 6"), Files.readAllLines(out));
+		assertThrows(IOException.class, () -> output.put(mockOperation(9L, 10L)));
+	}
+
+	@Test
+	void putRangeFromAnOffsetHoldingOnlyThePoisonWritesNothingAndCloses() throws Exception {
+		Path out = tempDir.resolve("metrics6.txt");
+		ItemTimingMetricsFileOutput<Item, Operation<Item>> output = new ItemTimingMetricsFileOutput<>(out);
+
+		List<Operation<Item>> ops = Arrays.asList(mockOperation(1L, 2L), mockOperation(3L, 4L), null);
+		assertEquals(0, output.put(ops, 2, 3));
+
+		assertTrue(Files.readAllLines(out).isEmpty());
+		assertThrows(IOException.class, () -> output.put(mockOperation(9L, 10L)));
+	}
+
+	@Test
+	void putRangeFromZeroWritesUpToThePoisonAndCloses() throws Exception {
+		Path out = tempDir.resolve("metrics7.txt");
+		ItemTimingMetricsFileOutput<Item, Operation<Item>> output = new ItemTimingMetricsFileOutput<>(out);
+
+		List<Operation<Item>> ops = Arrays.asList(mockOperation(1L, 2L), mockOperation(3L, 4L), null);
+		assertEquals(2, output.put(ops, 0, 3));
+
+		assertEquals(List.of("1 2", "3 4"), Files.readAllLines(out));
+		assertThrows(IOException.class, () -> output.put(mockOperation(9L, 10L)));
 	}
 
 	// Helper to create a minimal Operation mock that only stubs latency and duration
