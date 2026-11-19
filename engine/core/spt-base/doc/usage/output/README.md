@@ -65,6 +65,21 @@ To disable the console output coloring set the `output-color` configuration opti
 The most of log messages are written to the output files using dynamic output file path:
 `<SPT_DIR>/log/<STEP_ID>/...` where "STEP_ID" may change during runtime.
 
+`<SPT_DIR>` is chosen once, when the engine starts, in this order:
+
+1. the `SPT_LOG_DIR` environment variable, if it is set and not empty;
+2. else the `spt.log.dir` Java system property (`java -Dspt.log.dir=<DIR> -jar spt.jar ...`), if it is set and
+   not empty;
+3. else the engine's working directory.
+
+The step's other artifacts, such as the metrics files and the operation lifecycle files, go under the same
+`<SPT_DIR>/log/<STEP_ID>/` directory.
+
+Each engine process on a host, a node (`--run-node`) or an Entry Node, needs its own `<SPT_DIR>`. In distributed
+mode every node runs the step under the same step id, so two engines that share a `<SPT_DIR>` write into the same
+step directory. See [Distributed Mode: one log directory per engine](../../deployment/README.md#one-log-directory-per-engine)
+for what goes wrong and how to start several engines on one host.
+
 ### 1.1.4. Log configuration
 
 In order to configure logging, can be used custom log4j2 config. This may be necessary to disable warnings or logging certain files.

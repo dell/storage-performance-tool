@@ -205,6 +205,8 @@ Unless `GLIBC_TUNABLES` is set, even to empty, `run.sh` sets it to `glibc.malloc
 
 `run.sh` replaces itself with the JVM, so a signal sent to the `run.sh` process reaches the engine: after `./run.sh --run-node &`, `kill $!` stops the engine. The process then shows as `java ... spt.jar`; to find it, match `spt.jar`, not `run.sh`. `run.bat` runs `java` as its last command, so its exit code is the engine's.
 
+The engine writes its logs under `log/` in its working directory, unless `SPT_LOG_DIR` or `-Dspt.log.dir` names another directory. To run a node and an Entry Node on one host, start each from its own directory or give each its own `SPT_LOG_DIR`: two engines that share a log directory break each other's steps. See [One log directory per engine](core/spt-base/doc/deployment/README.md#one-log-directory-per-engine).
+
 ### IDE Integration
 
 For development in VS Code:

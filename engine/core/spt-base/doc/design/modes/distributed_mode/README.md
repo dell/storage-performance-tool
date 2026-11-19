@@ -181,3 +181,7 @@ multiplied by this factor (becomes 4 also).
 * `run-node`
 
     The option which tells to run in the node service mode
+
+    Each node and the Entry Node needs its own log directory: on one host, start each engine from its own working
+    directory or give it its own `SPT_LOG_DIR`. See
+    [One log directory per engine](../../../deployment/README.md#one-log-directory-per-engine).

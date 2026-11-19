@@ -35,9 +35,8 @@ Internally, the weighted load step contains a
 and a
 [load step context](../../../core/spt-base/doc/design/architecture/README.md#23-load-step-context)
 for each configuration element (sub-step) supplied. Each context has its
-own storage driver, input queue and concurrency limit. Only the
-[weight throttle](https://github.com/akurilov/java-commons/blob/master/src/main/java/com/github/akurilov/commons/concurrent/throttle/SequentialWeightsThrottle.java)
-is shared among all the load generators of the step.
+own storage driver, input queue and concurrency limit. Only the weight
+throttle is shared among all the load generators of the step.
 
 A load generator takes a weight permit, then a rate permit if a rate
 limit is set, and then offers the operations to its storage driver. A
@@ -83,6 +82,23 @@ var weightedReadConfig = {
 **Notes**
 > * Full example may be found in the `example/scenario/js/types/weighted.js` scenario file.
 > * Weight throttle will never permit the operations if the corresponding weight is 0
+
+### When a sub-load finishes first
+
+Each cycle gives every sub-load up to its weight in operations, and the next
+cycle starts when those shares are used up. A sub-load finishes scheduling when
+it reaches its count limit or, if it does not recycle its operations, when its
+item input runs out. It then leaves the cycle: the other sub-loads carry on to
+their own limits and share the cycle by their weights, so the configured ratio
+no longer applies to the finished sub-load. A retry of one of its operations
+still runs, outside the cycle.
+
+A sub-load that recycles, which includes every path listing (`list` with
+`item.type=path`), finishes only at its count limit. If it has nothing left to
+issue before then, it keeps its place in the cycle and the other sub-loads stop
+at the end of their shares. A sub-load with work beyond its share never gets
+to it, so the step then ends only at its time limit, and without one it does
+not end.
 
 ## When the mix follows the weights
 

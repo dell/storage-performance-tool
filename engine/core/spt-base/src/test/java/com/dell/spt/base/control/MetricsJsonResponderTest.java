@@ -418,7 +418,8 @@ public class MetricsJsonResponderTest {
 		assertTrue(first.get("terminal").asBoolean());
 		assertEquals("node", nodePayload.get(0).get("scope").asText());
 		assertEquals(5, nodePayload.get(0).get("metrics_schema").asInt());
-		assertEquals("entry", nodePayload.get(0).get("role").asText());
+		// This node accepted no run 777 through POST /run, so the row is a slice's: worker.
+		assertEquals("worker", nodePayload.get(0).get("role").asText());
 	}
 
 	@Test
@@ -827,9 +828,8 @@ public class MetricsJsonResponderTest {
 		when(mgr.getAllContexts()).thenReturn(Set.of(ctx));
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
-		final Config workerConfig = defaultConfig();
-		workerConfig.val("run-node", false);
-		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, workerConfig);
+		// Production config (run-node true) and an idle /status: the slice row reads worker.
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig(), new ApiStatus());
 		final JsonNode obj = responder.buildNodeMetrics(false).get(0);
 		assertEquals("node", obj.get("scope").asText());
 		assertEquals("worker", obj.get("role").asText());
@@ -954,9 +954,12 @@ public class MetricsJsonResponderTest {
 		when(mgr.getAllContexts()).thenReturn(Set.of(ctx, distCtx));
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 
-		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final ApiStatus apiStatus = new ApiStatus();
+		apiStatus.setRunning("other", 999L);
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig(), apiStatus);
 		final JsonNode obj = responder.buildNodeMetrics(true).get(0);
-		assertEquals("entry", obj.get("role").asText());
+		// The live distributed context is run 999's; the local row is another entry's run 55 slice.
+		assertEquals("worker", obj.get("role").asText());
 		assertTrue(obj.has("diag_distributed_contexts"));
 		assertTrue(obj.has("diag_local_contexts"));
 		assertEquals(1, obj.get("diag_distributed_contexts").asInt());
