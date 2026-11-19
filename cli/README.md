@@ -357,7 +357,7 @@ Key points:
 - Workers must already be running the Spt API (`--run-node`) and listening on the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - Preflight checks tolerate expected port usage on worker hosts but continue to flag unknown listeners.
 - Attached workers remain unmanaged during shutdown—`spt` stops the entry node but leaves prestarted workers running.
-- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step can keep generating load until its own limit. After a failed or interrupted attach run, check the workers and restart them before the next run.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step keeps running: only a count limit ends its load on the worker. With a time limit, a size limit or no limit it generates load until the worker is stopped (`POST /shutdown` or the process) or `DELETE /run` on the worker names that run. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - The host list must include at least two entries (entry + worker). `spt` enforces this and fails fast otherwise.
 - Verification workloads reject `--attach-existing` because SPT cannot establish trusted runtime identity for unmanaged workers.
 

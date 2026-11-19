@@ -13,7 +13,6 @@
 2.1.2.2.2. [Custom](#21222-custom)<br/>
 2.2. [Values Substitution](#22-values-substitution)<br/>
 2.3. [Non-Blocking Execution](#23-non-blocking-execution)<br/>
-2.4. [Resume Support](#24-resume-support)<br/>
 3. [Examples](#3-examples)<br/>
 3.1. [Javascript](#31-javascript)<br/>
 3.1.1. [External Command](#311-external-command)<br/>
@@ -45,7 +44,7 @@ functionality has been removed.
 
 * Parallel step wrapper was deprecated and replaced by the
 [non-blocking execution](#23-non-blocking-execution) methods. New methods allow more flexible
-execution flow control, including the [Resume Support](#24-resume-support).
+execution flow control.
 
 * Command step type was removed. The new [external command](#311-external-command) should be called
 using the particular scenario language method.
@@ -91,13 +90,13 @@ steps.
 
 2. ```start()```
 
-    Start/resume the step execution. Returns the same instance with state changed to *STARTED* if
-    call was successful.
+    Start the step execution. Returns the same instance with state changed to *STARTED* if call was
+    successful.
 
 3. ```stop()```
 
-    Stop (with further resumption capability) the step. Returns the same instance with state changed
-    to *STOPPED* if call was successful.
+    Stop the step. Returns the same instance with state changed to *STOPPED* if call was successful.
+    A stopped step cannot be started again: ```start()``` or ```run()``` on it fails the scenario.
 
 4. ```await()```
 
@@ -111,7 +110,8 @@ steps.
 6. ```run()```
 
     The convenience method for blocking execution flow. Includes ```start()```, ```await()``` and
-    ```close()``` calls sequence. Returns nothing.
+    ```close()``` calls sequence. Returns nothing. A step object runs once: a second ```run()``` on
+    it fails the scenario, so build a step with ```config(config)``` for each run.
 
 #### 2.1.2. Types
 
@@ -313,28 +313,6 @@ step2.close();
 
 **Note**:
 It's necessary to invoke ```close()``` method if asynchronous execution mode is used.
-
-## 2.4. Resume Support
-
-```start``` and ```stop``` methods may be used as resume and pause accordingly (if the particular
-step implementation supports the pausing/resuming).
-
-```javascript
-var startedLoadStep = Load
-    .config(...)
-    .start()
-
-// do something, wait some time, parse the logs, whatever
-...
-
-var pausedLoadStep = startedLoadStep.stop();
-
-// do something more
-...
-
-var resumedLoadStep = pausedLoadStep.start();
-...
-```
 
 ## 3. Examples
 

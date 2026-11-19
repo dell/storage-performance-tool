@@ -23,6 +23,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -255,6 +256,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 */
 	protected boolean suppliesItems(final int contextIndex) {
 		return controlsOperations(contextIndex);
+	}
+
+	/**
+	 * Refuses a stopped step before anything of a new start happens: a restart would run the whole
+	 * step again beside its stopped slices. Local slices keep their restart. While the JVM exits, the
+	 * base class refuses the start as a stop instead.
+	 */
+	@Override
+	protected void doStart() throws IllegalStateException {
+		if (isStopped() && !JvmExit.begun()) {
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							loadStepId(),
+							"this step object has been stopped and cannot be started again; a step object runs once. "
+											+ "Build a new step from a prototype with config() and run that.",
+							null);
+		}
+		super.doStart();
 	}
 
 	@Override
