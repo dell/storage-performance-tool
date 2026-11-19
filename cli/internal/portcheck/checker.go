@@ -84,6 +84,12 @@ func NewPortCheckerWithOptions(port, host string, connectTimeout, httpTimeout ti
 // IsPortInUse checks if the configured port is listening
 // Returns true if the port is in use, false if available
 func (p *PortChecker) IsPortInUse() bool {
+	return p.isListening(context.Background())
+}
+
+// isListening reports whether a connection to the port succeeds, giving up when
+// ctx ends.
+func (p *PortChecker) isListening(ctx context.Context) bool {
 	address := net.JoinHostPort(p.Host, p.Port)
 
 	logging.LogDebug("portcheck", "checking if port is in use",
@@ -92,8 +98,8 @@ func (p *PortChecker) IsPortInUse() bool {
 		"address", address,
 		"timeout", p.ConnectTimeout)
 
-	// Use DialTimeout for a quick connection test
-	conn, err := net.DialTimeout("tcp", address, p.ConnectTimeout)
+	dialer := net.Dialer{Timeout: p.ConnectTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		// Connection failed - port is likely available
 		logging.LogDebug("portcheck", "port appears available",
@@ -113,8 +119,9 @@ func (p *PortChecker) IsPortInUse() bool {
 // address. A failed connection alone does not show that the port is free: a
 // listener with a full accept queue does not answer, and one bound to another
 // address refuses. So it first tries to bind the port, for an instant, and only
-// a connection refusal after that counts as free.
-func (p *PortChecker) IsPortHeld() bool {
+// a connection refusal after that counts as free. It also counts as held a port
+// that a closing connection still blocks.
+func (p *PortChecker) IsPortHeld(ctx context.Context) bool {
 	listener, err := net.Listen("tcp", net.JoinHostPort("", p.Port))
 	if err == nil {
 		_ = listener.Close()
@@ -122,12 +129,13 @@ func (p *PortChecker) IsPortHeld() bool {
 		return true
 	}
 
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(p.Host, p.Port), p.ConnectTimeout)
+	dialer := net.Dialer{Timeout: p.ConnectTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(p.Host, p.Port))
 	if err == nil {
 		_ = conn.Close()
 		return true
 	}
-	return dialFailureMeansHeld(err)
+	return ctx.Err() == nil && dialFailureMeansHeld(err)
 }
 
 // dialFailureMeansHeld reports whether a failed connection suggests a listener
@@ -148,7 +156,7 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 	}
 
 	// First check if port is listening
-	if !p.IsPortInUse() {
+	if !p.isListening(ctx) {
 		logging.LogDebug("portcheck", "port is not in use", "port", p.Port)
 		return info, nil
 	}
@@ -381,6 +389,11 @@ func ValidatePort(port string) error {
 func (info *ServiceInfo) GetServiceDescription() string {
 	if !info.IsListening {
 		return "Port is available"
+	}
+
+	if info.IsSpt && !info.APIConfirmed && info.Container != nil {
+		return fmt.Sprintf("Container that looks like SPT, with no SPT API: %s (%s)",
+			info.Container.Name, info.Container.Image)
 	}
 
 	if info.IsSpt && info.Status != nil {

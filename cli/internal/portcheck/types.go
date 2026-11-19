@@ -34,6 +34,8 @@ type SptStatus struct {
 	StartTime      time.Time     `json:"startTime,omitempty"`      // When the test started
 	EndTime        time.Time     `json:"endTime,omitempty"`        // When the test ended (if completed)
 	RunActive      bool          `json:"-"`                        // HEAD /run reports an active run with RunID
+	RunningSince   string        `json:"-"`                        // /status start time of the active run, if this engine started it
+	Worker         bool          `json:"-"`                        // /status names no run or another one: a worker of RunID
 }
 
 // ContainerInfo represents information about a Docker container

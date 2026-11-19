@@ -40,6 +40,12 @@ type fakeEngine struct {
 	// worker makes /status answer IDLE while HEAD /run reports the run, as a
 	// worker engine of a distributed run does.
 	worker bool
+	// since, when set, is the start time /status reports for a running run.
+	since string
+	// headStatus, when non-zero, replaces the answer of HEAD /run.
+	headStatus int
+	// onShutdown, when set, runs before POST /shutdown is answered.
+	onShutdown func(engine *fakeEngine)
 }
 
 func newFakeEngine(t *testing.T, runID int64) *fakeEngine {
@@ -63,10 +69,18 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"state":"IDLE"}`)
 			return
 		}
+		if e.since != "" {
+			fmt.Fprintf(w, `{"state":"RUNNING","run_id":%d,"since":%q}`, e.runID, e.since)
+			return
+		}
 		fmt.Fprintf(w, `{"state":"RUNNING","run_id":%d}`, e.runID)
 	case r.URL.Path == "/run" && r.Method == http.MethodHead:
 		if e.onHead != nil {
 			e.onHead(e)
+		}
+		if e.headStatus != 0 {
+			w.WriteHeader(e.headStatus)
+			return
 		}
 		if e.runID == 0 {
 			w.WriteHeader(http.StatusNoContent)
@@ -76,6 +90,9 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/run" && (r.Method == http.MethodGet || r.Method == http.MethodDelete):
 		e.serveMatchedRun(w, r.Method, ifMatch)
 	case r.URL.Path == "/shutdown" && r.Method == http.MethodPost:
+		if e.onShutdown != nil {
+			e.onShutdown(e)
+		}
 		if e.shutdownStatus != 0 {
 			w.WriteHeader(e.shutdownStatus)
 			return

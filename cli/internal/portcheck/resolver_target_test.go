@@ -183,7 +183,7 @@ func TestShutdownFollowsAStoppedRunStillCleaningUp(t *testing.T) {
 // A daemon that is not reached through a local socket has another host network,
 // or may have: its host-network containers are not this port's holder.
 func TestForceIgnoresHostNetworkEnginesOfARemoteDaemon(t *testing.T) {
-	for _, host := range []string{"tcp://10.0.0.5:2375", "tcp://127.0.0.1:2375", "ssh://user@host"} {
+	for _, host := range []string{"tcp://10.0.0.5:2375", "tcp://127.0.0.1:2375", "ssh://user@host", "npipe:////server/pipe/docker_engine"} {
 		t.Run(host, func(t *testing.T) {
 			engine := failingEngine(t)
 			api := fakeDockerWith(hostEngine("same-port-elsewhere", engine.port()))
@@ -196,7 +196,7 @@ func TestForceIgnoresHostNetworkEnginesOfARemoteDaemon(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CheckAndResolveConflicts() error = %v", err)
 			}
-			if result.Success || !strings.Contains(result.Message, "not local") {
+			if result.Success || !strings.Contains(result.Message, "not reached through a local socket") {
 				t.Fatalf("result = %+v, want the remote daemon reported", result)
 			}
 			if stopped, removed := api.mutations(); len(stopped) != 0 || len(removed) != 0 {
@@ -228,11 +228,11 @@ func TestIsPortHeldSeesAListenerThatRefusesTheProbe(t *testing.T) {
 	if checker.IsPortInUse() {
 		t.Fatal("IsPortInUse() = true; the test needs a refused connection")
 	}
-	if !checker.IsPortHeld() {
+	if !checker.IsPortHeld(context.Background()) {
 		t.Error("IsPortHeld() = false while the port is bound")
 	}
 	_ = listener.Close()
-	if checker.IsPortHeld() {
+	if checker.IsPortHeld(context.Background()) {
 		t.Error("IsPortHeld() = true after the listener closed")
 	}
 }
@@ -320,16 +320,21 @@ func TestPromptEndsWithTheContext(t *testing.T) {
 func TestForceVerificationWaitEndsWithTheContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	api := fakeDockerWith(hostEngine("holder", "23100"))
+	engine := newFakeEngine(t, 41)
+	api := fakeDockerWith(hostEngine("holder", engine.port()))
 	api.onRemove = func(string) { cancel() }
-	resolver := &ConflictResolver{Port: "23100", dockerFinder: newFakeFinder(api), clock: blockedClock{}}
+	resolver := engine.resolver(true, false)
+	resolver.dockerFinder = newFakeFinder(api)
+	resolver.clock = blockedClock{}
+	defer resolver.Close()
 
 	result := within(t, func() *ResolutionResult {
 		return resolver.executeForceStop(ctx, &ServiceInfo{
-			IsListening: true, IsSpt: true, APIConfirmed: true, Container: &ContainerInfo{ID: "holder", Name: "holder"},
+			IsListening: true, IsSpt: true, APIConfirmed: true,
+			Container: &ContainerInfo{ID: "holder", Name: "holder", Labels: nodeLabels()},
 		})
 	})
-	if result.Success || !errors.Is(result.Error, context.Canceled) {
+	if result.Success || !errors.Is(result.Error, context.Canceled) || !strings.Contains(result.Message, "Stopped waiting") {
 		t.Fatalf("result = %+v, want the cancelled wait", result)
 	}
 }

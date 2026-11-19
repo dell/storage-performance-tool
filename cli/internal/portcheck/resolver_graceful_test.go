@@ -150,8 +150,10 @@ func TestForcedGracefulStopDeadlineDoesNotAdviseForce(t *testing.T) {
 	resolver := engine.resolver(true, false)
 	resolver.clock = &pollClock{}
 	defer resolver.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
+	result := gracefulStopWithin(t, ctx, resolver, confirmedEngine())
 	if result.Success || !strings.Contains(result.Message, "still in use") || strings.Contains(result.Message, "--force") {
 		t.Fatalf("result = %+v, want the deadline without --force advice", result)
 	}

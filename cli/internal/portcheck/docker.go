@@ -80,11 +80,19 @@ func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port
 }
 
 // DaemonIsLocal reports whether the Docker daemon is reached through a local
-// socket. A daemon reached over TCP or SSH, even through a forwarded local port,
-// may run on another host, so its host network need not be this one.
+// socket: a Unix socket, or a named pipe on this machine (npipe:////./pipe/...).
+// A daemon reached over TCP or SSH, even through a forwarded local port, or a pipe
+// on another machine (npipe:////host/pipe/...), may run on another host, so its
+// containers need not hold this host's ports. An address of any other form is not
+// taken as local.
 func (d *DockerContainerFinder) DaemonIsLocal() bool {
-	host := d.client.DaemonHost()
-	return strings.HasPrefix(host, "unix://") || strings.HasPrefix(host, "npipe://")
+	host := strings.ToLower(d.client.DaemonHost())
+	return strings.HasPrefix(host, "unix://") || strings.HasPrefix(host, "npipe:////./pipe/")
+}
+
+// isEngineNodeContainer reports whether SPT labelled the container as an engine node.
+func isEngineNodeContainer(labels map[string]string) bool {
+	return labels[constants.DockerLabelManaged] == "true" && labels[constants.DockerLabelRole] == constants.DockerRoleNode
 }
 
 // FindHostNetworkEngine finds the SPT-managed node container that serves the API
@@ -101,9 +109,7 @@ func (d *DockerContainerFinder) FindHostNetworkEngine(ctx context.Context, port 
 	runPortArg := constants.EngineRunPortArgPrefix + port
 	var found *ContainerInfo
 	for _, c := range containers {
-		if !containerHoldsPorts(c) ||
-			c.Labels[constants.DockerLabelManaged] != "true" ||
-			c.Labels[constants.DockerLabelRole] != constants.DockerRoleNode {
+		if !containerHoldsPorts(c) || !isEngineNodeContainer(c.Labels) {
 			continue
 		}
 		inspect, err := d.client.ContainerInspect(ctx, c.ID)
