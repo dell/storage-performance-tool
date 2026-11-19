@@ -14,6 +14,7 @@ import java.rmi.ConnectException;
 import java.rmi.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -173,15 +174,18 @@ class ResolveFileManagerRetriesTest {
 			final AtomicInteger realTries = new AtomicInteger();
 			final AtomicReference<FileManagerService> result = new AtomicReference<>(SERVICE);
 			final AtomicBoolean interruptedAfter = new AtomicBoolean();
+			final CountDownLatch tryStarted = new CountDownLatch(1);
 			final Thread resolving = new Thread(() -> {
 				result.set(LoadStepClientBase.resolveFileManagerWithRetries(
 								target.host() + ":" + target.port(), MAX_RETRIES, addr -> {
 									realTries.incrementAndGet();
+									tryStarted.countDown();
 									return resolveWithTimeout(addr, timeoutMillis);
 								}, Thread::sleep));
 				interruptedAfter.set(Thread.currentThread().isInterrupted());
 			}, "resolve-dropped");
 			resolving.start();
+			assertTrue(tryStarted.await(10, TimeUnit.SECONDS), "the first try did not start");
 			Thread.sleep(200);
 			final long interruptNanos = System.nanoTime();
 			resolving.interrupt();
