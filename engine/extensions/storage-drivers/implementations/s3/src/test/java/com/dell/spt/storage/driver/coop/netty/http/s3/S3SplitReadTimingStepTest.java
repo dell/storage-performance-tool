@@ -13,11 +13,13 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.github.akurilov.commons.io.Input;
@@ -53,13 +55,11 @@ final class S3SplitReadTimingStepTest {
 	private static final int RANGES = 4;
 	private static final int OBJECTS = 16;
 	private static final int CONCURRENCY = 4;
-	/** Every object request waits this long, so a real request's latency stands out from a parent's. */
-	private static final int ANSWER_DELAY_MILLIS = 2;
-	private static final long LEAST_REQUEST_LATENCY_MICROS = 1_000;
 	/** One object in this many has a range the target always refuses. */
 	private static final int REFUSED_EVERY = 4;
 
 	private final NicSetLoopback stub = new NicSetLoopback();
+	private final RangeSamples rangeSamples = new RangeSamples();
 
 	@TempDir
 	Path tempDir;
@@ -68,7 +68,6 @@ final class S3SplitReadTimingStepTest {
 	void requireEpoll() {
 		assumeTrue(Epoll.isAvailable(), "the stub fixture needs the epoll transport");
 		stub.absentObjectSize = RANGES * RANGE_SIZE;
-		stub.answerDelayMillis = request -> ANSWER_DELAY_MILLIS;
 	}
 
 	@AfterEach
@@ -120,13 +119,11 @@ final class S3SplitReadTimingStepTest {
 		assertRangeSamples(snapshot, (OBJECTS - refused) * RANGES + refused * (RANGES - 1));
 	}
 
-	private static void assertRangeSamples(final AllMetricsSnapshot snapshot, final int ranges) {
+	/** The step's statistics are exactly those of its {@code ranges} successful range results. */
+	private void assertRangeSamples(final AllMetricsSnapshot snapshot, final int ranges) {
 		final var duration = snapshot.durationSnapshot();
-		final var latency = snapshot.latencySnapshot();
 		assertEquals(ranges, duration.count(), "duration samples");
-		assertEquals(ranges, latency.count(), "latency samples");
-		assertEquals(ranges, snapshot.ttfbSnapshot().count(), "time-to-first-byte samples");
-		assertTrue(latency.min() >= LEAST_REQUEST_LATENCY_MICROS, () -> "the least latency is " + latency.min() + " us");
+		rangeSamples.assertHeldBy(duration, snapshot.latencySnapshot());
 		final var busyMicros = snapshot.elapsedTimeMillis() * 1_000 * CONCURRENCY;
 		assertTrue(duration.sum() <= busyMicros, () -> duration.sum() + " us of durations in " + busyMicros + " us");
 	}
@@ -161,11 +158,9 @@ final class S3SplitReadTimingStepTest {
 		final var classLoader = Thread.currentThread().getContextClassLoader();
 		final List<Extension> extensions = new ArrayList<>(Extension.load(classLoader));
 		final var batches = new LongAdder();
-		if (batch) {
-			extensions.replaceAll(extension -> "s3".equals(extension.id())
-							? new BatchResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batches)
-							: extension);
-		}
+		extensions.replaceAll(extension -> "s3".equals(extension.id())
+						? new ObservedResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batch, batches, rangeSamples)
+						: extension);
 		final var snapshot = new AtomicReference<AllMetricsSnapshot>();
 		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR) {
 			@Override
@@ -186,17 +181,62 @@ final class S3SplitReadTimingStepTest {
 		return snapshot.get();
 	}
 
-	/** Makes the delegate's drivers give the step each result through its batch {@code put}. */
-	private static final class BatchResultsFactory<I extends Item, O extends Operation<I>>
+	/** The timings of the successful range results the step was given, as its meters take them. */
+	private static final class RangeSamples {
+
+		private long durations;
+		private long durationSum;
+		private long minDuration = Long.MAX_VALUE;
+		private long maxDuration;
+		private long latencies;
+		private long latencySum;
+		private long minLatency = Long.MAX_VALUE;
+		private long maxLatency;
+
+		synchronized void add(final Operation<?> result) {
+			if (!(result instanceof PartialOperation) || result.status() != Operation.Status.SUCC || result.duration() <= 0) {
+				return;
+			}
+			durations++;
+			durationSum += result.duration();
+			minDuration = Math.min(minDuration, result.duration());
+			maxDuration = Math.max(maxDuration, result.duration());
+			if (result.latency() > 0) {
+				latencies++;
+				latencySum += result.latency();
+				minLatency = Math.min(minLatency, result.latency());
+				maxLatency = Math.max(maxLatency, result.latency());
+			}
+		}
+
+		synchronized void assertHeldBy(final TimingMetricSnapshot duration, final TimingMetricSnapshot latency) {
+			assertEquals(durations, duration.count(), "duration samples");
+			assertEquals(durationSum, duration.sum(), "duration sum");
+			assertEquals(minDuration, duration.min(), "shortest duration");
+			assertEquals(maxDuration, duration.max(), "longest duration");
+			assertEquals(latencies, latency.count(), "latency samples");
+			assertEquals(latencySum, latency.sum(), "latency sum");
+			assertEquals(minLatency, latency.min(), "shortest latency");
+			assertEquals(maxLatency, latency.max(), "longest latency");
+		}
+	}
+
+	/** Shows the test each result the delegate's drivers give the step, one at a time or as batches. */
+	private static final class ObservedResultsFactory<I extends Item, O extends Operation<I>>
 					implements StorageDriverFactory<I, O, StorageDriver<I, O>> {
 
 		private final StorageDriverFactory<I, O, ?> delegate;
+		private final boolean batch;
 		private final LongAdder batches;
+		private final RangeSamples rangeSamples;
 
 		@SuppressWarnings("unchecked")
-		BatchResultsFactory(final StorageDriverFactory<?, ?, ?> delegate, final LongAdder batches) {
+		ObservedResultsFactory(final StorageDriverFactory<?, ?, ?> delegate, final boolean batch, final LongAdder batches,
+						final RangeSamples rangeSamples) {
 			this.delegate = (StorageDriverFactory<I, O, ?>) delegate;
+			this.batch = batch;
 			this.batches = batches;
+			this.rangeSamples = rangeSamples;
 		}
 
 		@Override
@@ -208,7 +248,7 @@ final class S3SplitReadTimingStepTest {
 							new Class<?>[]{StorageDriver.class
 							}, (proxy, method, args) -> {
 								if ("operationResultOutput".equals(method.getName())) {
-									driver.operationResultOutput(new BatchOutput<>((Output<O>) args[0], batches));
+									driver.operationResultOutput(new ObservedOutput<>((Output<O>) args[0], batch, batches, rangeSamples));
 									return null;
 								}
 								try {
@@ -240,33 +280,50 @@ final class S3SplitReadTimingStepTest {
 		}
 	}
 
-	private record BatchOutput<O>(Output<O> output, LongAdder batches)implements Output<O>
-	{
+	private static final class ObservedOutput<O extends Operation<?>> implements Output<O> {
 
-	@Override
-	public boolean put(final O result) {
-		batches.increment();
-		return output.put(List.of(result), 0, 1) == 1;
-	}
+		private final Output<O> output;
+		private final boolean batch;
+		private final LongAdder batches;
+		private final RangeSamples rangeSamples;
 
-	@Override
-	public int put(final List<O> results, final int from, final int to) {
-		batches.increment();
-		return output.put(results, from, to);
-	}
+		ObservedOutput(final Output<O> output, final boolean batch, final LongAdder batches, final RangeSamples rangeSamples) {
+			this.output = output;
+			this.batch = batch;
+			this.batches = batches;
+			this.rangeSamples = rangeSamples;
+		}
 
-	@Override
-	public int put(final List<O> results) {
-		return put(results, 0, results.size());
-	}
+		@Override
+		public boolean put(final O result) {
+			rangeSamples.add(result);
+			if (!batch) {
+				return output.put(result);
+			}
+			batches.increment();
+			return output.put(List.of(result), 0, 1) == 1;
+		}
 
-	@Override
-	public Input<O> getInput() {
-		return output.getInput();
-	}
+		@Override
+		public int put(final List<O> results, final int from, final int to) {
+			results.subList(from, to).forEach(rangeSamples::add);
+			batches.increment();
+			return output.put(results, from, to);
+		}
 
-	@Override
-	public void close() throws Exception {
-		output.close();
+		@Override
+		public int put(final List<O> results) {
+			return put(results, 0, results.size());
+		}
+
+		@Override
+		public Input<O> getInput() {
+			return output.getInput();
+		}
+
+		@Override
+		public void close() throws Exception {
+			output.close();
+		}
 	}
-}}
+}

@@ -10,11 +10,13 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.github.akurilov.commons.io.Input;
@@ -39,7 +41,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
@@ -64,13 +65,11 @@ final class S3AwsSplitReadTimingStepTest {
 	private static final int RANGES = 3;
 	private static final int OBJECTS = 6;
 	private static final int CONCURRENCY = 2;
-	/** Every ranged GET waits this long, so a real request's latency stands out from a parent's. */
-	private static final int ANSWER_DELAY_MILLIS = 2;
-	private static final long LEAST_REQUEST_LATENCY_MICROS = 1_000;
 	/** One object in this many has a range the target always refuses. */
 	private static final int REFUSED_EVERY = 3;
 
 	private final RangeTarget target = new RangeTarget();
+	private final RangeSamples rangeSamples = new RangeSamples();
 
 	@TempDir
 	Path home;
@@ -107,12 +106,11 @@ final class S3AwsSplitReadTimingStepTest {
 		assertRangeSamples(snapshot, (OBJECTS - refused) * RANGES + refused * (RANGES - 1));
 	}
 
-	private static void assertRangeSamples(final AllMetricsSnapshot snapshot, final int ranges) {
+	/** The step's statistics are exactly those of its {@code ranges} successful range results. */
+	private void assertRangeSamples(final AllMetricsSnapshot snapshot, final int ranges) {
 		final var duration = snapshot.durationSnapshot();
-		final var latency = snapshot.latencySnapshot();
 		assertEquals(ranges, duration.count(), "duration samples");
-		assertEquals(ranges, latency.count(), "latency samples");
-		assertTrue(latency.min() >= LEAST_REQUEST_LATENCY_MICROS, () -> "the least latency is " + latency.min() + " us");
+		rangeSamples.assertHeldBy(duration, snapshot.latencySnapshot());
 		final var busyMicros = snapshot.elapsedTimeMillis() * 1_000 * CONCURRENCY;
 		assertTrue(duration.sum() <= busyMicros, () -> duration.sum() + " us of durations in " + busyMicros + " us");
 	}
@@ -136,11 +134,9 @@ final class S3AwsSplitReadTimingStepTest {
 		final var classLoader = Thread.currentThread().getContextClassLoader();
 		final List<Extension> extensions = new ArrayList<>(Extension.load(classLoader));
 		final var batches = new LongAdder();
-		if (batch) {
-			extensions.replaceAll(extension -> "s3-aws".equals(extension.id())
-							? new BatchResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batches)
-							: extension);
-		}
+		extensions.replaceAll(extension -> "s3-aws".equals(extension.id())
+						? new ObservedResultsFactory<>((StorageDriverFactory<?, ?, ?>) extension, batch, batches, rangeSamples)
+						: extension);
 		final var snapshot = new AtomicReference<AllMetricsSnapshot>();
 		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR) {
 			@Override
@@ -161,17 +157,62 @@ final class S3AwsSplitReadTimingStepTest {
 		return snapshot.get();
 	}
 
-	/** Makes the delegate's drivers give the step each result through its batch {@code put}. */
-	private static final class BatchResultsFactory<I extends Item, O extends Operation<I>>
+	/** The timings of the successful range results the step was given, as its meters take them. */
+	private static final class RangeSamples {
+
+		private long durations;
+		private long durationSum;
+		private long minDuration = Long.MAX_VALUE;
+		private long maxDuration;
+		private long latencies;
+		private long latencySum;
+		private long minLatency = Long.MAX_VALUE;
+		private long maxLatency;
+
+		synchronized void add(final Operation<?> result) {
+			if (!(result instanceof PartialOperation) || result.status() != Operation.Status.SUCC || result.duration() <= 0) {
+				return;
+			}
+			durations++;
+			durationSum += result.duration();
+			minDuration = Math.min(minDuration, result.duration());
+			maxDuration = Math.max(maxDuration, result.duration());
+			if (result.latency() > 0) {
+				latencies++;
+				latencySum += result.latency();
+				minLatency = Math.min(minLatency, result.latency());
+				maxLatency = Math.max(maxLatency, result.latency());
+			}
+		}
+
+		synchronized void assertHeldBy(final TimingMetricSnapshot duration, final TimingMetricSnapshot latency) {
+			assertEquals(durations, duration.count(), "duration samples");
+			assertEquals(durationSum, duration.sum(), "duration sum");
+			assertEquals(minDuration, duration.min(), "shortest duration");
+			assertEquals(maxDuration, duration.max(), "longest duration");
+			assertEquals(latencies, latency.count(), "latency samples");
+			assertEquals(latencySum, latency.sum(), "latency sum");
+			assertEquals(minLatency, latency.min(), "shortest latency");
+			assertEquals(maxLatency, latency.max(), "longest latency");
+		}
+	}
+
+	/** Shows the test each result the delegate's drivers give the step, one at a time or as batches. */
+	private static final class ObservedResultsFactory<I extends Item, O extends Operation<I>>
 					implements StorageDriverFactory<I, O, StorageDriver<I, O>> {
 
 		private final StorageDriverFactory<I, O, ?> delegate;
+		private final boolean batch;
 		private final LongAdder batches;
+		private final RangeSamples rangeSamples;
 
 		@SuppressWarnings("unchecked")
-		BatchResultsFactory(final StorageDriverFactory<?, ?, ?> delegate, final LongAdder batches) {
+		ObservedResultsFactory(final StorageDriverFactory<?, ?, ?> delegate, final boolean batch, final LongAdder batches,
+						final RangeSamples rangeSamples) {
 			this.delegate = (StorageDriverFactory<I, O, ?>) delegate;
+			this.batch = batch;
 			this.batches = batches;
+			this.rangeSamples = rangeSamples;
 		}
 
 		@Override
@@ -183,7 +224,7 @@ final class S3AwsSplitReadTimingStepTest {
 							new Class<?>[]{StorageDriver.class
 							}, (proxy, method, args) -> {
 								if ("operationResultOutput".equals(method.getName())) {
-									driver.operationResultOutput(new BatchOutput<>((Output<O>) args[0], batches));
+									driver.operationResultOutput(new ObservedOutput<>((Output<O>) args[0], batch, batches, rangeSamples));
 									return null;
 								}
 								try {
@@ -215,103 +256,117 @@ final class S3AwsSplitReadTimingStepTest {
 		}
 	}
 
-	private record BatchOutput<O>(Output<O> output, LongAdder batches)implements Output<O>
-	{
+	private static final class ObservedOutput<O extends Operation<?>> implements Output<O> {
 
-	@Override
-	public boolean put(final O result) throws IOException {
-		batches.increment();
-		return output.put(List.of(result), 0, 1) == 1;
+		private final Output<O> output;
+		private final boolean batch;
+		private final LongAdder batches;
+		private final RangeSamples rangeSamples;
+
+		ObservedOutput(final Output<O> output, final boolean batch, final LongAdder batches, final RangeSamples rangeSamples) {
+			this.output = output;
+			this.batch = batch;
+			this.batches = batches;
+			this.rangeSamples = rangeSamples;
+		}
+
+		@Override
+		public boolean put(final O result) throws IOException {
+			rangeSamples.add(result);
+			if (!batch) {
+				return output.put(result);
+			}
+			batches.increment();
+			return output.put(List.of(result), 0, 1) == 1;
+		}
+
+		@Override
+		public int put(final List<O> results, final int from, final int to) throws IOException {
+			results.subList(from, to).forEach(rangeSamples::add);
+			batches.increment();
+			return output.put(results, from, to);
+		}
+
+		@Override
+		public int put(final List<O> results) throws IOException {
+			return put(results, 0, results.size());
+		}
+
+		@Override
+		public Input<O> getInput() throws IOException {
+			return output.getInput();
+		}
+
+		@Override
+		public void close() throws IOException {
+			output.close();
+		}
 	}
 
-	@Override
-	public int put(final List<O> results, final int from, final int to) throws IOException {
-		batches.increment();
-		return output.put(results, from, to);
-	}
+	/** A loopback S3 serving {@link #OBJECT_SIZE}-byte objects by range. */
+	private static final class RangeTarget implements AutoCloseable {
 
-	@Override
-	public int put(final List<O> results) throws IOException {
-		return put(results, 0, results.size());
-	}
+		private static final byte[] CHUNK = new byte[64 * 1024];
 
-	@Override
-	public Input<O> getInput() throws IOException {
-		return output.getInput();
-	}
+		private final HttpServer server;
+		private final ExecutorService threads = Executors.newCachedThreadPool();
+		volatile boolean refuseMiddleRange;
 
-	@Override
-	public void close() throws IOException {
-		output.close();
+		RangeTarget() {
+			try {
+				server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+			} catch (final IOException e) {
+				throw new IllegalStateException(e);
+			}
+			server.setExecutor(threads);
+			server.createContext("/", this::handle);
+			server.start();
+		}
+
+		int port() {
+			return server.getAddress().getPort();
+		}
+
+		private void handle(final HttpExchange exchange) throws IOException {
+			try (exchange) {
+				exchange.getRequestBody().readAllBytes();
+				final var headers = exchange.getResponseHeaders();
+				headers.set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
+				final var range = exchange.getRequestHeaders().getFirst("Range");
+				if (!"GET".equals(exchange.getRequestMethod()) || range == null) {
+					headers.set("Content-Length", "0");
+					exchange.sendResponseHeaders(200, -1);
+					return;
+				}
+				final var first = Long.parseLong(range.substring("bytes=".length(), range.indexOf('-')));
+				final var last = Math.min(Long.parseLong(range.substring(range.indexOf('-') + 1)), OBJECT_SIZE - 1);
+				final var path = exchange.getRequestURI().getPath();
+				final var object = Integer.parseInt(path.substring(path.lastIndexOf('-') + 1));
+				if (refuseMiddleRange && first == PART_SIZE && object % REFUSED_EVERY == 0) {
+					final var xml = "<Error><Code>AccessDenied</Code><Message>scripted</Message></Error>"
+									.getBytes(StandardCharsets.UTF_8);
+					headers.set("Content-Type", "application/xml");
+					exchange.sendResponseHeaders(403, xml.length);
+					exchange.getResponseBody().write(xml);
+					return;
+				}
+				headers.set("ETag", "\"stub\"");
+				headers.set("Accept-Ranges", "bytes");
+				headers.set("Content-Type", "application/octet-stream");
+				headers.set("Content-Range", "bytes " + first + "-" + last + "/" + OBJECT_SIZE);
+				final var length = last - first + 1;
+				exchange.sendResponseHeaders(206, length);
+				final var body = exchange.getResponseBody();
+				for (var left = length; left > 0; left -= CHUNK.length) {
+					body.write(CHUNK, 0, (int) Math.min(CHUNK.length, left));
+				}
+			}
+		}
+
+		@Override
+		public void close() {
+			server.stop(0);
+			threads.shutdownNow();
+		}
 	}
 }
-
-/** A loopback S3 serving {@link #OBJECT_SIZE}-byte objects by range, each range after a short wait. */
-private static final class RangeTarget implements AutoCloseable {
-
-	private static final byte[] CHUNK = new byte[64 * 1024];
-
-	private final HttpServer server;
-	private final ExecutorService threads = Executors.newCachedThreadPool();
-	volatile boolean refuseMiddleRange;
-
-	RangeTarget() {
-		try {
-			server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
-		} catch (final IOException e) {
-			throw new IllegalStateException(e);
-		}
-		server.setExecutor(threads);
-		server.createContext("/", this::handle);
-		server.start();
-	}
-
-	int port() {
-		return server.getAddress().getPort();
-	}
-
-	private void handle(final HttpExchange exchange) throws IOException {
-		try (exchange) {
-			exchange.getRequestBody().readAllBytes();
-			final var headers = exchange.getResponseHeaders();
-			headers.set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
-			final var range = exchange.getRequestHeaders().getFirst("Range");
-			if (!"GET".equals(exchange.getRequestMethod()) || range == null) {
-				headers.set("Content-Length", "0");
-				exchange.sendResponseHeaders(200, -1);
-				return;
-			}
-			TimeUnit.MILLISECONDS.sleep(ANSWER_DELAY_MILLIS);
-			final var first = Long.parseLong(range.substring("bytes=".length(), range.indexOf('-')));
-			final var last = Math.min(Long.parseLong(range.substring(range.indexOf('-') + 1)), OBJECT_SIZE - 1);
-			final var path = exchange.getRequestURI().getPath();
-			final var object = Integer.parseInt(path.substring(path.lastIndexOf('-') + 1));
-			if (refuseMiddleRange && first == PART_SIZE && object % REFUSED_EVERY == 0) {
-				final var xml = "<Error><Code>AccessDenied</Code><Message>scripted</Message></Error>"
-								.getBytes(StandardCharsets.UTF_8);
-				headers.set("Content-Type", "application/xml");
-				exchange.sendResponseHeaders(403, xml.length);
-				exchange.getResponseBody().write(xml);
-				return;
-			}
-			headers.set("ETag", "\"stub\"");
-			headers.set("Accept-Ranges", "bytes");
-			headers.set("Content-Type", "application/octet-stream");
-			headers.set("Content-Range", "bytes " + first + "-" + last + "/" + OBJECT_SIZE);
-			final var length = last - first + 1;
-			exchange.sendResponseHeaders(206, length);
-			final var body = exchange.getResponseBody();
-			for (var left = length; left > 0; left -= CHUNK.length) {
-				body.write(CHUNK, 0, (int) Math.min(CHUNK.length, left));
-			}
-		} catch (final InterruptedException e) {
-			Thread.currentThread().interrupt();
-		}
-	}
-
-	@Override
-	public void close() {
-		server.stop(0);
-		threads.shutdownNow();
-	}
-}}

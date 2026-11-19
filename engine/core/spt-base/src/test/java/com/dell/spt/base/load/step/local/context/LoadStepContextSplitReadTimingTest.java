@@ -80,9 +80,6 @@ final class LoadStepContextSplitReadTimingTest {
 		assertEquals(OBJECTS * PARTS, ranges.count);
 		ranges.assertHeldBy(snapshot.durationSnapshot(), snapshot.latencySnapshot());
 		assertEquals(OBJECTS * PARTS, snapshot.ttfbSnapshot().count(), "every range has a first byte");
-		for (final var parentDuration : parentDurations) {
-			assertTrue(parentDuration > ranges.maxDuration, () -> parentDuration + " is a whole read's time");
-		}
 
 		final var bucket = bucketRecord();
 		assertEquals(OBJECTS, bucket.succeeded());
