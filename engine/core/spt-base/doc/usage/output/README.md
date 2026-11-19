@@ -266,9 +266,9 @@ TtfbMax[us]     | Maximum Time to First Byte
 
 Time to First Byte is populated for body-returning operations when first response body bytes are observed, currently READ and LIST. Non-body operations and empty/no-body samples do not contribute TTFB values.
 
-**Split reads.** For a read split by `item-data-ranges-threshold` (`--part-size` on the CLI), `Duration*`, `DurationSum[s]`, `Latency*` and `Ttfb*` hold one sample per range request that succeeded. The read sends no request of its own and adds no sample, so these columns describe ranges, not whole objects. An object's time from its start to its last range is in `op.trace.csv`. `CountSucc`, `CountFail` and `TP*` still count objects, and `Size` and `BW*` count bytes.
+**Split reads.** On `s3`, `s3-rdma` and `s3-aws`, a read split by `item-data-ranges-threshold` (`--part-size` on the CLI) sends no request of its own: each range is a ranged GET. `Duration*`, `DurationSum[s]` and `Latency*` hold the samples of the range requests that succeeded, and the read adds none, so these columns describe ranges, not whole objects. `Ttfb*` holds a sample for each of those ranges whose response body started. On `fs`, the read reads the whole file itself before its ranges run, and that read keeps its sample next to theirs. With `output-metrics-trace-persist` on, `op.trace.csv` has a row for the read, from its start to its finalization; it can include time queued after its last range ended. `CountSucc`, `CountFail` and `TP*` still count objects, and `Size` and `BW*` count bytes.
 
-**Multipart uploads.** `Duration*`, `DurationSum[s]` and `Latency*` hold one sample per part and one for the completion request.
+**Multipart uploads.** `Duration*`, `DurationSum[s]` and `Latency*` hold one sample per part that succeeds and one for the completion request when it succeeds.
 
 On `s3-aws`, the upload's last sample instead covers the whole upload, from its initiation to its completion.
 
