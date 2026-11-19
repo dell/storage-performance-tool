@@ -374,9 +374,13 @@ public interface ConfigUtil {
 	 * <ul>
 	 *   <li>An {@link ArrayList}, {@link LinkedList}, {@link Vector} or {@link CopyOnWriteArrayList}, of
 	 *       exactly that class, becomes a new list of that class.
-	 *   <li>An {@link Arrays#asList} list, such as a list set from text, becomes one of the same fixed
-	 *       size over a new array of the source array's exact class, so it refuses the same values; see
-	 *       {@link FixedSizeListCopy}.
+	 *   <li>An {@link Arrays#asList} list, such as a list set from text, becomes one of the same class
+	 *       and fixed size over a new array: a {@code String[]} when every element is a string or null,
+	 *       as in a list set from text, and an {@code Object[]} otherwise. The source's array class is
+	 *       not read, so the copy may refuse other values than the source: an {@code Object[]} list of
+	 *       only strings becomes a {@code String[]} one, whose {@code set} refuses a non-string, and an
+	 *       array of any other class, such as an {@code Integer[]}, becomes an {@code Object[]}, which
+	 *       takes any value. A list set from text is the only such list SPT itself makes.
 	 *   <li>A read-only list, from {@link List#of}, {@link List#copyOf}, {@link Stream#toList},
 	 *       {@link Collections#unmodifiableList} or {@link Collections#singletonList}, is kept when no
 	 *       element copies to a new value, since nothing can write it: null queries, serialization and
@@ -389,9 +393,7 @@ public interface ConfigUtil {
 	 * Every other list is kept by reference, with its elements, as a configuration did before: this
 	 * copy calls no constructor or method of it. That covers subclasses, an extension's own list
 	 * classes, sub-lists, and {@link Collections#synchronizedList} and {@link Collections#checkedList}
-	 * views. A map or list held in one is shared with the original. So is an {@link Arrays#asList}
-	 * list whose array cannot hold an element's copy, such as a {@code ConcurrentHashMap[]}, whose maps
-	 * copy to {@link LinkedHashMap}s.
+	 * views. A map or list held in one is shared with the original.
 	 */
 	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
 	private static Object copyList(final List<?> list) {
@@ -453,21 +455,15 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * An {@link Arrays#asList} list of the source's size over a new array of the source array's class,
-	 * holding the copied elements, or the source itself when that array cannot hold them.
+	 * An {@link Arrays#asList} list of the copied elements over a {@code String[]} when every element
+	 * is a string or null, and an {@code Object[]} otherwise. Only the elements' classes are read.
 	 */
 	private static Object copyArraysAsList(final List<?> list) {
 		final List<Object> elements = copyElements(list);
-		return FixedSizeListCopy.emptyLike(list).<Object> map(copy -> {
-			try {
-				for (int i = 0; i < elements.size(); i++) {
-					copy.set(i, elements.get(i));
-				}
-				return copy;
-			} catch (final ArrayStoreException e) {
-				return list;
-			}
-		}).orElse(list);
+		if (elements.stream().allMatch(element -> element == null || element instanceof String)) {
+			return Arrays.asList(elements.toArray(new String[0]));
+		}
+		return Arrays.asList(elements.toArray());
 	}
 
 	/** Whether the read-only list throws when asked whether it holds null, as a {@link List#of} list does. */

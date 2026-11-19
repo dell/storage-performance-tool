@@ -14,6 +14,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
+import java.io.Serial;
+import java.io.Serializable;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -27,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.Vector;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -440,20 +443,17 @@ public class ConfigUtilTest {
 	}
 
 	@Test
-	@SuppressWarnings("unchecked")
-	public void testMergeAndCopyOfKeepTheArrayTypeOfAFixedSizeList() {
+	public void testMergeAndCopyOfBackAFixedSizeListOfTextWithAStringArray() {
 		final List<String> typed = Arrays.asList("p", "q");
 		final Config fromText = new BasicConfig("-", new HashMap<>(Map.of("names", List.class)), new HashMap<>());
 		fromText.val("names", "p,q"); // a list set from text, as an engine argument is
 		final List<Object> textList = fromText.listVal("names");
 		assertThrows(ArrayStoreException.class, () -> textList.set(0, 42));
-		for (final List<?> source : List.of(typed, textList)) {
+		// an Object[] of only strings: the copy is stricter than the source, as the Javadoc records
+		final List<Object> untypedText = Arrays.asList("p", "q");
+		for (final List<?> source : List.of(typed, textList, untypedText)) {
 			for (final boolean viaMerge : List.of(true, false)) {
-				final Config config = new BasicConfig(
-								"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
-
-				final List<Object> copied = (viaMerge ? ConfigUtil.merge("-", List.of(config)) : ConfigUtil.copyOf(config))
-								.listVal("names");
+				final List<Object> copied = copyNames(source, viaMerge);
 
 				assertSame(source.getClass(), copied.getClass());
 				assertNotSame(source, copied);
@@ -464,15 +464,91 @@ public class ConfigUtilTest {
 				assertEquals(List.of("p", "q"), source);
 			}
 		}
-		final List<Object> untyped = Arrays.asList("p", element());
+		final List<Object> copiedWithNull = copyNames(Arrays.asList("p", null), false);
+		assertEquals(Arrays.asList("p", null), copiedWithNull);
+		assertThrows(ArrayStoreException.class, () -> copiedWithNull.set(1, 42));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void testMergeAndCopyOfBackAnyOtherFixedSizeListWithAnObjectArray() {
+		final ConcurrentHashMap<String, Object> concurrent = new ConcurrentHashMap<>(Map.of("value", "first"));
+		final ConcurrentHashMap<?, ?>[] maps = new ConcurrentHashMap<?, ?>[1];
+		maps[0] = concurrent;
+		final List<List<?>> sources = List.of(
+						Arrays.asList("p", element()),
+						Arrays.asList(1, 2), // an Integer[]: the copy is looser than the source
+						Arrays.asList(maps)); // a ConcurrentHashMap[], which cannot hold its map's LinkedHashMap copy
+		assertThrows(ArrayStoreException.class, () -> ((List<Object>) sources.get(1)).set(0, "p"));
+		for (final List<?> source : sources) {
+			for (final boolean viaMerge : List.of(true, false)) {
+				final List<Object> copied = copyNames(source, viaMerge);
+
+				assertSame(source.getClass(), copied.getClass());
+				assertNotSame(source, copied);
+				assertEquals(source, copied);
+				for (int i = 0; i < source.size(); i++) {
+					if (source.get(i) instanceof Map<?, ?> element) {
+						assertNotSame(element, copied.get(i));
+						((Map<String, Object>) copied.get(i)).put("value", "changed");
+						assertEquals("first", element.get("value"));
+					}
+				}
+				copied.set(0, new Object()); // an Object[] takes any value
+			}
+		}
+		assertEquals(Map.of("value", "first"), concurrent);
+	}
+
+	/** An element whose serialization hook throws; the copy must never call it. */
+	static final class ThrowingHook implements Serializable {
+		private static final long serialVersionUID = 1L;
+
+		@Serial
+		private Object writeReplace() {
+			throw new IllegalStateException("writeReplace called");
+		}
+	}
+
+	/** An element whose serialization hook counts its calls; the copy must never call it. */
+	static final class CountingHook implements Serializable {
+		private static final long serialVersionUID = 1L;
+		static final AtomicInteger CALLS = new AtomicInteger();
+
+		@Serial
+		private Object writeReplace() {
+			CALLS.incrementAndGet();
+			return this;
+		}
+	}
+
+	@Test
+	public void testMergeAndCopyOfAFixedSizeListCallNoThrowingSerializationHook() {
+		assertCopiedWithoutHooks(Arrays.asList("p", new ThrowingHook()));
+	}
+
+	@Test
+	public void testMergeAndCopyOfAFixedSizeListCallNoCountingSerializationHook() {
+		CountingHook.CALLS.set(0);
+		assertCopiedWithoutHooks(Arrays.asList(new CountingHook(), "q"));
+		assertEquals(0, CountingHook.CALLS.get());
+	}
+
+	private static void assertCopiedWithoutHooks(final List<Object> source) {
+		for (final boolean viaMerge : List.of(true, false)) {
+			final List<Object> copied = assertDoesNotThrow(() -> copyNames(source, viaMerge));
+
+			assertSame(source.getClass(), copied.getClass());
+			assertNotSame(source, copied);
+			assertEquals(source, copied);
+		}
+	}
+
+	/** The list setting {@code names} of a configuration holding the source, after a merge or a copy. */
+	private static List<Object> copyNames(final List<?> source, final boolean viaMerge) {
 		final Config config = new BasicConfig(
-						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", untyped)));
-		final List<Object> copied = ConfigUtil.copyOf(config).listVal("names");
-		assertSame(untyped.getClass(), copied.getClass());
-		assertNotSame(untyped.get(1), copied.get(1));
-		copied.set(0, 42); // an Object[] takes any value, as the source's does
-		((Map<String, Object>) copied.get(1)).put("value", "changed");
-		assertEquals(List.of("p", element()), untyped);
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
+		return (viaMerge ? ConfigUtil.merge("-", List.of(config)) : ConfigUtil.copyOf(config)).listVal("names");
 	}
 
 	@Test
