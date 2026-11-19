@@ -8,6 +8,8 @@ name: Nightly Integration Tests
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+  push:
+    branches: ["ci/nightly-integration-tests"]
 
 permissions:
   contents: read
