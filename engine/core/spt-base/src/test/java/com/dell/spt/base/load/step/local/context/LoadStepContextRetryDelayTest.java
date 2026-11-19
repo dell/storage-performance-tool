@@ -10,7 +10,6 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -27,7 +26,6 @@ import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.confuse.Config;
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -84,10 +82,10 @@ class LoadStepContextRetryDelayTest {
 		final var java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
 		final var process = new ProcessBuilder(
 						java, "-cp", System.getProperty("java.class.path"), FirstUseProbe.class.getName())
-										.directory(tempDir.toFile())
-										.redirectErrorStream(true)
-										.redirectOutput(output.toFile())
-										.start();
+						.directory(tempDir.toFile())
+						.redirectErrorStream(true)
+						.redirectOutput(output.toFile())
+						.start();
 		try {
 			assertTrue(process.waitFor(120, TimeUnit.SECONDS), "first-use probe timed out");
 		} finally {

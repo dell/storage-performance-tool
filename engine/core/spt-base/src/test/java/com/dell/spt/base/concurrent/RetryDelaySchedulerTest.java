@@ -3,6 +3,7 @@ package com.dell.spt.base.concurrent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -26,20 +27,18 @@ class RetryDelaySchedulerTest {
 	@Test
 	void runsOnTheNamedDaemonThreadWithNothingInherited() throws Exception {
 		final var observed = new CompletableFuture<Thread>();
-		final var loader = new ClassLoader(ClassLoader.getSystemClassLoader()) {
-		};
+		final var loader = new ClassLoader(ClassLoader.getSystemClassLoader()) {};
 		final var starter = Thread.currentThread();
 		final var previousLoader = starter.getContextClassLoader();
 		starter.setContextClassLoader(loader);
 		try {
-			RetryDelayScheduler.schedule(1, () -> observed.complete(Thread.currentThread()));
+			runSoon(() -> observed.complete(Thread.currentThread()));
 		} finally {
 			starter.setContextClassLoader(previousLoader);
 		}
 		final var thread = observed.get(10, TimeUnit.SECONDS);
 		assertEquals(RetryDelayScheduler.THREAD_NAME, thread.getName());
 		assertTrue(thread.isDaemon());
-		assertEquals(Thread.NORM_PRIORITY, thread.getPriority());
 		assertEquals(ClassLoader.getSystemClassLoader(), thread.getContextClassLoader());
 	}
 
@@ -50,15 +49,15 @@ class RetryDelaySchedulerTest {
 		final var after = new CompletableFuture<String>();
 		ThreadContext.put(LOG_KEY, "step-a");
 		try {
-			RetryDelayScheduler.schedule(1, () -> first.complete(ThreadContext.get(LOG_KEY)));
+			runSoon(() -> first.complete(ThreadContext.get(LOG_KEY)));
 			ThreadContext.put(LOG_KEY, "step-b");
-			RetryDelayScheduler.schedule(1, () -> second.complete(ThreadContext.get(LOG_KEY)));
+			runSoon(() -> second.complete(ThreadContext.get(LOG_KEY)));
 			assertEquals("step-a", first.get(10, TimeUnit.SECONDS));
 			assertEquals("step-b", second.get(10, TimeUnit.SECONDS));
 		} finally {
 			ThreadContext.remove(LOG_KEY);
 		}
-		RetryDelayScheduler.schedule(1, () -> after.complete(ThreadContext.get(LOG_KEY)));
+		runSoon(() -> after.complete(ThreadContext.get(LOG_KEY)));
 		assertNull(after.get(10, TimeUnit.SECONDS), "a finished task must leave no log context on the shared thread");
 	}
 
@@ -73,7 +72,7 @@ class RetryDelaySchedulerTest {
 		futures.forEach(future -> assertTrue(future.cancel(false)));
 		futures.forEach(future -> assertFalse(RetryDelayScheduler.isQueued(future)));
 		final var drained = new CountDownLatch(1);
-		RetryDelayScheduler.schedule(1, drained::countDown);
+		runSoon(drained::countDown);
 		assertTrue(drained.await(10, TimeUnit.SECONDS));
 		assertFalse(ran.get());
 	}
@@ -87,7 +86,11 @@ class RetryDelaySchedulerTest {
 		final var thrown = assertThrows(ExecutionException.class, () -> failed.get(10, TimeUnit.SECONDS));
 		assertInstanceOf(IllegalStateException.class, thrown.getCause());
 		final var next = new CompletableFuture<String>();
-		RetryDelayScheduler.schedule(1, () -> next.complete(Thread.currentThread().getName()));
+		runSoon(() -> next.complete(Thread.currentThread().getName()));
 		assertEquals(RetryDelayScheduler.THREAD_NAME, next.get(10, TimeUnit.SECONDS));
+	}
+
+	private static void runSoon(final Runnable task) {
+		assertNotNull(RetryDelayScheduler.schedule(1, task));
 	}
 }

@@ -25,8 +25,7 @@ public final class RetryDelayScheduler {
 
 	private static final ScheduledThreadPoolExecutor EXECUTOR = newExecutor();
 
-	private RetryDelayScheduler() {
-	}
+	private RetryDelayScheduler() {}
 
 	/**
 	 * Runs {@code task} after the delay, under the log context of the calling thread, so what it
@@ -58,12 +57,11 @@ public final class RetryDelayScheduler {
 
 	/**
 	 * The thread outlives every step, so it takes nothing from the thread that happens to start
-	 * it: no inherited log context, class loader or priority.
+	 * it: no inherited log context or class loader.
 	 */
 	private static Thread newThread(final Runnable runnable) {
 		final var thread = new Thread(null, runnable, THREAD_NAME, 0, false);
 		thread.setDaemon(true);
-		thread.setPriority(Thread.NORM_PRIORITY);
 		thread.setContextClassLoader(ClassLoader.getSystemClassLoader());
 		return thread;
 	}
