@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.atmos;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import static com.dell.spt.base.item.op.OpType.CREATE;
 import static com.dell.spt.storage.driver.coop.netty.http.DellConstants.KEY_X_Dell_FILESYSTEM_ACCESS_ENABLED;
 import static com.dell.spt.storage.driver.coop.netty.http.DellConstants.KEY_X_Dell_NAMESPACE;
@@ -54,9 +55,16 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.logging.log4j.Level;
 
-/** Created by kurila on 11.11.16. */
+/**
+ * Created by kurila on 11.11.16.
+ *
+ * <p>Has no composite (multipart) support: Atmos sends a composite and each of its parts as an
+ * ordinary request (a CREATE part as a new object, a READ part without a range), so a step refuses
+ * a ranges threshold here.
+ */
 public class AtmosStorageDriver<I extends Item, O extends Operation<I>>
-				extends HttpStorageDriverBase<I, O> {
+				extends HttpStorageDriverBase<I, O>
+				implements CompositeOperationsUnsupported {
 
 	private static final ThreadLocal<StringBuilder> BUFF_CANONICAL = ThreadLocal.withInitial(StringBuilder::new);
 
@@ -94,15 +102,6 @@ public class AtmosStorageDriver<I extends Item, O extends Operation<I>>
 			sharedHeaders.set(KEY_X_Dell_NAMESPACE, namespace);
 		}
 		requestNewPathFunc = null; // do not use
-	}
-
-	/**
-	 * No: Atmos sends a composite and each of its parts as an ordinary request (a CREATE part as a
-	 * new object, a READ part without a range), so a step refuses a ranges threshold here.
-	 */
-	@Override
-	public boolean supportsCompositeOperations() {
-		return false;
 	}
 
 	@Override

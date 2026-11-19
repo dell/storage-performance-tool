@@ -2,23 +2,35 @@ package com.dell.spt.base.storage.driver;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 /** The step-start check that refuses a ranges threshold on a driver without composite support. */
 class CompositeOperationSupportTest {
 
 	@Test
-	void aDriverSupportsCompositeOperationsUnlessItSaysOtherwise() {
-		final StorageDriver<?, ?> driver = mock(StorageDriver.class, CALLS_REAL_METHODS);
-		assertTrue(driver.supportsCompositeOperations(), "the interface default, kept by a driver built outside the engine");
+	void theDriverInterfaceGainsNoMethod() {
+		assertFalse(
+						Arrays.stream(StorageDriver.class.getDeclaredMethods())
+										.map(Method::getName)
+										.anyMatch(name -> name.toLowerCase(java.util.Locale.ROOT).contains("composite")
+														&& !name.equals("compositeResults")),
+						"the opt-out is a marker interface, not a StorageDriver method");
+		assertEquals(0, CompositeOperationsUnsupported.class.getDeclaredMethods().length);
 	}
 
 	@Test
@@ -52,10 +64,70 @@ class CompositeOperationSupportTest {
 		}
 	}
 
+	/**
+	 * An external driver that already declares a method named {@code supportsCompositeOperations},
+	 * in any form, behaves as it did before the check existed: the check does not call it, so the
+	 * driver is accepted, and its own method keeps its answer and its access.
+	 */
+	@Test
+	void anExternalDriverWithASameNamedMethodIsAcceptedAsBefore() throws Exception {
+		final PublicFalseDriver<?, ?> publicFalse = mock(PublicFalseDriver.class, CALLS_REAL_METHODS);
+		final PrivateMethodDriver<?, ?> privateMethod = mock(PrivateMethodDriver.class, CALLS_REAL_METHODS);
+		final UnrelatedDefaultDriver<?, ?> unrelatedDefault = mock(UnrelatedDefaultDriver.class, CALLS_REAL_METHODS);
+		for (final StorageDriver<?, ?> driver : new StorageDriver<?, ?>[]{publicFalse, privateMethod, unrelatedDefault
+		}) {
+			for (final OpType opType : new OpType[]{OpType.CREATE, OpType.READ
+			}) {
+				assertDoesNotThrow(
+								() -> CompositeOperationSupport.requireSupport(driver, opType, 1048576),
+								driver.getClass().getSuperclass().getSimpleName() + " " + opType);
+			}
+		}
+		assertFalse(publicFalse.supportsCompositeOperations());
+		assertFalse(privateMethod.answer());
+		final Method privateDeclared = PrivateMethodDriver.class.getDeclaredMethod("supportsCompositeOperations");
+		assertTrue(Modifier.isPrivate(privateDeclared.getModifiers()));
+		assertEquals(UnrelatedCapability.class, UnrelatedDefaultDriver.class
+						.getMethod("supportsCompositeOperations")
+						.getDeclaringClass());
+		assertFalse(unrelatedDefault.supportsCompositeOperations());
+	}
+
 	private static StorageDriver<?, ?> driver(final boolean supported) {
-		final StorageDriver<?, ?> driver = mock(StorageDriver.class);
-		when(driver.supportsCompositeOperations()).thenReturn(supported);
+		final StorageDriver<?, ?> driver = supported
+						? mock(StorageDriver.class)
+						: mock(StorageDriver.class, withSettings().extraInterfaces(CompositeOperationsUnsupported.class));
 		when(driver.driverType()).thenReturn("fs");
 		return driver;
 	}
+
+	/** An external driver with a public method of the same name that returns {@code false}. */
+	abstract static class PublicFalseDriver<I extends Item, O extends Operation<I>> implements StorageDriver<I, O> {
+		public boolean supportsCompositeOperations() {
+			return false;
+		}
+	}
+
+	/** An external driver with a private method of the same name. */
+	abstract static class PrivateMethodDriver<I extends Item, O extends Operation<I>> implements StorageDriver<I, O> {
+		@SuppressWarnings("UnusedMethod")
+		private boolean supportsCompositeOperations() {
+			return false;
+		}
+
+		boolean answer() {
+			return supportsCompositeOperations();
+		}
+	}
+
+	/** An unrelated interface whose default method has the same signature. */
+	interface UnrelatedCapability {
+		default boolean supportsCompositeOperations() {
+			return false;
+		}
+	}
+
+	/** An external driver that inherits that unrelated default. */
+	abstract static class UnrelatedDefaultDriver<I extends Item, O extends Operation<I>>
+					implements StorageDriver<I, O>, UnrelatedCapability {}
 }

@@ -6,7 +6,7 @@ import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 
 /**
  * The step-start check that refuses a composite (multipart) configuration on a storage driver
- * without composite support: see {@link StorageDriver#supportsCompositeOperations()}.
+ * without composite support: one that implements {@link CompositeOperationsUnsupported}.
  */
 public final class CompositeOperationSupport {
 
@@ -27,7 +27,7 @@ public final class CompositeOperationSupport {
 					throws IllegalConfigurationException {
 		if (sizeThreshold > 0
 						&& DataOperationsBuilderImpl.buildsCompositeOperations(opType)
-						&& !driver.supportsCompositeOperations()) {
+						&& driver instanceof CompositeOperationsUnsupported) {
 			throw new IllegalConfigurationException(
 							"The storage driver type \"" + driver.driverType()
 											+ "\" does not support composite (multipart) operations, but item.data.ranges.threshold="

@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.nio.fs;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.data.DataCorruptionException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.data.DataSizeException;
@@ -42,11 +43,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
 /**
-Created by kurila on 19.07.16.
-*/
+ * Created by kurila on 19.07.16.
+ *
+ * <p>Has no composite (multipart) support: a composite's parts and its finalization each reopen
+ * the file with truncate and write at offset 0, and a range read counts its bytes twice, so a step
+ * refuses a ranges threshold here.
+ */
 public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				extends NioStorageDriverBase<I, O>
-				implements NioStorageDriver<I, O> {
+				implements NioStorageDriver<I, O>, CompositeOperationsUnsupported {
 
 	private final Map<DataOperation, FileChannel> srcOpenFiles = new ConcurrentHashMap<>();
 	private final Map<String, File> dstParentDirs = new ConcurrentHashMap<>();
@@ -57,15 +62,6 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 					final int batchSize) throws IllegalConfigurationException {
 		super(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 		requestAuthTokenFunc = null; // do not use
-	}
-
-	/**
-	 * No: a composite's parts and its finalization each reopen the file with truncate and write at
-	 * offset 0, and a range read counts its bytes twice, so a step refuses a ranges threshold here.
-	 */
-	@Override
-	public boolean supportsCompositeOperations() {
-		return false;
 	}
 
 	private <F extends DataItem, D extends DataOperation<F>> FileChannel openDstFile(final D dataOp) {

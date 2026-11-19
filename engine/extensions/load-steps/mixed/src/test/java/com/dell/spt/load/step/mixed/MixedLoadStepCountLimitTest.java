@@ -9,6 +9,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -690,7 +691,9 @@ class MixedLoadStepCountLimitTest {
 		public StorageDriver create(
 						final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 						final int batchSize) {
-			final ProbeDriver driver = new ProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			final ProbeDriver driver = noCompositeSupport.get()
+							? new NoCompositeProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize)
+							: new ProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 			created.increment();
 			if (pauseFirstCompletion.get()) {
 				// handleCompleted counts the completion between publishing its result and enqueueing
@@ -741,17 +744,12 @@ class MixedLoadStepCountLimitTest {
 		/** The NIO mock, whose parts fail with {@code FAIL_IO}, and whose STATs are interrupted, when asked to. */
 		@SuppressWarnings({"rawtypes", "unchecked"
 		})
-		private final class ProbeDriver extends NioStorageDriverMock {
+		private class ProbeDriver extends NioStorageDriverMock {
 
 			ProbeDriver(
 							final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 							final int batchSize) {
 				super(stepId, dataInput, storageConfig, verifyFlag, batchSize);
-			}
-
-			@Override
-			public boolean supportsCompositeOperations() {
-				return !noCompositeSupport.get();
 			}
 
 			@Override
@@ -768,6 +766,17 @@ class MixedLoadStepCountLimitTest {
 					interruptedStats.increment();
 					op.status(Operation.Status.INTERRUPTED);
 				}
+			}
+		}
+
+		/** The probe driver, declaring no composite support, as {@code fs} and {@code atmos} do. */
+		@SuppressWarnings("rawtypes")
+		private final class NoCompositeProbeDriver extends ProbeDriver implements CompositeOperationsUnsupported {
+
+			NoCompositeProbeDriver(
+							final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
+							final int batchSize) {
+				super(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 			}
 		}
 

@@ -1,11 +1,13 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.tables;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -78,7 +80,7 @@ class S3TablesCompositeSupportTest {
 		driverConfig.val("storage-driver-type", "s3-tables");
 		final var drv = new S3TablesStorageDriverTest.TestDriver(driverConfig);
 		try {
-			assertFalse(drv.supportsCompositeOperations());
+			assertInstanceOf(CompositeOperationsUnsupported.class, drv);
 			for (final String opType : List.of("create", "read")) {
 				final var failure = assertThrows(
 								IllegalConfigurationException.class, () -> builder(drv, stepConfig(opType, "1MB")).build(), opType);

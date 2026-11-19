@@ -8,6 +8,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
@@ -15,6 +16,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.io.collection.ListInput;
 import com.github.akurilov.confuse.Config;
@@ -30,36 +32,34 @@ import org.junit.jupiter.api.Test;
 @SuppressWarnings("unchecked")
 class CompositeSupportGeneratorBuilderTest {
 
-	private final StorageDriver<DataItem, DataOperation<DataItem>> driver = mock(StorageDriver.class);
+	private final StorageDriver<DataItem, DataOperation<DataItem>> unsupported = mock(StorageDriver.class, withSettings().extraInterfaces(CompositeOperationsUnsupported.class));
+	private final StorageDriver<DataItem, DataOperation<DataItem>> supported = mock(StorageDriver.class);
 
 	@Test
 	void aThresholdOnADriverWithoutSupportFailsTheBuildForCreateAndRead() {
-		when(driver.supportsCompositeOperations()).thenReturn(false);
-		when(driver.driverType()).thenReturn("fs");
+		when(unsupported.driverType()).thenReturn("fs");
 		for (final String opType : List.of("create", "read")) {
 			for (final Object threshold : List.of("1MB", 1048576)) {
 				final Config config = config(opType, threshold);
 				final var failure = assertThrows(
-								IllegalConfigurationException.class, () -> builder(config).build(), opType + " " + threshold);
+								IllegalConfigurationException.class, () -> builder(unsupported, config).build(), opType + " " + threshold);
 				assertTrue(failure.getMessage().contains("\"fs\""), failure.getMessage());
 				assertTrue(failure.getMessage().contains("item.data.ranges.threshold=1048576"), failure.getMessage());
 				assertTrue(failure.getMessage().contains("composite " + opType.toUpperCase(Locale.ROOT)), failure.getMessage());
 			}
 		}
-		verify(driver, never()).put(any(DataOperation.class));
+		verify(unsupported, never()).put(any(DataOperation.class));
 	}
 
 	@Test
 	void theThresholdAtZeroOrADriverWithSupportBuilds() throws Exception {
-		when(driver.supportsCompositeOperations()).thenReturn(false);
 		for (final String opType : List.of("create", "read")) {
-			try (var generator = builder(config(opType, 0)).build()) {
+			try (var generator = builder(unsupported, config(opType, 0)).build()) {
 				assertNotNull(generator, opType);
 			}
 		}
-		when(driver.supportsCompositeOperations()).thenReturn(true);
 		for (final String opType : List.of("create", "read")) {
-			try (var generator = builder(config(opType, "1MB")).build()) {
+			try (var generator = builder(supported, config(opType, "1MB")).build()) {
 				assertNotNull(generator, opType);
 			}
 		}
@@ -78,7 +78,7 @@ class CompositeSupportGeneratorBuilderTest {
 	}
 
 	private LoadGeneratorBuilderImpl<DataItem, DataOperation<DataItem>, LoadGeneratorImpl<DataItem, DataOperation<DataItem>>> builder(
-					final Config config) {
+					final StorageDriver<DataItem, DataOperation<DataItem>> driver, final Config config) {
 		return new LoadGeneratorBuilderImpl<DataItem, DataOperation<DataItem>, LoadGeneratorImpl<DataItem, DataOperation<DataItem>>>()
 						.itemConfig(config.configVal("item"))
 						.loadConfig(config.configVal("load"))
