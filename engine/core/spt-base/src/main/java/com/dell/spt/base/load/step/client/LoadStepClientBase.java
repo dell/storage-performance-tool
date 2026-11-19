@@ -66,6 +66,7 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketProvisioning;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
@@ -308,9 +309,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			final var nicSetExpected = nicSetExpected(configSlices, ctxConfigsSlices);
 			final Runnable distribution = () -> {
-				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG));
+				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG), controlsOperations(BASE_CONFIG));
 				for (var i = 0; i < slicesByCtxConfig.size(); i++) {
-					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i));
+					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i), controlsOperations(i));
 				}
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
@@ -708,7 +709,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return fms;
 	}
 
-	private void addFileClients(final Config config, final List<Config> configSlices, final boolean suppliesItems) {
+	private void addFileClients(
+					final Config config, final List<Config> configSlices, final boolean suppliesItems,
+					final boolean controlsOperations) {
 		final var loadConfig = config.configVal("load");
 		final var batchSize = loadConfig.intVal("batch-size");
 		final var storageConfig = config.configVal("storage");
@@ -788,8 +791,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						final var dataInput = DataInput.instance(
 										itemDataInputFile, itemDataInputSeed, itemDataLayerSize, itemDataInputLayerCacheSize, isInHeapMem,
 										itemDataCompressibility, isDedupable);
-						final var storageDriver = StorageDriver.instance(
-										extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, loadStepId());
+						final var storageDriver = refuseCompositeWithoutSupport(
+										StorageDriver.instance(
+														extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, loadStepId()),
+										config, controlsOperations);
 						final var itemInput = skipScatter
 										? null
 										: ItemInputFactory.createItemInput(itemConfig, batchSize, storageDriver)) {
@@ -1038,10 +1043,63 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return file == null || file.isEmpty() ? null : file;
 	}
 
-	/** This message is public, so it counts the engine and leaves its address and the cause to the log. */
+	/**
+	 * The op types whose operations {@code config} makes, for the composite-support check before the
+	 * item input is read: its {@code load-op-type} for a DATA item, else none. A step whose
+	 * operation types are not its {@code load-op-type} overrides this.
+	 */
+	protected Set<OpType> compositeCheckedOpTypes(final Config config) {
+		if (!ItemType.DATA.equals(ItemType.valueOf(config.stringVal("item-type").toUpperCase(Locale.ROOT)))) {
+			return Set.of();
+		}
+		return Set.of(OpType.valueOf(config.stringVal("load-op-type").toUpperCase(Locale.ROOT)));
+	}
+
+	/**
+	 * Refuses, on this engine and before the item input is created, a composite configuration of a
+	 * configuration that controls the operations, on a driver without composite support: the input
+	 * of a READ from a storage path lists that path. The same check runs again in each step slice.
+	 * A refused driver is closed, and the refusal ends the run with its own message.
+	 */
+	private <D extends StorageDriver<?, ?>> D refuseCompositeWithoutSupport(
+					final D driver, final Config config, final boolean controlsOperations) {
+		if (!controlsOperations) {
+			return driver;
+		}
+		try {
+			final long sizeThreshold = CompositeOperationSupport.sizeThreshold(config.configVal("item-data-ranges"));
+			for (final OpType opType : compositeCheckedOpTypes(config)) {
+				CompositeOperationSupport.requireSupport(driver, opType, sizeThreshold);
+			}
+		} catch (final IllegalConfigurationException refusal) {
+			try {
+				driver.close();
+			} catch (final IOException | RuntimeException closeFailure) {
+				refusal.addSuppressed(closeFailure);
+			}
+			LogUtil.exception(Level.ERROR, refusal, "{}: refused at step start", loadStepId());
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION, loadStepId(), refusal.getMessage(), refusal);
+		}
+		return driver;
+	}
+
+	/**
+	 * This message is public, so it counts the engine and leaves its address and the cause to the
+	 * log. A refused composite configuration is the exception: its message names only the driver
+	 * type, the op type and the setting, and is kept.
+	 */
 	RunTerminalException sliceStartFailure(final Exception cause, final int slice, final int sliceCount) {
 		final var engine = "engine " + (slice + 1) + " of " + sliceCount;
 		final var typed = RunTerminalException.find(cause);
+		final var refusal = typed == null ? CompositeOperationSupport.find(cause) : null;
+		if (refusal != null) {
+			return new RunTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							loadStepId(),
+							engine + " did not start: " + refusal.getMessage(),
+							cause);
+		}
 		if (typed == null) {
 			return new RunTerminalException(
 							IntegrityTerminalException.Category.EXECUTION,
@@ -1070,6 +1128,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	/** A slice that didn't start under the admission barrier: its engine named, and the category of a cause that has one, such as a bad items line. */
 	RunTerminalException barrierStartFailure(final Exception cause, final String engine) {
 		final var typed = RunTerminalException.find(cause);
+		final var refusal = typed == null ? CompositeOperationSupport.find(cause) : null;
+		if (refusal != null) {
+			return new RunTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							loadStepId(),
+							"Step " + loadStepId() + " did not start: " + engine + ": " + refusal.getMessage(),
+							cause);
+		}
 		return new RunTerminalException(
 						typed != null ? typed.category() : IntegrityTerminalException.Category.EXECUTION,
 						loadStepId(),

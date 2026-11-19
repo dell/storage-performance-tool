@@ -24,9 +24,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -70,6 +72,19 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	@Override
 	protected boolean controlsOperations(final int contextIndex) {
 		return contextIndex == (ctxConfigs == null || ctxConfigs.isEmpty() ? BASE_CONFIG : ctxConfigs.size() - 1);
+	}
+
+	/** A mixed step makes READ operations for a GET weight and CREATE operations for a PUT weight. */
+	@Override
+	protected Set<OpType> compositeCheckedOpTypes(final Config config) {
+		final Set<OpType> opTypes = EnumSet.noneOf(OpType.class);
+		if (config.intVal("load-op-weights-get") > 0) {
+			opTypes.add(OpType.READ);
+		}
+		if (config.intVal("load-op-weights-put") > 0) {
+			opTypes.add(OpType.CREATE);
+		}
+		return opTypes;
 	}
 
 	@Override
