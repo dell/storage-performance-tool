@@ -244,17 +244,85 @@ public class ConfigUtilTest {
 	}
 
 	@Test
-	public void testMergeAndCopyOfKeepAnUnmodifiableViewWithoutReadingItsBackingList() {
-		// only text, as in Sol's fixture: a second read of the list runs past the copies
-		for (final List<Object> elements : List.<List<Object>> of(List.of("a", "b"), List.of("a", element()))) {
-			final SelfAppendingList backing = new SelfAppendingList(elements);
-			final List<Object> view = Collections.unmodifiableList(backing);
-			for (final boolean viaMerge : List.of(true, false)) {
-				final Object copied = assertDoesNotThrow(() -> copyNames(view, viaMerge));
+	@SuppressWarnings("unchecked")
+	public void testMergeAndCopyOfReadAnUnmodifiableViewOnce() {
+		for (final boolean viaMerge : List.of(true, false)) {
+			// only text, as in Sol's fixture: a second read of the list would run past the copies
+			final SelfAppendingList textBacking = new SelfAppendingList(List.of("a", "b"));
+			final List<Object> textView = Collections.unmodifiableList(textBacking);
 
-				assertSame(view, copied);
-			}
-			assertEquals(0, backing.calls.get());
+			assertSame(textView, assertDoesNotThrow(() -> copyNames(textView, viaMerge)));
+			assertEquals(1, textBacking.calls.get());
+
+			final Map<String, Object> element = element();
+			final SelfAppendingList mapBacking = new SelfAppendingList(List.of("a", element));
+			final List<Object> mapView = Collections.unmodifiableList(mapBacking);
+
+			final List<Object> copied = assertDoesNotThrow(() -> copyNames(mapView, viaMerge));
+
+			assertEquals(1, mapBacking.calls.get());
+			assertSame(mapView.getClass(), copied.getClass());
+			assertNotSame(mapView, copied);
+			assertEquals(List.of("a", element(), "appended"), copied); // the one snapshot, taken after the append
+			((Map<String, Object>) copied.get(1)).put("value", "changed");
+			assertEquals("first", element.get("value"));
+		}
+	}
+
+	/** A backing list whose whole read throws, as an extension's list may. */
+	static final class UnreadableList extends AbstractList<Object> {
+
+		final AtomicInteger calls = new AtomicInteger();
+
+		@Override
+		public Object get(final int index) {
+			calls.incrementAndGet();
+			return element();
+		}
+
+		@Override
+		public int size() {
+			calls.incrementAndGet();
+			return 1;
+		}
+
+		@Override
+		public Object[] toArray() {
+			calls.incrementAndGet();
+			throw new IllegalStateException("not readable");
+		}
+	}
+
+	@Test
+	public void testMergeAndCopyOfKeepAnUnmodifiableViewWhoseBackingListCannotBeRead() {
+		final UnreadableList backing = new UnreadableList();
+		final List<Object> view = Collections.unmodifiableList(backing);
+		final Config defaults = new BasicConfig(
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", view)));
+
+		// startup merges the extension defaults
+		final Config merged = assertDoesNotThrow(() -> ConfigUtil.merge("-", List.of(defaults)));
+		final Config copied = assertDoesNotThrow(() -> ConfigUtil.copyOf(defaults));
+
+		assertSame(view, merged.listVal("names"));
+		assertSame(view, copied.listVal("names"));
+		assertEquals(2, backing.calls.get());
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void testARunsChangeToAMapInAnUnmodifiableViewStaysOutOfTheNextRun() {
+		final List<Object> view = Collections.unmodifiableList(new ArrayList<>(List.of("a", element())));
+		final Config node = new BasicConfig(
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", view)));
+		for (final boolean viaMerge : List.of(true, false)) {
+			final Config firstRun = viaMerge ? ConfigUtil.merge("-", List.of(node)) : ConfigUtil.copyOf(node);
+			((Map<String, Object>) firstRun.<Object> listVal("names").get(1)).put("value", "changed by run 1");
+
+			final Config secondRun = viaMerge ? ConfigUtil.merge("-", List.of(node)) : ConfigUtil.copyOf(node);
+
+			assertEquals(List.of("a", element()), secondRun.listVal("names"));
+			assertEquals(List.of("a", element()), node.listVal("names"));
 		}
 	}
 
@@ -276,6 +344,8 @@ public class ConfigUtilTest {
 						() -> List.copyOf(List.of("p", "q", "r", element())),
 						() -> Stream.<Object> of("p", element()).toList(),
 						() -> Stream.<Object> of("p", null, element()).toList(),
+						() -> Collections.unmodifiableList(new ArrayList<>(List.of("p", element()))),
+						() -> Collections.unmodifiableList(new LinkedList<>(List.of("p", element()))),
 						() -> Collections.singletonList(element()),
 						() -> new Vector<>(List.of("p", "q", element())),
 						() -> new CopyOnWriteArrayList<>(List.of("p", element())));
@@ -338,8 +408,6 @@ public class ConfigUtilTest {
 						() -> new ArrayList<Object>(List.of("p", element())).subList(0, 2),
 						() -> Collections.synchronizedList(new ArrayList<>(List.of("p", element()))),
 						() -> Collections.checkedList(new ArrayList<>(List.of("p", element())), Object.class),
-						() -> Collections.unmodifiableList(new ArrayList<>(List.of("p", element()))),
-						() -> Collections.unmodifiableList(new LinkedList<>(List.of("p", element()))),
 						() -> new ArrayList<Object>(List.of("p", element())) {},
 						() -> new LinkedList<Object>(List.of("p", element())) {},
 						() -> Collections.emptyList());
@@ -605,12 +673,15 @@ public class ConfigUtilTest {
 	}
 
 	@Test
+	@SuppressWarnings("JdkObsolete") // a view over a list that is not RandomAccess
 	public void testMergeAndCopyOfKeepAReadOnlyListOfUnchangeableValues() {
 		final List<List<?>> lists = List.of(
 						List.of("p", "q"),
 						List.of("p", "q", "r"),
 						List.of(),
 						Stream.of("p", null).toList(),
+						Collections.unmodifiableList(new ArrayList<>(List.of("p"))),
+						Collections.unmodifiableList(new LinkedList<>(List.of("p", List.of("q")))),
 						Collections.singletonList("p"),
 						List.of(List.of("p"), 1));
 		for (final List<?> source : lists) {

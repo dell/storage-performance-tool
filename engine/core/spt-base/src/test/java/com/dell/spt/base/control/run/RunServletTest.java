@@ -24,9 +24,11 @@ import java.io.IOException;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.servlet.http.Part;
@@ -176,6 +178,26 @@ class RunServletTest {
 		for (final var config : List.of(node, withoutDefaults, withDefaults)) {
 			final List<Object> interfaces = config.listVal("storage-net-interfaces");
 			assertThrows(ArrayStoreException.class, () -> interfaces.set(0, 1));
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void aRunsChangeToAMapInAReadOnlyListStaysOutOfTheNextRun() throws Exception {
+		final var node = TestConfigBuilder.configWithMapSettings();
+		final Map<String, Object> entry = new LinkedHashMap<>(Map.of("name", "eth0"));
+		node.val("storage-net-interfaces", Collections.unmodifiableList(new ArrayList<>(List.of(entry))));
+
+		for (final boolean withDefaults : List.of(false, true)) {
+			final var firstRun = RunServlet.mergeIncomingWithLocalConfig(
+							withDefaults ? defaultsPart("{}\n") : null, mockResponse, node);
+			((Map<String, Object>) firstRun.<Object> listVal("storage-net-interfaces").get(0)).put("name", "changed");
+
+			final var secondRun = RunServlet.mergeIncomingWithLocalConfig(
+							withDefaults ? defaultsPart("{}\n") : null, mockResponse, node);
+
+			assertEquals(List.of(Map.of("name", "eth0")), secondRun.listVal("storage-net-interfaces"));
+			assertEquals(Map.of("name", "eth0"), entry);
 		}
 	}
 

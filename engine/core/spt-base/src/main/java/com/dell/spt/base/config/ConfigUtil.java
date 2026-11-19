@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
@@ -314,12 +315,12 @@ public interface ConfigUtil {
 	static Config merge(final String pathSep, final List<Config> configs) {
 		final var schema = configs.stream()
 						.map(Config::schema)
-						.map(ConfigUtil::copyMap)
+						.map(schema0 -> copyMap(schema0, pathSep, ""))
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		final var configTree = configs.stream()
 						.map(Config::deepToMap)
-						.map(ConfigUtil::copyMap)
+						.map(tree -> copyMap(tree, pathSep, ""))
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		return new BasicConfig(pathSep, schema, configTree);
@@ -332,17 +333,18 @@ public interface ConfigUtil {
 	 * also sets it on the original.
 	 */
 	static Config copyOf(final Config config) {
-		return new BasicConfig(config.pathSep(), config.schema(), copyMap(Config.deepToMap(config)));
+		return new BasicConfig(config.pathSep(), config.schema(), copyMap(Config.deepToMap(config), config.pathSep(), ""));
 	}
 
 	/**
 	 * Copies a map and what it nests. A {@link HashMap}, {@link LinkedHashMap} or {@link TreeMap} is
 	 * copied into a map of its own class, because a schema may name that class as a setting's type.
 	 * Any other map becomes a {@link LinkedHashMap}, which keeps its order: headers go out in the
-	 * order written. Every map is copied, because a configuration branch is a map too.
+	 * order written. Every map is copied, because a configuration branch is a map too. The path,
+	 * joined with the separator, names the map's setting in a warning.
 	 */
 	@SuppressWarnings("unchecked")
-	private static <K> Map<K, Object> copyMap(final Map<K, ?> map) {
+	private static <K> Map<K, Object> copyMap(final Map<K, ?> map, final String pathSep, final String path) {
 		final Map<K, Object> copy;
 		if (map.getClass() == HashMap.class) {
 			copy = new HashMap<>();
@@ -351,16 +353,16 @@ public interface ConfigUtil {
 		} else {
 			copy = new LinkedHashMap<>();
 		}
-		map.forEach((key, value) -> copy.put(key, copyValue(value)));
+		map.forEach((key, value) -> copy.put(key, copyValue(value, pathSep, path.isEmpty() ? String.valueOf(key) : path + pathSep + key)));
 		return copy;
 	}
 
-	private static Object copyValue(final Object value) {
+	private static Object copyValue(final Object value, final String pathSep, final String path) {
 		if (value instanceof Map<?, ?> map) {
-			return copyMap(map);
+			return copyMap(map, pathSep, path);
 		}
 		if (value instanceof List<?> list) {
-			return copyList(list);
+			return copyList(list, pathSep, path);
 		}
 		return value;
 	}
@@ -386,26 +388,39 @@ public interface ConfigUtil {
 	 *       before. Otherwise a {@link List#of} list is rebuilt with {@link List#copyOf}, which refuses
 	 *       nulls as it does, a {@link Stream#toList} list, which allows nulls, with that method, and a
 	 *       singleton with that method.
+	 *   <li>A {@link Collections#unmodifiableList} view is kept when no element copies to a new value.
+	 *       Otherwise it becomes an unmodifiable view over a new {@link ArrayList}, or a {@link
+	 *       LinkedList} when the source view is not {@link java.util.RandomAccess}, which keeps the
+	 *       view's class. A rebuilt view allows nulls and serializes as its new backing list does. When
+	 *       reading the view throws, it is kept, as before, with one warning naming the setting.
 	 * </ul>
 	 * Each of these routes reads the source once, into an array with {@code toArray}, and builds the
 	 * copy and any comparison from that array; a rebuilt {@link List#of} list without nulls is also
-	 * asked whether it holds null, to tell it from a {@link Stream#toList} one. A JDK mutable list that another thread writes while the
-	 * copy runs can still fail the copy or give a torn one, as any unsynchronized read of it can.
+	 * asked whether it holds null, to tell it from a {@link Stream#toList} one. For a view that read
+	 * is the backing list's own {@code toArray}, code the copy does not own: it is accepted because
+	 * sharing the view would share the maps and lists inside it, and a view is read-only only through
+	 * itself, so its owner can still write the backing list. A list, a view's backing list included,
+	 * that another thread writes while the copy runs can still fail the copy or give a torn one, as
+	 * any unsynchronized read of it can.
 	 *
 	 * <p>Every other list is kept by reference, with its elements, as a configuration did before: this
 	 * copy calls no constructor or method of it. That covers subclasses, an extension's own list
-	 * classes, sub-lists, and {@link Collections#unmodifiableList}, {@link Collections#synchronizedList}
-	 * and {@link Collections#checkedList} views. A view's backing list can be of any class and is not
-	 * the copy's to read: a view is read-only only through itself, and its owner can still write the
-	 * backing list. A map or list held in one is shared with the original.
+	 * classes, sub-lists, and {@link Collections#synchronizedList} and {@link Collections#checkedList}
+	 * views: rebuilding a checked view needs its element type, which only reflection can read. A map
+	 * or list held in one is shared with the original.
+	 *
+	 * @param path the setting's path, joined with {@code pathSep}, for a warning
 	 */
 	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
-	private static Object copyList(final List<?> list) {
+	private static Object copyList(final List<?> list, final String pathSep, final String path) {
 		final Class<?> listClass = list.getClass();
+		final boolean view = listClass == JdkListClasses.UNMODIFIABLE_RANDOM_ACCESS
+						|| listClass == JdkListClasses.UNMODIFIABLE_SEQUENTIAL;
 		final boolean immutable = listClass == JdkListClasses.LIST_OF_ONE_OR_TWO
 						|| listClass == JdkListClasses.LIST_OF_N
 						|| listClass == JdkListClasses.SINGLETON;
 		if (!immutable
+						&& !view
 						&& listClass != ArrayList.class
 						&& listClass != LinkedList.class
 						&& listClass != Vector.class
@@ -413,15 +428,32 @@ public interface ConfigUtil {
 						&& listClass != JdkListClasses.ARRAYS_AS_LIST) {
 			return list;
 		}
-		final Object[] elements = list.toArray();
+		final Object[] elements;
+		if (view) {
+			try {
+				elements = list.toArray();
+			} catch (final RuntimeException e) {
+				Loggers.ERR.warn(
+								"Sharing the read-only list {} with the run: its backing list could not be read: {}",
+								path.isEmpty() ? listClass.getName() : path, e.toString());
+				return list;
+			}
+		} else {
+			elements = list.toArray();
+		}
 		final Object[] copies = new Object[elements.length];
 		boolean changed = false;
 		for (int i = 0; i < elements.length; i++) {
-			copies[i] = copyValue(elements[i]);
+			copies[i] = copyValue(elements[i], pathSep, path + "[" + i + "]");
 			changed |= copies[i] != elements[i];
 		}
-		if (immutable && !changed) {
+		if ((immutable || view) && !changed) {
 			return list;
+		}
+		if (view) {
+			return Collections.unmodifiableList(listClass == JdkListClasses.UNMODIFIABLE_RANDOM_ACCESS
+							? new ArrayList<>(Arrays.asList(copies))
+							: new LinkedList<>(Arrays.asList(copies)));
 		}
 		if (listClass == ArrayList.class) {
 			return new ArrayList<>(Arrays.asList(copies));
