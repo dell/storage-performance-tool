@@ -2214,6 +2214,10 @@ func checkPortConflicts(cmd *cobra.Command) error {
 	if !result.Success {
 		switch result.Strategy {
 		case portcheck.StrategyAbort:
+			if errors.Is(result.Error, portcheck.ErrPortConflictUnattended) {
+				logger.Info("Port conflict left unresolved without an operator decision", "port", sptPort)
+				return errors.New(result.Message)
+			}
 			logger.Info("User chose to abort due to port conflict")
 			fmt.Printf("\n❌ Operation cancelled - port %s conflict not resolved\n", sptPort)
 			return fmt.Errorf("operation cancelled by user")

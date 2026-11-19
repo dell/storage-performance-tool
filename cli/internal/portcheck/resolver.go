@@ -7,8 +7,11 @@ package portcheck
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +33,14 @@ const (
 	StrategyRetry ResolutionStrategy = "retry"
 )
 
+// ErrPortConflictUnattended marks a conflict abort made because nobody could
+// choose a resolution: no terminal, or end of input at the prompt. The result's
+// Message says what holds the port and what to do about it.
+var ErrPortConflictUnattended = errors.New("port conflict left unresolved without an operator decision")
+
+// errNoOperatorAnswer reports that no resolution choice can be obtained.
+var errNoOperatorAnswer = errors.New("no operator answer available")
+
 // ResolutionResult contains the outcome of conflict resolution
 type ResolutionResult struct {
 	Strategy   ResolutionStrategy
@@ -47,6 +58,8 @@ type ConflictResolver struct {
 	forceMode       bool
 	interactiveMode bool
 	clock           Clock
+	// input supplies the operator's answers; nil means os.Stdin.
+	input io.Reader
 }
 
 // NewConflictResolver creates a new conflict resolver
@@ -109,6 +122,9 @@ func (r *ConflictResolver) CheckAndResolveConflicts(ctx context.Context) (*Resol
 
 	// Present conflict information and get user choice
 	strategy, err := r.presentConflictAndGetChoice(ctx, serviceInfo)
+	if errors.Is(err, errNoOperatorAnswer) {
+		return r.abortUnattended(serviceInfo), nil
+	}
 	if err != nil {
 		return &ResolutionResult{
 			Success: false,
@@ -125,8 +141,13 @@ func (r *ConflictResolver) presentConflictAndGetChoice(ctx context.Context, info
 	// Display conflict information
 	r.displayConflictInfo(info)
 
-	// If not interactive (headless mode), default to graceful approach
 	if !r.interactiveMode {
+		// Stopping an engine may end another user's live run, so it takes
+		// --force or an operator's choice.
+		if info.IsSpt {
+			logging.LogInfo("portcheck", "non-interactive mode: leaving the SPT engine alone")
+			return StrategyAbort, errNoOperatorAnswer
+		}
 		logging.LogInfo("portcheck", "non-interactive mode: defaulting to graceful resolution")
 		fmt.Printf("[CONFLICT] Non-interactive mode: attempting graceful resolution for port %s\n", r.Port)
 		return StrategyGracefulStop, nil
@@ -134,6 +155,46 @@ func (r *ConflictResolver) presentConflictAndGetChoice(ctx context.Context, info
 
 	// Interactive mode - present options and get user choice
 	return r.getUserChoice(ctx, info)
+}
+
+// abortUnattended ends a conflict nobody can decide, leaving the holder alone.
+func (r *ConflictResolver) abortUnattended(info *ServiceInfo) *ResolutionResult {
+	return &ResolutionResult{
+		Strategy: StrategyAbort,
+		Success:  false,
+		Message:  r.unattendedAbortMessage(info),
+		Error:    ErrPortConflictUnattended,
+	}
+}
+
+func (r *ConflictResolver) unattendedAbortMessage(info *ServiceInfo) string {
+	if info.IsSpt {
+		return fmt.Sprintf("port %s is held by an SPT engine%s; it was left running. "+
+			"Stop that engine, or use --api-port with --rmi-registry-port to run alongside it",
+			r.Port, engineRunDetails(info.Status))
+	}
+	return fmt.Sprintf("port %s is in use (%s); it was left running. "+
+		"Free the port, or use --api-port with --rmi-registry-port to run alongside it",
+		r.Port, info.GetServiceDescription())
+}
+
+// engineRunDetails formats the engine's run ID and state for a message. Only a
+// numeric ID is an engine's: container detection fills in a placeholder.
+func engineRunDetails(status *SptStatus) string {
+	if status == nil {
+		return ""
+	}
+	var details []string
+	if _, err := strconv.ParseInt(status.RunID, 10, 64); err == nil {
+		details = append(details, "run "+status.RunID)
+	}
+	if status.State != "" {
+		details = append(details, "state "+status.State)
+	}
+	if len(details) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(details, ", ") + ")"
 }
 
 // displayConflictInfo shows information about the port conflict
@@ -184,9 +245,17 @@ func (r *ConflictResolver) getUserChoice(_ context.Context, info *ServiceInfo) (
 	fmt.Printf("\nWhat would you like to do? ")
 
 	// Read user input
-	reader := bufio.NewReader(os.Stdin)
+	var source io.Reader = os.Stdin
+	if r.input != nil {
+		source = r.input
+	}
+	reader := bufio.NewReader(source)
 	for {
 		input, err := reader.ReadString('\n')
+		if errors.Is(err, io.EOF) {
+			fmt.Println()
+			return StrategyAbort, errNoOperatorAnswer
+		}
 		if err != nil {
 			return StrategyAbort, fmt.Errorf("failed to read user input: %w", err)
 		}

@@ -71,15 +71,6 @@ func (c *SptAPIClient) SetExpectedRunID(runID int64) {
 	c.expectedRunID = runID
 }
 
-// sptRunResponse represents the JSON response from /run endpoint
-type sptRunResponse struct {
-	RunID     string                 `json:"runId"`
-	Status    string                 `json:"status"`
-	StartTime string                 `json:"startTimeISO"`
-	EndTime   string                 `json:"endTimeISO,omitempty"`
-	Config    map[string]interface{} `json:"config,omitempty"`
-}
-
 // sptMetricsResponse represents a simplified metrics response
 type sptMetricsResponse struct {
 	LastUpdateTimeISO string  `json:"lastUpdateTimeISO"`
@@ -102,35 +93,26 @@ func GetSptStatus(ctx context.Context, baseURL string) (*SptStatus, error) {
 func (c *SptAPIClient) GetStatus(ctx context.Context) (*SptStatus, error) {
 	status := &SptStatus{}
 
-	// First try to get run information
-	runInfo, err := c.getRunInfo(ctx)
-	if err != nil {
-		logging.LogDebug("portcheck", "failed to get run info from Spt API",
+	// /status answers without a run ID; GET /run would need one in If-Match.
+	detail, err := c.getStatusDetail(ctx)
+	if err == nil {
+		status.State = detail.State
+		if detail.RunID != 0 {
+			status.RunID = strconv.FormatInt(detail.RunID, 10)
+		}
+	} else {
+		logging.LogDebug("portcheck", "failed to get status from Spt API",
 			"baseURL", c.BaseURL,
 			"error", err.Error())
+		runID, active, headErr := c.activeRunID(ctx)
+		if headErr != nil {
+			logging.LogDebug("portcheck", "failed to get the active run from Spt API",
+				"baseURL", c.BaseURL,
+				"error", headErr.Error())
+		} else if active {
+			status.RunID = strconv.FormatInt(runID, 10)
+		}
 		// Continue - we might still get some info from metrics
-	}
-
-	if runInfo != nil {
-		status.RunID = runInfo.RunID
-		status.State = runInfo.Status
-
-		// Parse timestamps if available
-		if runInfo.StartTime != "" {
-			if startTime, parseErr := time.Parse(time.RFC3339, runInfo.StartTime); parseErr == nil {
-				status.StartTime = startTime
-				status.Duration = time.Since(startTime)
-			}
-		}
-
-		if runInfo.EndTime != "" {
-			if endTime, parseErr := time.Parse(time.RFC3339, runInfo.EndTime); parseErr == nil {
-				status.EndTime = endTime
-				if !status.StartTime.IsZero() {
-					status.Duration = endTime.Sub(status.StartTime)
-				}
-			}
-		}
 	}
 
 	// Try to get metrics for performance data
@@ -167,45 +149,31 @@ func (c *SptAPIClient) GetStatus(ctx context.Context) (*SptStatus, error) {
 	return status, nil
 }
 
-// getRunInfo retrieves information from the /run endpoint
-func (c *SptAPIClient) getRunInfo(ctx context.Context) (*sptRunResponse, error) {
-	url := c.BaseURL + "/run"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// activeRunID reads the active run's ID from HEAD /run, which needs no If-Match:
+// 200 carries the ID in ETag and 204 means no run is active.
+func (c *SptAPIClient) activeRunID(ctx context.Context) (runID int64, active bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.BaseURL+endpointRun, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return 0, false, fmt.Errorf("create run request: %w", err)
 	}
-
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return 0, false, fmt.Errorf("run request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	// Handle different status codes
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// Test is running or completed
-		break
-	case http.StatusNotFound:
-		// No test running
-		return nil, fmt.Errorf("no test currently running")
+		etag := strings.TrimSpace(resp.Header.Get("ETag"))
+		runID, err = strconv.ParseInt(etag, 10, 64)
+		if err != nil || runID <= 0 {
+			return 0, false, fmt.Errorf("active run has an invalid ETag %q", etag)
+		}
+		return runID, true, nil
+	case http.StatusNoContent:
+		return 0, false, nil
 	default:
-		// Unexpected status
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return 0, false, fmt.Errorf("run status %d", resp.StatusCode)
 	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	var runInfo sptRunResponse
-	if err := json.Unmarshal(body, &runInfo); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
-	}
-
-	return &runInfo, nil
 }
 
 // getMetrics retrieves performance metrics from /metrics endpoint
