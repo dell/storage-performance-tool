@@ -13,6 +13,7 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 	private int partNumber;
 	private CompositeDataOperation<I> parent;
 	private int retryCount;
+	private boolean failureRecorded;
 
 	public PartialDataOperationImpl() {
 		super();
@@ -37,6 +38,7 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 		this.partNumber = other.partNumber;
 		this.parent = other.parent;
 		this.retryCount = other.retryCount;
+		this.failureRecorded = other.failureRecorded;
 	}
 
 	@Override
@@ -63,6 +65,16 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 	@Override
 	public final void incrementRetryCount() {
 		retryCount++;
+	}
+
+	@Override
+	public final void markFailureRecorded() {
+		failureRecorded = true;
+	}
+
+	@Override
+	public final boolean failureRecorded() {
+		return failureRecorded;
 	}
 
 	@Override

@@ -310,6 +310,51 @@ final class CompositeReadLastRangeTest {
 	}
 
 	/**
+	 * Two ranges run out of retries with different failures. The last attempt of the first ends, then
+	 * the last attempt of the second ends, and its completion is held before it records its failure,
+	 * as when its result's output is slow. The first range's completion then finds every range
+	 * settled, but must not end the read: the held completion records the failure the read ends with,
+	 * the second's, as when the two complete one after the other, and the read's status stays that.
+	 */
+	@Test
+	void aRangeOutOfRetriesWhoseCompletionIsHeldDecidesTheReadsFailure() throws Exception {
+		final var finishing = finishingDriver();
+		final var read = composite(OpType.READ, "held");
+		final var ranges = initialPass(read);
+		dispatchAll(ranges);
+		final var refused = ranges.get(0);
+		final var unavailable = ranges.get(1);
+		complete(read, ranges.get(2), Operation.Status.SUCC);
+		for (var retry = 0; retry < CoopStorageDriverBase.MAX_PART_RETRIES; retry++) {
+			complete(read, refused, Operation.Status.RESP_FAIL_AUTH);
+			dispatch(refused);
+			complete(read, unavailable, Operation.Status.RESP_FAIL_SVC);
+			dispatch(unavailable);
+		}
+		assertEquals(0, finishing.finished.get(), "both ranges are retried");
+
+		// Both last attempts end (each settles), and the second's completion is held.
+		refused.status(Operation.Status.RESP_FAIL_AUTH);
+		read.markSubTaskCompleted();
+		unavailable.status(Operation.Status.RESP_FAIL_SVC);
+		read.markSubTaskCompleted();
+		assertTrue(read.allSubOperationsDone());
+		assertTrue(driver.handleCompleted(op(refused)));
+
+		assertEquals(0, finishing.finished.get(), "the held range has not recorded its failure");
+		assertEquals(1, resultsOf(read).size(), () -> "only the initial pass while a range is held: " + resultsOf(read));
+
+		assertTrue(driver.handleCompleted(op(unavailable)));
+
+		assertEquals(1, finishing.finished.get());
+		assertTrue(driver.childOpQueue.isEmpty(), () -> "queued: " + driver.childOpQueue);
+		assertEndedOnce(read, Operation.Status.RESP_FAIL_SVC);
+		assertEquals(Operation.Status.RESP_FAIL_SVC, read.status(), "the read's status stays the one it ended with");
+		assertEquals(Operation.Status.RESP_FAIL_SVC.name(), read.get("mpuFailure"));
+		assertNothingOutstanding();
+	}
+
+	/**
 	 * A recycled read is the result of the ended one. It has no parts and counts them all done, and
 	 * neither ends at its initial pass nor before its own last range, over several rounds.
 	 */

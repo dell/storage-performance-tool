@@ -1196,6 +1196,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			for (var retries = range.retryCount(); retries < MAX_PART_RETRIES; retries++) {
 				range.incrementRetryCount();
 			}
+			range.markFailureRecorded();
 			// The range never reaches finishResponse(), which settles a sent range.
 			compositeOp.markSubTaskCompleted();
 		}
@@ -1328,6 +1329,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						if (rangeRead || parentOp.get("mpuFailure") == null) {
 							parentOp.put("mpuFailure", op.status().name());
 						}
+						// Only now may the parent end: a sibling's completion that finds this part
+						// settled but unmarked waits for this one, which records the final status.
+						subOp.markFailureRecorded();
 						if (rangeRead) {
 							// Range reads are stateless, so there is nothing to abort: the other
 							// ranges finish, and finalization reports this failure.
@@ -1368,8 +1372,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/**
 	 * Ends {@code compositeRead}, whose ranges have all ended, on the thread that completed the last
 	 * of them, if this driver's finalization of a read sends no request. Queued, that finalization
-	 * would wait behind the ranges of every read admitted meanwhile, so the read would be counted
-	 * late, and a stop would refuse it and leave the read unresolved with all its bytes transferred.
+	 * would wait behind the work already queued ahead of it, so the read would be counted late, and
+	 * a stop would refuse it and leave the read unresolved with all its bytes transferred.
 	 *
 	 * <p>The read already owns its dispatched attempt, so an implementation neither takes a permit
 	 * nor crosses {@link #beginDispatch}, which refuses once admission closes. It sets the read's
@@ -1413,12 +1417,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			return false;
 		}
 		// A part settles before its completion takes the parent's lock, so a count of zero can include a
-		// failed part that is about to retry. Once a part has recorded a failure, the only failed parts
-		// that can end the operation are those out of retries.
-		final boolean failed = parentOp.get("mpuFailure") != null;
+		// failed part whose completion has not run yet: one about to retry, or one out of retries whose
+		// failure is not recorded yet. Only a failed part whose completion recorded its failure lets the
+		// operation end, so the operation ends with the failure recorded last, which then stays.
 		for (final var rawSubOp : parentOp.subOperations()) {
 			final var subOp = (PartialOperation) rawSubOp;
-			if (subOp.status() != Operation.Status.SUCC && !(failed && subOp.retryCount() >= MAX_PART_RETRIES)) {
+			if (subOp.status() != Operation.Status.SUCC && !subOp.failureRecorded()) {
 				return false;
 			}
 		}
