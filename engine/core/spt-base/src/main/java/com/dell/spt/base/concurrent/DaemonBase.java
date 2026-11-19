@@ -1,11 +1,12 @@
 package com.dell.spt.base.concurrent;
 
+import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import org.apache.logging.log4j.Level;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
@@ -14,7 +15,6 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 */
 public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 
-	private static final Logger LOG = Logger.getLogger(DaemonBase.class.getSimpleName());
 	private static final Queue<WeakReference<Daemon>> REGISTRY = new ConcurrentLinkedQueue<>();
 
 	private final WeakReference<Daemon> daemonRef;
@@ -43,7 +43,11 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 					if (cause instanceof InterruptedException) {
 						ex = (InterruptedException) cause;
 					}
-					LOG.log(Level.WARNING, "Failed to close the daemon instance", cause);
+					// Log4j, not java.util.logging: at JVM exit java.util.logging's own shutdown handling races
+					// this hook and loses the line, while Log4j is still up and only queues the event. The class
+					// name, not the daemon: its toString() may run on a half-built object.
+					LogUtil.trace(Loggers.ERR, Level.WARN, cause, "Failed to close the daemon instance {}",
+									daemon.getClass().getName());
 				}
 			}
 			REGISTRY.clear();
