@@ -26,8 +26,13 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 
 	@Override
 	public final void close() throws IOException {
-		super.close();
-		REGISTRY.remove(daemonRef);
+		try {
+			super.close();
+		} finally {
+			if (isClosed()) {
+				REGISTRY.remove(daemonRef);
+			}
+		}
 	}
 
 	public static void closeAll() {

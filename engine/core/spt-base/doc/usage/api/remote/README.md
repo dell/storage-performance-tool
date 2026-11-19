@@ -431,7 +431,7 @@ Notes:
 - The request returns immediately; shutdown proceeds asynchronously.
 - During the linger period the server may still respond to `/status` with a terminal state (e.g., `STOPPED`).
 - If you need to stop only the current run (but keep the node up), use `DELETE /run` with the `If-Match: <run_id>` header.
-- A worker's slice runs until its entry stops it, and only a count limit stops a worker's slice on its own. Otherwise, if the entry has gone, the worker logs a warning and stops and closes the slice 120 seconds after the entry's last call. A live entry that made no call to the slice for that long loses it, and its run fails. `POST /shutdown`, the end of the process, or `DELETE /run` with its run id stop the slice sooner, and are the only way to stop a slice whose entry died before its first call after starting it.
+- A worker's slice runs until its entry stops it, and only a count limit stops a worker's slice on its own. Otherwise, if the entry has gone, the worker logs a warning and stops and closes the slice 120 seconds after the entry's last call. A live entry that made no call to the slice for that long loses it. An entry whose call to a slice's await, stop or close fails in RMI, or finds the slice released (`NoSuchObjectException`), has lost that slice too: it logs an error naming the node, closes the rest of the step, and fails the step, because that worker's last operations are missing from the totals. `POST /shutdown`, the end of the process, or `DELETE /run` with its run id stop the slice sooner, and are the only way to stop a slice whose entry died before its first call after starting it.
 
 ### 4.2.6 Status
 
