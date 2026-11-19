@@ -4,6 +4,12 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactoryImpl;
+import com.dell.spt.base.logging.Loggers;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -11,11 +17,16 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -168,5 +179,178 @@ public class ListingHelperTest {
 		for (final DataItem item : rest) {
 			assertEquals(expected.get(item.name()).longValue(), item.offset(), "offset of " + item.name());
 		}
+	}
+
+	private static final String SKIP_LOG_START = "Listing \"";
+
+	private static Path writeFile(final Path dir, final String name, final int size) throws Exception {
+		return Files.write(dir.resolve(name), new byte[size]);
+	}
+
+	private static Map<String, Long> sizesByName(final List<DataItem> listed) throws Exception {
+		final Map<String, Long> sizes = new HashMap<>();
+		for (final DataItem item : listed) {
+			assertNull(sizes.put(item.name(), item.size()), "listed twice: " + item.name());
+		}
+		return sizes;
+	}
+
+	/** Makes a FIFO with mkfifo, or returns null when the host cannot. */
+	private static Path makeFifo(final Path dir, final String name) {
+		final Path fifo = dir.resolve(name);
+		try {
+			final Process p = new ProcessBuilder("mkfifo", fifo.toString()).redirectErrorStream(true).start();
+			if (p.waitFor(10, TimeUnit.SECONDS) && p.exitValue() == 0 && Files.exists(fifo)) {
+				return fifo;
+			}
+			p.destroyForcibly();
+		} catch (final Exception e) {
+			// no mkfifo on this host
+		}
+		return null;
+	}
+
+	@Test
+	public void listYieldsRegularFilesOnlyFollowingLinks(@TempDir final Path dir) throws Exception {
+		final Path f0 = writeFile(dir, "f0", 5);
+		final Path f1 = writeFile(dir, "f1", 0);
+		final Path f2 = writeFile(dir, "f2", 3);
+		final Path sub = Files.createDirectory(dir.resolve("sub"));
+		writeFile(sub, "inner0", 7);
+		Files.createDirectory(dir.resolve("emp"));
+		final Path lnf = Files.createSymbolicLink(dir.resolve("lnf"), f2);
+		Files.createSymbolicLink(dir.resolve("lnd"), sub);
+		Files.createSymbolicLink(dir.resolve("dang"), dir.resolve("missing"));
+		Files.createSymbolicLink(dir.resolve("loop"), dir.resolve("loop"));
+
+		final Map<String, Long> expected = new HashMap<>();
+		expected.put(f0.toFile().getAbsolutePath(), 5L);
+		expected.put(f1.toFile().getAbsolutePath(), 0L);
+		expected.put(f2.toFile().getAbsolutePath(), 3L);
+		// a symbolic link to a regular file is kept under its own name, with the target's size
+		expected.put(lnf.toFile().getAbsolutePath(), 3L);
+
+		assertEquals(expected, sizesByName(listAll(dir, null, null)));
+	}
+
+	@Test
+	public void listSkipsFifo(@TempDir final Path dir) throws Exception {
+		final Path fifo = makeFifo(dir, "fifo");
+		Assumptions.assumeTrue(fifo != null, "mkfifo is not available");
+		final Path f0 = writeFile(dir, "f0", 4);
+		assertEquals(Map.of(f0.toFile().getAbsolutePath(), 4L), sizesByName(listAll(dir, null, null)));
+	}
+
+	@Test
+	public void listKeepsFileSize(@TempDir final Path dir) throws Exception {
+		final Path f = writeFile(dir, "f", 12345);
+		final List<DataItem> listed = listAll(dir, null, null);
+		assertEquals(1, listed.size());
+		assertEquals(Files.size(f), listed.get(0).size());
+	}
+
+	@Test
+	public void listSkipsEntryRemovedBeforeItsAttributesAreRead(@TempDir final Path dir) throws Exception {
+		final Path f0 = writeFile(dir, "f0", 1);
+		final Path f1 = writeFile(dir, "f1", 2);
+		// "gone" was in the directory when it was read, and is removed before its attributes are read
+		final List<Path> entries = List.of(f0, dir.resolve("gone"), f1);
+		final List<DataItem> listed = ListingHelper.listEntries(
+						new DataItemFactoryImpl<>(), entries, dir.toString(), 0, RADIX, null, 2);
+		assertEquals(List.of(f0.toFile().getAbsolutePath(), f1.toFile().getAbsolutePath()),
+						listed.stream().map(Item::name).toList());
+	}
+
+	@Test
+	public void listPagesOverSkippedEntries(@TempDir final Path dir) throws Exception {
+		final Path f0 = writeFile(dir, "f0", 1);
+		final Path f1 = writeFile(dir, "f1", 2);
+		final Path f2 = writeFile(dir, "f2", 3);
+		final Path sub = Files.createDirectory(dir.resolve("sub"));
+		final Path emp = Files.createDirectory(dir.resolve("emp"));
+		final List<Path> entries = List.of(f0, sub, f1, emp, f2);
+		final DataItemFactoryImpl<DataItem> factory = new DataItemFactoryImpl<>();
+
+		// skipped entries do not count toward the page size
+		final List<DataItem> first = ListingHelper.listEntries(factory, entries, dir.toString(), 0, RADIX, null, 2);
+		assertEquals(List.of(f0.toFile().getAbsolutePath(), f1.toFile().getAbsolutePath()),
+						first.stream().map(Item::name).toList());
+		final List<DataItem> second = ListingHelper.listEntries(factory, entries, dir.toString(), 0, RADIX, first.get(1), 2);
+		assertEquals(List.of(f2.toFile().getAbsolutePath()), second.stream().map(Item::name).toList());
+		final List<DataItem> third = ListingHelper.listEntries(factory, entries, dir.toString(), 0, RADIX, second.get(0), 2);
+		assertTrue(third.isEmpty());
+
+		// the same through a real directory, whatever order it lists in
+		final Set<String> paged = new HashSet<>();
+		DataItem last = null;
+		for (int page = 0; page < 10; page++) {
+			final List<DataItem> items = ListingHelper.list(factory, dir.toString(), null, RADIX, last, 1);
+			if (items.isEmpty()) {
+				break;
+			}
+			assertEquals(1, items.size());
+			assertTrue(paged.add(items.get(0).name()), "listed twice: " + items.get(0).name());
+			last = items.get(0);
+		}
+		assertEquals(Set.of(f0.toFile().getAbsolutePath(), f1.toFile().getAbsolutePath(), f2.toFile().getAbsolutePath()),
+						paged);
+	}
+
+	@Test
+	public void listLogsOneLinePerListingThatSkips(@TempDir final Path dir, @TempDir final Path cleanDir) throws Exception {
+		writeFile(dir, "f0", 1);
+		writeFile(dir, "f1", 1);
+		Files.createDirectory(dir.resolve("sub"));
+		Files.createDirectory(dir.resolve("emp"));
+		writeFile(cleanDir, "g0", 1);
+
+		final List<String> lines = captureSkipLines(() -> {
+			try {
+				assertEquals(2, listAll(dir, null, null).size());
+				assertEquals(1, listAll(cleanDir, null, null).size());
+				assertEquals(2, listAll(dir, null, null).size());
+			} catch (final Exception e) {
+				throw new AssertionError(e);
+			}
+			return null;
+		});
+		assertEquals(2, lines.size(), lines::toString);
+		final String expectedLine = "Listing \"" + dir + "\" skipped entries that are not regular files, such as "
+						+ "subdirectories: 2. A listing covers the regular files of one directory level";
+		assertEquals(List.of(expectedLine, expectedLine), lines);
+	}
+
+	private static List<String> captureSkipLines(final Supplier<Void> action) throws Exception {
+		final List<String> lines = Collections.synchronizedList(new ArrayList<>());
+		final String endMarker = "ListingHelperTest end " + System.nanoTime();
+		final AtomicBoolean drained = new AtomicBoolean();
+		final AbstractAppender appender = new AbstractAppender(
+						"listingHelperTestSkipLines", null, null, true, Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final LogEvent event) {
+				final String message = event.getMessage().getFormattedMessage();
+				if (message.equals(endMarker)) {
+					drained.set(true);
+				} else if (message.startsWith(SKIP_LOG_START)) {
+					lines.add(message);
+				}
+			}
+		};
+		appender.start();
+		final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			action.get();
+			Loggers.MSG.info(endMarker);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (!drained.get() && System.nanoTime() < deadline) {
+				Thread.sleep(10);
+			}
+			assertTrue(drained.get(), "the end marker was not logged");
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+		return new ArrayList<>(lines);
 	}
 }
