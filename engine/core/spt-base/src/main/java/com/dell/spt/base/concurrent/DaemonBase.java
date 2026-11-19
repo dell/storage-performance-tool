@@ -1,5 +1,7 @@
 package com.dell.spt.base.concurrent;
 
+import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -7,8 +9,8 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Predicate;
-import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.apache.logging.log4j.Level;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
@@ -94,7 +96,7 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 		/** A log handler that throws must not stop the release of the other daemons. */
 		private static void warnReleaseFailed(final Throwable cause) {
 			try {
-				LOG.log(Level.WARNING, "Failed to release a daemon whose construction failed", cause);
+				LOG.log(java.util.logging.Level.WARNING, "Failed to release a daemon whose construction failed", cause);
 			} catch (final Throwable logFailure) {
 				if (logFailure != cause) {
 					cause.addSuppressed(logFailure);
@@ -155,7 +157,11 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 					if (cause instanceof InterruptedException) {
 						ex = (InterruptedException) cause;
 					}
-					LOG.log(Level.WARNING, "Failed to close the daemon instance", cause);
+					// Log4j, not java.util.logging: at JVM exit java.util.logging's own shutdown handling races
+					// this hook and loses the line, while Log4j is still up and only queues the event. The class
+					// name, not the daemon: its toString() may run on a half-built object.
+					LogUtil.trace(Loggers.ERR, Level.WARN, cause, "Failed to close the daemon instance {}",
+									daemon.getClass().getName());
 				}
 			}
 			REGISTRY.clear();

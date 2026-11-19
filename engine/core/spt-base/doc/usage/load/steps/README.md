@@ -21,6 +21,7 @@ See also the [output reference](../../output#111-load-step-id)
 It runs several sub-steps, such as writes and reads, with a relative weight for each. The
 achieved mix follows the weights only in some cases; see the
 [weighted load step](../../../../../../extensions/load-steps/weighted/README.md#when-the-mix-follows-the-weights).
+Ids set in the step's appended contexts decide where its results go: see [Step ids](../../../../../../extensions/load-steps/weighted/README.md#step-ids).
 
 
 ### 2.3. Pipeline

@@ -469,15 +469,17 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// Stopping the worker interrupts it, which cancels the request.
 			awaitRequest(execute(op));
 
-			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes).
-			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
+			// Only a request that writes the item's data counts its size: a READ counts what it reads,
+			// a DELETE or STAT moves no body, and a multipart upload's bytes are counted by its parts.
+			final OpType opType = op.type();
+			if ((opType == OpType.CREATE || opType == OpType.UPDATE) && mpuOp == null && op.item() instanceof DataItem) {
 				final DataItem dataItem = (DataItem) op.item();
 				if (op instanceof DataOperation) {
 					((DataOperation) op).countBytesDone(dataItem.size());
 				}
 			}
 
-			if (op.type() != OpType.READ) {
+			if (opType != OpType.READ) {
 				if (op instanceof DeleteRequestOperation) {
 					finishStandaloneDeleteOperation(op);
 				} else {

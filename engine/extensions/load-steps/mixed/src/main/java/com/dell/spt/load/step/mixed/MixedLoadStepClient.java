@@ -65,6 +65,12 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return true;
 	}
 
+	/** The slice takes the step id's flag from the merge of the contexts, which a marked context would change. */
+	@Override
+	protected boolean marksSetContextStepIds() {
+		return false;
+	}
+
 	/** A mixed step writes new objects only through PUTs; its item input file is its GET/STAT pool. */
 	@Override
 	protected TargetBucketStep targetBucketStep() {
