@@ -330,7 +330,8 @@ func TestForceVerificationWaitEndsWithTheContext(t *testing.T) {
 
 	result := within(t, func() *ResolutionResult {
 		return resolver.executeForceStop(ctx, &ServiceInfo{IsListening: true, IsSpt: true, APIConfirmed: true,
-			Address: net.ParseIP("127.0.0.1"), Container: &ContainerInfo{ID: "holder", Name: "holder"}})
+			Status: &SptStatus{RunID: "41", RunActive: true}, Address: net.ParseIP("127.0.0.1"),
+			Container: &ContainerInfo{ID: "holder", Name: "holder"}})
 	})
 	if result.Success || !errors.Is(result.Error, context.Canceled) || !strings.Contains(result.Message, "Stopped waiting") {
 		t.Fatalf("result = %+v, want the cancelled wait", result)

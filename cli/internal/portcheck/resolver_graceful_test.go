@@ -223,7 +223,7 @@ func TestGracefulStopReportsARefusedShutdown(t *testing.T) {
 	defer resolver.Close()
 
 	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
-	if result.Success || !strings.Contains(result.Message, "Failed to shut down the SPT engine") {
+	if result.Success || !strings.Contains(result.Message, "The request to shut down the SPT engine failed") {
 		t.Fatalf("result = %+v, want the refused shutdown reported", result)
 	}
 	if clock.polls != 0 {

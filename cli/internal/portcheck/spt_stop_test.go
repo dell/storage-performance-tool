@@ -73,7 +73,7 @@ func TestStopRunWithoutRunIDSendsNothing(t *testing.T) {
 // sends exactly that ID back.
 func TestStopActiveRunStopsTheReportedRun(t *testing.T) {
 	engine := newFakeEngine(t, 1763456789012)
-	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
+	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{ID: 1763456789012})
 	runID := stopped.ID
 	if err != nil || runID != 1763456789012 {
 		t.Fatalf("StopActiveRun() = %d, %v, want 1763456789012, nil", runID, err)
@@ -91,7 +91,7 @@ func TestStopActiveRunStopsTheReportedRun(t *testing.T) {
 // The remote API accepts any non-zero signed run ID.
 func TestStopActiveRunAcceptsANegativeRunID(t *testing.T) {
 	engine := newFakeEngine(t, -7)
-	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
+	stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{ID: -7})
 	runID := stopped.ID
 	if err != nil || runID != -7 {
 		t.Fatalf("StopActiveRun() = %d, %v, want -7, nil", runID, err)
@@ -141,9 +141,11 @@ func TestStopActiveRunWhenTheRunChanges(t *testing.T) {
 			wantErr: "run 41 was replaced by run 42",
 		},
 		{
-			name:     "404: the same run is still active",
+			// The engine answers 200 to a stop of its active run, so this is a
+			// later run that reuses the ID.
+			name:     "404: the same run ID is still active",
 			onDelete: func(_ *fakeEngine, w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) },
-			wantErr:  "did not accept the stop of its active run 41",
+			wantErr:  "it is a later run that reuses the ID",
 		},
 		{
 			name:     "500",
@@ -155,7 +157,7 @@ func TestStopActiveRunWhenTheRunChanges(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			engine := newFakeEngine(t, 41)
 			engine.onDelete = tt.onDelete
-			stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{})
+			stopped, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background(), RunExecution{ID: 41})
 			runID := stopped.ID
 			if runID != 0 {
 				t.Errorf("StopActiveRun() run = %d, want 0", runID)

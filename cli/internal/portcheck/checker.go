@@ -134,6 +134,17 @@ func (p *PortChecker) answeringAddress(ctx context.Context) (net.IP, bool) {
 	return remote.IP, true
 }
 
+// apiBaseURL is the URL of an SPT API on the port at ip, the address a probe
+// connection reached. Without one, as from a test's connection that has no TCP
+// address, it is the checker's host.
+func (p *PortChecker) apiBaseURL(ip net.IP) string {
+	host := p.Host
+	if ip != nil {
+		host = ip.String()
+	}
+	return "http://" + net.JoinHostPort(host, p.Port)
+}
+
 // dialPort opens a probe connection to address.
 func (p *PortChecker) dialPort(ctx context.Context, address string) (net.Conn, error) {
 	if p.dial != nil {
@@ -198,8 +209,9 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 	info.Address = address
 	logging.LogInfo("portcheck", "port is in use, identifying service", "port", p.Port)
 
-	// Try to identify if it's Spt by making HTTP requests
-	sptStatus, err := p.detectSptService(ctx)
+	// Try to identify if it's Spt by making HTTP requests, to the address that
+	// answered and not to the host name, which may name another address too.
+	sptStatus, err := p.detectSptService(ctx, p.apiBaseURL(address))
 	if err != nil {
 		logging.LogDebug("portcheck", "failed to detect Spt service via HTTP",
 			"port", p.Port,
@@ -227,8 +239,7 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 
 // detectSptService attempts to identify if the service is Spt
 // Returns SptStatus if Spt is detected, nil if not
-func (p *PortChecker) detectSptService(ctx context.Context) (*SptStatus, error) {
-	baseURL := fmt.Sprintf("http://%s:%s", p.Host, p.Port)
+func (p *PortChecker) detectSptService(ctx context.Context, baseURL string) (*SptStatus, error) {
 	if status := p.probeMetricsJSON(ctx, baseURL); status != nil {
 		return status, nil
 	}
@@ -521,9 +532,18 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 // force stop would remove. When more than one covers it, none is shown and
 // info.Publishers names them. When the SPT API answered, only an SPT engine node
 // container is shown: another publisher cannot be matched to that engine.
+//
+// A daemon not reached through a local socket may list another host's
+// containers, so none of them is shown or named.
 func identifyContainer(ctx context.Context, finder *DockerContainerFinder, port string, info *ServiceInfo) error {
+	if !finder.DaemonIsLocal() {
+		logging.LogDebug("portcheck", "the Docker daemon is not reached through a local socket; no container is shown",
+			"port", port)
+		return nil
+	}
 	publishers, err := finder.FindPublishers(ctx, info.Address, port)
 	if err != nil {
+		info.ListingFailed = true
 		return err
 	}
 	switch {

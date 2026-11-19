@@ -176,3 +176,51 @@ func TestForceRemovesAnEngineOnEachCoveringBinding(t *testing.T) {
 		})
 	}
 }
+
+// engineOn starts a fake engine with runID on host:port.
+func engineOn(t *testing.T, host, port string, runID int64) *fakeEngine {
+	t.Helper()
+	listener, err := net.Listen("tcp4", net.JoinHostPort(host, port))
+	if err != nil {
+		t.Skipf("cannot listen on %s:%s: %v", host, port, err)
+	}
+	engine := &fakeEngine{t: t, runID: runID}
+	engine.server = httptest.NewUnstartedServer(http.HandlerFunc(engine.serve))
+	engine.server.Listener = listener
+	engine.server.Start()
+	t.Cleanup(engine.server.Close)
+	return engine
+}
+
+// Sol High 3, the address part: the probe reached the engine on 127.0.0.1, and
+// the host name also names 127.0.0.2, where another engine answers. Detection
+// and the actions send every HTTP request to 127.0.0.1, the address the probe
+// reached, so the other engine receives nothing.
+func TestEveryRequestGoesToTheProbedAddress(t *testing.T) {
+	probed := newFakeEngine(t, 41)
+	port := probed.port()
+	other := engineOn(t, "127.0.0.2", port, 42)
+	resolver := probed.resolver(true, false)
+	resolver.checker.Host = "127.0.0.2"
+	resolver.checker.dial = dialInTurn(port, "127.0.0.1")
+	resolver.clock = &pollClock{onPoll: func(int) {
+		probed.server.Close()
+		other.server.Close()
+	}}
+	defer resolver.Close()
+
+	var result *ResolutionResult
+	captureStdout(t, func() {
+		result = within(t, func() *ResolutionResult {
+			result, _ := resolver.CheckAndResolveConflicts(context.Background())
+			return result
+		})
+	})
+	if got := other.received(); len(got) != 0 {
+		t.Errorf("the engine on 127.0.0.2 received %+v, want nothing", got)
+	}
+	if !result.Success || !slices.Equal(changesTo(probed.received()), []engineRequest{deleteRequest, shutdownRequest}) {
+		t.Fatalf("result = %+v, probed engine changes %+v; want run 41 stopped and its engine shut down",
+			result, changesTo(probed.received()))
+	}
+}

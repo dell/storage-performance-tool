@@ -62,16 +62,19 @@ func slowDialChecker(port string) *PortChecker {
 	return NewPortCheckerWithOptions(port, "127.0.0.1", time.Minute, time.Minute, 1)
 }
 
-// cancelSoon cancels a context shortly, as Ctrl-C would.
-func cancelSoon(t *testing.T) context.Context {
+// cancelSoon cancels a context shortly, as Ctrl-C would. It returns the time
+// taken before the timer started, so the cancellation is never earlier than
+// 100ms after it, however late the caller runs.
+func cancelSoon(t *testing.T) (context.Context, time.Time) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
 	timer := time.AfterFunc(100*time.Millisecond, cancel)
 	t.Cleanup(func() {
 		timer.Stop()
 		cancel()
 	})
-	return ctx
+	return ctx, start
 }
 
 // assertEndedByCancellation checks that the probe waited for the cancellation at
@@ -91,8 +94,7 @@ func assertEndedByCancellation(t *testing.T, ctx context.Context, start time.Tim
 // The connection test that detection uses ends with the context.
 func TestDetectionDialEndsWithTheContext(t *testing.T) {
 	checker := slowDialChecker(fullQueueListener(t))
-	ctx := cancelSoon(t)
-	start := time.Now()
+	ctx, start := cancelSoon(t)
 	if within(t, func() bool { return checker.isListening(ctx) }) {
 		t.Error("isListening() = true; the dial should have been waiting on the full queue")
 	}
@@ -105,8 +107,7 @@ func TestDetectionDialEndsWithTheContext(t *testing.T) {
 func TestIsPortHeldDialEndsWithTheContext(t *testing.T) {
 	checker := slowDialChecker(fullQueueListener(t))
 	checker.bind = func(string) (net.Listener, error) { return nil, syscall.EACCES }
-	ctx := cancelSoon(t)
-	start := time.Now()
+	ctx, start := cancelSoon(t)
 	if !within(t, func() bool { return checker.IsPortHeld(ctx) }) {
 		t.Error("IsPortHeld() = false for a probe the context ended")
 	}
@@ -120,9 +121,8 @@ func TestForceVerificationEndsWithTheContext(t *testing.T) {
 	checker := slowDialChecker(port)
 	checker.newFinder = func() (*DockerContainerFinder, error) { return newFakeFinder(api), nil }
 	resolver := &ConflictResolver{Port: port, checker: checker, dockerFinder: newFakeFinder(api), clock: &pollClock{}}
-	ctx := cancelSoon(t)
+	ctx, start := cancelSoon(t)
 
-	start := time.Now()
 	result := within(t, func() *ResolutionResult { return resolver.verifyResolution(ctx, StrategyForceStop) })
 	if result.Success || !strings.Contains(result.Message, "Interrupted while checking port") ||
 		!errors.Is(result.Error, context.Canceled) {

@@ -52,6 +52,9 @@ type fakeEngine struct {
 	// GET /status reports for an active run.
 	statusState string
 	statusRunID int64
+	// hangUp, when set and true for a request, closes its connection with no
+	// answer, as an engine that resets or ends the connection does.
+	hangUp func(engine *fakeEngine, r *http.Request) bool
 }
 
 func newFakeEngine(t *testing.T, runID int64) *fakeEngine {
@@ -67,6 +70,10 @@ func (e *fakeEngine) serve(w http.ResponseWriter, r *http.Request) {
 	defer e.mu.Unlock()
 	ifMatch := r.Header.Get("If-Match")
 	e.requests = append(e.requests, engineRequest{r.Method, r.URL.Path, ifMatch})
+	if e.hangUp != nil && e.hangUp(e, r) {
+		hangUp(e.t, w)
+		return
+	}
 	switch {
 	case r.URL.Path == "/metrics/json" && r.Method == http.MethodGet:
 		fmt.Fprint(w, `[{"metrics_schema":5,"scope":"node","role":"entry","node_id":"n0","op_type":"none"}]`)
@@ -181,4 +188,14 @@ func assertReadOnly(t *testing.T, requests []engineRequest) {
 			t.Errorf("engine received %s %s, want reads only", request.method, request.path)
 		}
 	}
+}
+
+// hangUp closes the request's connection without an answer.
+func hangUp(t *testing.T, w http.ResponseWriter) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		t.Errorf("hijack: %v", err)
+		return
+	}
+	_ = conn.Close()
 }

@@ -245,11 +245,11 @@ func TestForceRemovesTheShownEngineAfterALingeringShutdown(t *testing.T) {
 // Sol's recovered-after-stop and Fable P1: under --force, /status fails once, at
 // the stop, and then reads a later run with the same ID. The start time detection
 // saw still tells it apart, so the engine is not shut down. A run stopped with
-// nothing but its ID known is not shut down while it is still active either.
+// only its ID known is not shut down while it is still active either.
 func TestForceShutdownKeepsWhatDetectionSaw(t *testing.T) {
 	for _, tt := range []struct{ name, shownSince, want string }{
 		{"start time shown", firstStart, "is a later run that reuses the ID"},
-		{"no start time shown", "", "nothing but its ID was known when it was stopped"},
+		{"no start time shown", "", "its /status could not be read when it was stopped, and no start time was shown for it"},
 	} {
 		shownSince := tt.shownSince
 		t.Run(tt.name, func(t *testing.T) {
