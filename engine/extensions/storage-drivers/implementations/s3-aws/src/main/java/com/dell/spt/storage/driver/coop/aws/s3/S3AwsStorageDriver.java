@@ -995,7 +995,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final var prefix = rel.substring(slashPos + 1);
 				// A path ending in a slash already holds the separator, and an empty prefix ("/bucket/")
 				// is such a path. The key stays whole either way: "/k" under "a" is the key "a//k".
-				final var objectKey = rel.charAt(rel.length() - 1) == '/' ? prefix + key : prefix + "/" + key;
+				// An empty name is the other case: splitting a listed "/bucket/a//" leaves the path
+				// "/bucket/a/" and no name, and only the separator join gives back the key "a//".
+				final var objectKey = !key.isEmpty() && rel.charAt(rel.length() - 1) == '/'
+								? prefix + key
+								: prefix + "/" + key;
 				return new String[]{bucket, objectKey
 				};
 			}

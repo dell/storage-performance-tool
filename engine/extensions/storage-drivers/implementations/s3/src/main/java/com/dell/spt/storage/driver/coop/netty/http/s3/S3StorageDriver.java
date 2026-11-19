@@ -1216,7 +1216,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} finally {
 			xml.setLength(0);
 		}
-		final var uri = SLASH + manifestBucketName(deleteRequest.bucket()) + '?' + DELETE_QUERY;
+		final var bucket = deleteRequest.bucket();
+		final String uri;
+		xml.setLength(0);
+		try {
+			uri = xml.append(SLASH).append(bucket, 0, manifestBucketEnd(bucket)).append('?').append(DELETE_QUERY).toString();
+		} finally {
+			xml.setLength(0);
+		}
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1242,7 +1249,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var uri = THREAD_LOCAL_STRB.get();
 		uri.setLength(0);
 		try {
-			uri.append(SLASH).append(manifestBucketName(bucket)).append(SLASH);
+			uri.append(SLASH).append(bucket, 0, manifestBucketEnd(bucket)).append(SLASH);
 			appendPercentEncodedPath(uri, target.key());
 			return uri.toString();
 		} finally {
@@ -1251,12 +1258,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Returns a manifest bucket without the one trailing slash it may be written with, so that
-	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does.
+	 * Returns where a manifest bucket's name ends: before the one trailing slash it may be written
+	 * with, so that {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that
+	 * row does. Callers append that span, so a trailing slash costs no extra string.
 	 */
-	private static String manifestBucketName(final String bucket) {
+	private static int manifestBucketEnd(final String bucket) {
 		final int last = bucket.length() - 1;
-		return last > 0 && bucket.charAt(last) == '/' ? bucket.substring(0, last) : bucket;
+		return last > 0 && bucket.charAt(last) == '/' ? last : bucket.length();
 	}
 
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
@@ -1271,7 +1279,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		final String bucketPath = SLASH + manifestBucketName(target.bucket());
+		// The same key prepare() stores the bucket's credential under.
+		final String bucketPath = requestNewPathCacheKey(SLASH + target.bucket());
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,

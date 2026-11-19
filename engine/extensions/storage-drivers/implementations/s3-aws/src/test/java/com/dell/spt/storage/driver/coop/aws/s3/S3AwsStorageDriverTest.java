@@ -4383,6 +4383,19 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
+		void aNameHoldingAnEmptySegmentStaysWholeUnderAnOutputPathEndingInASlash() throws Exception {
+			assertEquals("b|/k", resolved(build(OpType.CREATE, new DataItemImpl("/b//k", 0, 1), null, "/b/")));
+			assertEquals("b|x//k", resolved(build(OpType.CREATE, new DataItemImpl("/b/x//k", 0, 1), null, "/b/x/")));
+		}
+
+		@Test
+		void listedKeysEndingInAnEmptySegmentDeleteTheListedKey() throws Exception {
+			// Splitting "/bucket/a//" leaves the path "/bucket/a/" and an empty name; "/" leaves "/bucket/".
+			final List<Item> items = listed("/bucket", null, false, "a//", "/", "a/");
+			assertEquals(List.of("bucket|a//", "bucket|/", "bucket|a/"), deleteRequests("/bucket", items));
+		}
+
+		@Test
 		void pathsWithoutATrailingSlashResolveAsBefore() throws Exception {
 			assertEquals("foo|k0", resolved(build(OpType.CREATE, new DataItemImpl("k0", 0, 1), null, "/foo")));
 			assertEquals("foo|out/k0", resolved(build(OpType.CREATE, new DataItemImpl("k0", 0, 1), null, "/foo/out")));
