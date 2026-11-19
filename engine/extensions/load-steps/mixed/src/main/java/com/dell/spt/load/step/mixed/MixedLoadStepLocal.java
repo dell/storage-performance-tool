@@ -549,7 +549,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 	/**
 	 * Refuses, at step start, a ranges threshold that would make composite READ or CREATE operations
-	 * on a driver without composite support, and closes that driver, which no step context owns yet.
+	 * on a driver without composite support. The caller's {@link ContextInitResources} closes that
+	 * driver, which no step context owns yet.
 	 */
 	static void requireCompositeSupport(
 					final StorageDriver driver, final boolean reads, final boolean creates, final long sizeThreshold) {
@@ -561,11 +562,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 				CompositeOperationSupport.requireSupport(driver, OpType.CREATE, sizeThreshold);
 			}
 		} catch (final IllegalConfigurationException e) {
-			try {
-				driver.close();
-			} catch (final Throwable closeFailure) {
-				e.addSuppressed(closeFailure);
-			}
 			throw new IllegalStateException("Failed to initialize storage driver", e);
 		}
 	}
