@@ -69,7 +69,7 @@ Standalone targets with a version ID use exact-version deletion; targets without
 ordinary current-key semantics, including delete-marker behavior on versioned buckets. The SDK
 response is reconciled by key and version before the logical request completes, so partial and
 malformed batch responses cannot be reported as full success. SDK-managed retries remain inside
-the single logical request future and timing sample.
+the single logical request future and timing sample (see [Client Retries](#client-retries)).
 
 The standalone DELETE timing client records native CRT HTTP-stream `send-start` and `receive-start`
 timestamps for both header-only `DeleteObject` and body-bearing `DeleteObjects`. The SDK wrapper
@@ -262,7 +262,32 @@ All methods throw `IOException` with detailed error messages. Common error scena
 - Network connectivity issues
 - Bucket/object not found
 - Permission denied
-- Service throttling
+- Service throttling (see [Client Retries](#client-retries))
+
+### Client Retries
+
+The AWS clients retry a 5xx answer themselves, before SPT sees the result. The driver builds its CRT
+transfer client with no retry configuration, so the SDK's default retries apply to every request
+type it sends: PUT, multipart part, GET, HEAD, DELETE and copy. The ordinary SDK client, which
+sends standalone DELETE requests and requests for an exact version ID, retries too.
+
+Measured with AWS SDK 2.57.11 and CRT 0.50.0, the versions SPT 5.17.0 ships, against a loopback
+fake S3 target:
+
+- A CRT client request answered 500, 503 or 504 every time reached the target up to 6 times before
+  SPT saw one failure.
+- That holds while the client's retry budget lasts, about 100 retries per client. Of 60 concurrent
+  PUTs answered 503 on one client, the first 17 reached the target 2 to 6 times each, and the last
+  38 once each.
+- An ordinary SDK client call answered with a 5xx every time reached the target 4 times.
+- A transient 5xx shows as a slower success. A PUT answered 503 once and then 200 was a success on
+  `s3-aws`, after 2 requests at the target and 545 ms; on `s3` it was one failure after 1 request.
+- A 502 answer was not measured.
+
+SPT's own retries (`load.op.retry`, off by default) multiply these: each retry SPT sends goes
+through the client's retries again. The target therefore receives more requests than SPT reports,
+and on a throttling target `s3-aws` reports fewer failures than `s3` and counts the client's
+back-off as latency. Compare `s3-aws` with `s3` only on a target that does not throttle.
 
 ## Testing
 
