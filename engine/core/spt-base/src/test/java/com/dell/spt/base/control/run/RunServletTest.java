@@ -172,6 +172,11 @@ class RunServletTest {
 		assertEquals(List.of("eth0"), withDefaults.listVal("storage-net-interfaces"));
 		assertNotSame(node.listVal("storage-net-interfaces"), withoutDefaults.listVal("storage-net-interfaces"));
 		assertNotSame(node.listVal("storage-net-interfaces"), withDefaults.listVal("storage-net-interfaces"));
+		// a list set from text holds only text, and so does the run's copy of it
+		for (final var config : List.of(node, withoutDefaults, withDefaults)) {
+			final List<Object> interfaces = config.listVal("storage-net-interfaces");
+			assertThrows(ArrayStoreException.class, () -> interfaces.set(0, 1));
+		}
 	}
 
 	/** {@code spt run --engine-override load-op-shuffle=no} posts the value as the text "no". */

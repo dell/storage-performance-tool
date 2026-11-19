@@ -24,6 +24,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.RandomAccess;
 import java.util.TreeMap;
+import java.util.Vector;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.openjdk.nashorn.api.scripting.JSObject;
@@ -365,68 +367,116 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Copies a list into one of the source list's exact class, with its read-only or fixed-size
-	 * behaviour, whose elements are copied as {@link #copyValue} copies them: a schema may name the
-	 * list's class as the setting's type, and the configuration refuses any other class.
+	 * Copies a list whose copy the JDK defines, with its elements copied as {@link #copyValue} copies
+	 * them, and keeps the class, because a schema may name the list's class as the setting's type and
+	 * the configuration refuses any other class. The rule goes by the exact class, before anything
+	 * reads the list.
 	 * <ul>
-	 *   <li>An {@link ArrayList} or a {@link LinkedList} becomes a list of that class.
-	 *   <li>An {@link Arrays#asList} list, such as a list set from text, wraps a new array.
-	 *   <li>A {@link List#of} or {@link List#copyOf} list is rebuilt with {@link List#of}, and a
-	 *       {@link java.util.stream.Stream#toList} list, which allows nulls, with that method.
-	 *   <li>A {@link Collections#unmodifiableList} view wraps a new {@link ArrayList}, or a new {@link
-	 *       LinkedList} when the source is not {@link RandomAccess}, which keeps the view's class.
-	 *   <li>A {@link Collections#singletonList} list is rebuilt with that method.
-	 *   <li>Any other list becomes a new instance of its class, through its public no-argument
-	 *       constructor, holding the copied elements.
+	 *   <li>An {@link ArrayList}, {@link LinkedList}, {@link Vector} or {@link CopyOnWriteArrayList}, of
+	 *       exactly that class, becomes a new list of that class.
+	 *   <li>An {@link Arrays#asList} list, such as a list set from text, becomes one of the same fixed
+	 *       size over a new array of the source array's exact class, so it refuses the same values; see
+	 *       {@link FixedSizeListCopy}.
+	 *   <li>A read-only list, from {@link List#of}, {@link List#copyOf}, {@link Stream#toList},
+	 *       {@link Collections#unmodifiableList} or {@link Collections#singletonList}, is kept when no
+	 *       element copies to a new value, since nothing can write it: null queries, serialization and
+	 *       the shared empty lists behave as before. Otherwise a {@link List#of} list is rebuilt with
+	 *       {@link List#copyOf}, which refuses nulls as it does, a {@link Stream#toList} list, which
+	 *       allows nulls, with that method, a singleton with that method, and an unmodifiable view over
+	 *       a new {@link ArrayList}, or a {@link LinkedList} when the source is not {@link RandomAccess}.
+	 *       Such a view then allows nulls and serializes as its new backing list does.
 	 * </ul>
-	 * A list that none of these can rebuild is kept by reference, as a configuration did before: for
-	 * example a sub-list, a {@link Collections#synchronizedList} or {@link Collections#checkedList}
-	 * view, or a class without a public no-argument constructor. Its elements are shared too.
+	 * Every other list is kept by reference, with its elements, as a configuration did before: this
+	 * copy calls no constructor or method of it. That covers subclasses, an extension's own list
+	 * classes, sub-lists, and {@link Collections#synchronizedList} and {@link Collections#checkedList}
+	 * views. A map or list held in one is shared with the original. So is an {@link Arrays#asList}
+	 * list whose array cannot hold an element's copy, such as a {@code ConcurrentHashMap[]}, whose maps
+	 * copy to {@link LinkedHashMap}s.
 	 */
 	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
 	private static Object copyList(final List<?> list) {
 		final Class<?> listClass = list.getClass();
-		final Object[] elements = list.stream().map(ConfigUtil::copyValue).toArray();
 		if (listClass == ArrayList.class) {
-			return new ArrayList<>(Arrays.asList(elements));
+			return new ArrayList<>(copyElements(list));
 		}
 		if (listClass == LinkedList.class) {
-			return new LinkedList<>(Arrays.asList(elements));
+			return new LinkedList<>(copyElements(list));
 		}
-		if (listClass == Arrays.asList().getClass()) {
-			return Arrays.asList(elements);
+		if (listClass == Vector.class) {
+			return new Vector<>(copyElements(list));
 		}
-		if (listClass == List.of().getClass() || listClass == List.of(1).getClass()) {
-			final List<Object> rebuilt = acceptsNullQuery(list) ? Stream.of(elements).toList() : List.of(elements);
+		if (listClass == CopyOnWriteArrayList.class) {
+			return new CopyOnWriteArrayList<>(copyElements(list));
+		}
+		if (listClass == JdkListClasses.ARRAYS_AS_LIST) {
+			return copyArraysAsList(list);
+		}
+		if (listClass == JdkListClasses.LIST_OF_ONE_OR_TWO || listClass == JdkListClasses.LIST_OF_N) {
+			final List<Object> elements = copyElements(list);
+			if (sameElements(list, elements)) {
+				return list;
+			}
+			final List<Object> rebuilt = refusesNullQuery(list) ? List.copyOf(elements) : elements.stream().toList();
 			return rebuilt.getClass() == listClass ? rebuilt : list;
 		}
-		if (listClass == Collections.unmodifiableList(new ArrayList<>()).getClass()
-						|| listClass == Collections.unmodifiableList(new LinkedList<>()).getClass()) {
-			final List<Object> inner = list instanceof RandomAccess
-							? new ArrayList<>(Arrays.asList(elements))
-							: new LinkedList<>(Arrays.asList(elements));
-			return Collections.unmodifiableList(inner);
+		if (listClass == JdkListClasses.UNMODIFIABLE_RANDOM_ACCESS || listClass == JdkListClasses.UNMODIFIABLE_SEQUENTIAL) {
+			final List<Object> elements = copyElements(list);
+			if (sameElements(list, elements)) {
+				return list;
+			}
+			return Collections.unmodifiableList(listClass == JdkListClasses.UNMODIFIABLE_RANDOM_ACCESS ? elements : new LinkedList<>(elements));
 		}
-		if (listClass == Collections.singletonList(null).getClass()) {
-			return Collections.singletonList(elements[0]);
+		if (listClass == JdkListClasses.SINGLETON) {
+			final Object element = list.get(0);
+			final Object copy = copyValue(element);
+			return copy == element ? list : Collections.singletonList(copy);
 		}
-		try {
-			@SuppressWarnings("unchecked")
-			final List<Object> copy = (List<Object>) listClass.getConstructor().newInstance();
-			copy.addAll(Arrays.asList(elements));
-			return copy;
-		} catch (final ReflectiveOperationException | UnsupportedOperationException e) {
-			return list;
-		}
+		return list;
 	}
 
-	/** Whether the list answers whether it holds null; a {@link List#of} list throws instead. */
-	private static boolean acceptsNullQuery(final List<?> list) {
+	/** The list's elements, each copied as {@link #copyValue} copies it, in a new {@link ArrayList}. */
+	private static List<Object> copyElements(final List<?> list) {
+		final List<Object> copy = new ArrayList<>(list.size());
+		list.forEach(element -> copy.add(copyValue(element)));
+		return copy;
+	}
+
+	/** Whether each copy is the element itself, so the list holds nothing a write could reach. */
+	private static boolean sameElements(final List<?> list, final List<Object> copies) {
+		final var copy = copies.iterator();
+		for (final Object element : list) {
+			if (copy.next() != element) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * An {@link Arrays#asList} list of the source's size over a new array of the source array's class,
+	 * holding the copied elements, or the source itself when that array cannot hold them.
+	 */
+	private static Object copyArraysAsList(final List<?> list) {
+		final List<Object> elements = copyElements(list);
+		return FixedSizeListCopy.emptyLike(list).<Object> map(copy -> {
+			try {
+				for (int i = 0; i < elements.size(); i++) {
+					copy.set(i, elements.get(i));
+				}
+				return copy;
+			} catch (final ArrayStoreException e) {
+				return list;
+			}
+		}).orElse(list);
+	}
+
+	/** Whether the read-only list throws when asked whether it holds null, as a {@link List#of} list does. */
+	private static boolean refusesNullQuery(final List<?> list) {
 		try {
 			var unused = list.contains(null);
-			return true;
-		} catch (final NullPointerException e) {
 			return false;
+		} catch (final NullPointerException e) {
+			return true;
 		}
 	}
 

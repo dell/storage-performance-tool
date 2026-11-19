@@ -14,8 +14,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -26,6 +28,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.Vector;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -273,19 +276,242 @@ public class ConfigUtilTest {
 		}
 	}
 
+	/** Lists of a class the copy does not know: a subclass, a view, or an extension's own class. */
+	@SuppressWarnings("JdkObsolete") // an extension's defaults may hold these classes
+	static Stream<Arguments> listsTheCopyKeeps() {
+		final List<Supplier<List<Object>>> lists = List.of(
+						() -> List.<Object> of("p", "q", element()).subList(0, 3),
+						() -> new ArrayList<Object>(List.of("p", element())).subList(0, 2),
+						() -> Collections.synchronizedList(new ArrayList<>(List.of("p", element()))),
+						() -> Collections.checkedList(new ArrayList<>(List.of("p", element())), Object.class),
+						() -> new ArrayList<Object>(List.of("p", element())) {},
+						() -> new LinkedList<Object>(List.of("p", element())) {},
+						() -> Collections.emptyList());
+		return lists.stream().map(list -> Arguments.of(list.get().getClass().getName(), list));
+	}
+
+	@ParameterizedTest(name = "{0}")
+	@MethodSource("listsTheCopyKeeps")
+	public void testMergeAndCopyOfKeepAListOfAnyOtherClassWithItsElements(final String name, final Supplier<List<Object>> lists) {
+		final List<Object> source = lists.get();
+		final Config config = new BasicConfig(
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
+
+		assertSame(source, ConfigUtil.copyOf(config).listVal("names"));
+		assertSame(source, ConfigUtil.merge("-", List.of(config)).listVal("names"));
+	}
+
+	/** A list whose no-argument constructor seeds an entry, as an extension's list class may. */
+	@SuppressWarnings("JdkObsolete") // Sol's fixture extends LinkedList
+	public static final class SeededList extends LinkedList<Object> {
+
+		static final AtomicInteger CONSTRUCTED = new AtomicInteger();
+		static final AtomicInteger ADDED = new AtomicInteger();
+
+		public SeededList() {
+			CONSTRUCTED.incrementAndGet();
+			super.add("implicit");
+		}
+
+		@Override
+		public boolean add(final Object element) {
+			ADDED.incrementAndGet();
+			return super.add(element);
+		}
+
+		@Override
+		public boolean addAll(final Collection<?> elements) {
+			ADDED.incrementAndGet();
+			return super.addAll(elements);
+		}
+	}
+
+	/** A list that holds at most a fixed number of elements, as an extension's list class may. */
+	public static final class CapacityList extends AbstractList<Object> {
+
+		static final AtomicInteger CONSTRUCTED = new AtomicInteger();
+		static final AtomicInteger ADDED = new AtomicInteger();
+		private final List<Object> elements = new ArrayList<>();
+		private final int capacity;
+
+		public CapacityList() {
+			this(1);
+		}
+
+		CapacityList(final int capacity) {
+			CONSTRUCTED.incrementAndGet();
+			this.capacity = capacity;
+		}
+
+		@Override
+		public Object get(final int index) {
+			return elements.get(index);
+		}
+
+		@Override
+		public int size() {
+			return elements.size();
+		}
+
+		@Override
+		public void add(final int index, final Object element) {
+			ADDED.incrementAndGet();
+			if (elements.size() == capacity) {
+				throw new IllegalStateException("full at " + capacity);
+			}
+			elements.add(index, element);
+		}
+
+		@Override
+		public boolean addAll(final Collection<?> added) {
+			ADDED.incrementAndGet();
+			return super.addAll(added);
+		}
+	}
+
 	@Test
-	public void testCopyOfKeepsAListItCannotRebuild() {
-		final List<List<Object>> kept = List.of(
-						List.<Object> of("p", "q", "r").subList(0, 2),
-						new ArrayList<Object>(List.of("p", "q")).subList(0, 1),
-						Collections.synchronizedList(new ArrayList<>(List.of("p"))),
-						Collections.checkedList(new ArrayList<>(List.of("p")), Object.class));
-		for (final List<Object> source : kept) {
+	public void testMergeAndCopyOfKeepAnExtensionListThatSeedsAnEntry() {
+		final SeededList source = new SeededList();
+		source.add(element());
+		SeededList.CONSTRUCTED.set(0);
+		SeededList.ADDED.set(0);
+
+		assertKeptUntouched(source);
+		assertEquals(0, SeededList.CONSTRUCTED.get());
+		assertEquals(0, SeededList.ADDED.get());
+		assertEquals(List.of("implicit", element()), source);
+	}
+
+	@Test
+	public void testMergeAndCopyOfKeepAnExtensionListWithACapacity() {
+		final CapacityList source = new CapacityList(2);
+		source.add("p");
+		source.add(element());
+		CapacityList.CONSTRUCTED.set(0);
+		CapacityList.ADDED.set(0);
+
+		assertKeptUntouched(source);
+		assertEquals(0, CapacityList.CONSTRUCTED.get());
+		assertEquals(0, CapacityList.ADDED.get());
+		assertEquals(List.of("p", element()), source);
+	}
+
+	/** Asserts that merge and copyOf both keep the list itself, under a schema of List and of its class. */
+	private static void assertKeptUntouched(final List<Object> source) {
+		for (final Class<?> type : List.of(List.class, source.getClass())) {
+			final Config config = new BasicConfig(
+							"-", new HashMap<>(Map.of("names", type)), new HashMap<>(Map.of("names", source)));
+
+			final Object copied = assertDoesNotThrow(() -> ConfigUtil.copyOf(config).listVal("names"));
+			final Object merged = assertDoesNotThrow(() -> ConfigUtil.merge("-", List.of(config)).listVal("names"));
+
+			assertSame(source, copied);
+			assertSame(copied, merged);
+		}
+	}
+
+	@Test
+	@SuppressWarnings("JdkObsolete") // the copy keeps the classes the configuration was given
+	public void testMergeAndCopyOfCopyEachJdkMutableListIntoItsClass() {
+		final List<Supplier<List<Object>>> lists = List.of(
+						() -> new ArrayList<>(List.of("p", element())),
+						() -> new LinkedList<>(List.of("p", element())),
+						() -> new Vector<>(List.of("p", element())),
+						() -> new CopyOnWriteArrayList<>(List.of("p", element())));
+		for (final Supplier<List<Object>> list : lists) {
+			for (final boolean viaMerge : List.of(true, false)) {
+				final List<Object> source = list.get();
+				final Config config = new BasicConfig(
+								"-", new HashMap<>(Map.of("names", source.getClass())), new HashMap<>(Map.of("names", source)));
+
+				final List<Object> copied = (viaMerge ? ConfigUtil.merge("-", List.of(config)) : ConfigUtil.copyOf(config))
+								.listVal("names");
+
+				assertSame(source.getClass(), copied.getClass());
+				assertNotSame(source, copied);
+				assertEquals(List.of("p", element()), copied);
+				copied.add("added");
+				@SuppressWarnings("unchecked")
+				final var element = (Map<String, Object>) copied.get(1);
+				element.put("value", "changed");
+				assertEquals(List.of("p", element()), source);
+			}
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void testMergeAndCopyOfKeepTheArrayTypeOfAFixedSizeList() {
+		final List<String> typed = Arrays.asList("p", "q");
+		final Config fromText = new BasicConfig("-", new HashMap<>(Map.of("names", List.class)), new HashMap<>());
+		fromText.val("names", "p,q"); // a list set from text, as an engine argument is
+		final List<Object> textList = fromText.listVal("names");
+		assertThrows(ArrayStoreException.class, () -> textList.set(0, 42));
+		for (final List<?> source : List.of(typed, textList)) {
+			for (final boolean viaMerge : List.of(true, false)) {
+				final Config config = new BasicConfig(
+								"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
+
+				final List<Object> copied = (viaMerge ? ConfigUtil.merge("-", List.of(config)) : ConfigUtil.copyOf(config))
+								.listVal("names");
+
+				assertSame(source.getClass(), copied.getClass());
+				assertNotSame(source, copied);
+				assertEquals(List.of("p", "q"), copied);
+				assertThrows(ArrayStoreException.class, () -> copied.set(0, 42));
+				assertThrows(UnsupportedOperationException.class, () -> copied.add("r"));
+				copied.set(0, "changed");
+				assertEquals(List.of("p", "q"), source);
+			}
+		}
+		final List<Object> untyped = Arrays.asList("p", element());
+		final Config config = new BasicConfig(
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", untyped)));
+		final List<Object> copied = ConfigUtil.copyOf(config).listVal("names");
+		assertSame(untyped.getClass(), copied.getClass());
+		assertNotSame(untyped.get(1), copied.get(1));
+		copied.set(0, 42); // an Object[] takes any value, as the source's does
+		((Map<String, Object>) copied.get(1)).put("value", "changed");
+		assertEquals(List.of("p", element()), untyped);
+	}
+
+	@Test
+	@SuppressWarnings("JdkObsolete") // a view over a list that is not RandomAccess
+	public void testMergeAndCopyOfKeepAReadOnlyListOfUnchangeableValues() {
+		final List<List<?>> lists = List.of(
+						List.of("p", "q"),
+						List.of("p", "q", "r"),
+						List.of(),
+						Stream.of("p", null).toList(),
+						Collections.unmodifiableList(new ArrayList<>(List.of("p"))),
+						Collections.unmodifiableList(new LinkedList<>(List.of("p"))),
+						Collections.singletonList("p"),
+						List.of(List.of("p"), 1));
+		for (final List<?> source : lists) {
 			final Config config = new BasicConfig(
 							"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
 
 			assertSame(source, ConfigUtil.copyOf(config).listVal("names"));
+			assertSame(source, ConfigUtil.merge("-", List.of(config)).listVal("names"));
 		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	public void testCopyOfAListOfAMutableMapIsADetachedListThatStillRefusesNull() {
+		final Map<String, Object> element = element();
+		final List<Object> source = List.of(element);
+		final Config config = new BasicConfig(
+						"-", new HashMap<>(Map.of("names", List.class)), new HashMap<>(Map.of("names", source)));
+
+		final List<Object> copied = ConfigUtil.copyOf(config).listVal("names");
+
+		assertSame(source.getClass(), copied.getClass());
+		assertNotSame(source, copied);
+		assertEquals(source, copied);
+		assertThrows(NullPointerException.class, () -> copied.contains(null));
+		((Map<String, Object>) copied.get(0)).put("value", "changed");
+		assertEquals("first", element.get("value"));
 	}
 
 	@Test
