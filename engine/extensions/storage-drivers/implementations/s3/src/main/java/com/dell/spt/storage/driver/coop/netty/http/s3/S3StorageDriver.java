@@ -373,7 +373,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final String checksumAlgorithm;
 	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
-	/** The pending aborts that follow failed multipart completions, each with its upload. */
+	/**
+	 * The pending aborts sent outside the child queue, each with its upload: after a failed multipart
+	 * completion, and for an upload whose completion or abort could not be queued.
+	 */
 	private final Map<CompletableFuture<Void>, PendingAbort> multipartCleanupTasks = new ConcurrentHashMap<>();
 	/**
 	 * Per path item input listing, keyed by its path and prefix: the listed keys that are not
@@ -2549,58 +2552,90 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * An abort after a failed completion, still pending: its upload, the completion's status and when
-	 * the abort was scheduled ({@link System#nanoTime()}).
+	 * An abort sent outside the child queue, still pending: its upload, why the upload is aborted (the
+	 * text its multipart lifecycle record starts with) and when the abort was scheduled ({@link
+	 * System#nanoTime()}).
 	 */
-	record PendingAbort(CompositeDataOperation op, Operation.Status completionStatus, long scheduledAtNanos) {}
+	record PendingAbort(CompositeDataOperation op, String reason, long scheduledAtNanos) {}
 
 	void scheduleFailedCompletionAbort(
 					final CompositeDataOperation op, final Operation.Status completionStatus) {
+		scheduleUploadAbort(op, failedCompletionReason(completionStatus),
+						() -> abortAfterFailedCompletion(op, completionStatus));
+	}
+
+	/**
+	 * Sends {@code abort}, the abort of {@code op}'s upload, on a task of its own outside the child
+	 * queue, tracked so that the stop waits for it and the close records it orphaned if it is still
+	 * pending. Once the driver is closing, or when the executor refuses the task, the upload is recorded
+	 * orphaned without the abort being sent. It does not throw.
+	 */
+	private void scheduleUploadAbort(final CompositeDataOperation op, final String reason, final Runnable abort) {
 		final CompletableFuture<Void> cleanupTask = new CompletableFuture<>();
 		// Tracked before the closing flag is read, and the close sets that flag before its snapshot:
 		// a task the snapshot misses sees the flag and sends nothing.
-		multipartCleanupTasks.put(cleanupTask, new PendingAbort(op, completionStatus, System.nanoTime()));
+		multipartCleanupTasks.put(cleanupTask, new PendingAbort(op, reason, System.nanoTime()));
 		if (multipartCleanupClosing) {
 			try {
-				recordAbortNotSent(op, completionStatus, "not sent: the driver is closing");
+				recordAbortNotSent(op, reason, "not sent: the driver is closing");
 			} finally {
 				multipartCleanupTasks.remove(cleanupTask);
 				cleanupTask.complete(null);
 			}
 			return;
 		}
-		ServiceTaskExecutor.VT_EXECUTOR.submit(() -> {
+		try {
+			executeMultipartCleanup(() -> {
+				try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId)) {
+					abort.run();
+					cleanupTask.complete(null);
+				} catch (final Throwable failure) {
+					LogUtil.exception(Level.WARN, failure, "{}: a multipart abort sent outside the queue failed", stepId);
+					cleanupTask.completeExceptionally(failure);
+				} finally {
+					multipartCleanupTasks.remove(cleanupTask);
+				}
+			});
+		} catch (final RuntimeException e) {
+			// The stop must not wait out a task that never runs.
 			try {
-				abortAfterFailedCompletion(op, completionStatus);
-				cleanupTask.complete(null);
-			} catch (final Throwable failure) {
-				LogUtil.exception(Level.WARN, failure, "{}: the abort after a failed multipart completion failed", stepId);
-				cleanupTask.completeExceptionally(failure);
+				recordAbortNotSent(op, reason, "not sent: " + e.getClass().getSimpleName());
 			} finally {
 				multipartCleanupTasks.remove(cleanupTask);
+				cleanupTask.complete(null);
 			}
-		});
+		}
+	}
+
+	/** Scheduling seam for testing executor rejection without replacing the shared executor. */
+	void executeMultipartCleanup(final Runnable task) {
+		ServiceTaskExecutor.VT_EXECUTOR.submit(task);
+	}
+
+	private static String failedCompletionReason(final Operation.Status completionStatus) {
+		return "completion failed: " + completionStatus;
 	}
 
 	/**
-	 * An upload failed without its completion or abort being sent, because that could not be queued,
-	 * is recorded as orphaned: an abort not sent as attempted and failed, as an abort that failed
-	 * before it had a connection is.
+	 * An initiated upload is about to be failed without its completion or abort being sent, because
+	 * that could not be queued: its abort is sent outside the queue, as after a failed completion, so
+	 * the upload does not stay open on the target. It is recorded {@code failed_aborted} when the
+	 * abort succeeds and {@code failed_orphaned} otherwise.
 	 */
 	@Override
 	protected void recordUploadLeftOpen(final O uploadOp, final boolean aborting, final String cause) {
 		final var compositeOp = (CompositeDataOperation) uploadOp;
-		emitMultipartLifecycle(compositeOp, "failed_orphaned", aborting, aborting ? Boolean.FALSE : null,
-						(aborting ? mpuFailure(compositeOp) + "; abort " : "") + "not sent: " + cause);
+		final String reason = aborting
+						? mpuFailure(compositeOp) + "; abort not queued: " + cause
+						: "completion not queued: " + cause;
+		scheduleUploadAbort(compositeOp, reason, () -> abortUpload(compositeOp, reason));
 	}
 
 	/** Records an upload whose abort was not sent, or not answered by the close, as orphaned. */
-	private void recordAbortNotSent(
-					final CompositeDataOperation op, final Operation.Status completionStatus, final String why) {
+	private void recordAbortNotSent(final CompositeDataOperation op, final String reason, final String why) {
 		// The record goes to this step's file from any thread, the closing one among them.
 		try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId)) {
-			emitMultipartLifecycle(op, "failed_orphaned", true, false,
-							"completion failed: " + completionStatus + "; abort " + why);
+			emitMultipartLifecycle(op, "failed_orphaned", true, false, reason + "; abort " + why);
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
 		}
@@ -2608,7 +2643,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * The stop waits here, after any subclass's stop work and before the I/O shuts down, for the aborts
-	 * that follow failed multipart completions, each up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}
+	 * sent outside the queue (after a failed multipart completion, or for an upload whose completion or
+	 * abort could not be queued), each up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}
 	 * after it was scheduled or after the stop began, whichever is earlier. A
 	 * subclass that overrides this calls {@code super.beforeIoShutdown()} last: its own stop work can
 	 * schedule such an abort.
@@ -2684,7 +2720,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		multipartCleanupCloseCapMillis = millis;
 	}
 
-	/** The aborts after failed completions not yet done. */
+	/** The aborts sent outside the queue not yet done. */
 	final int pendingMultipartCleanupTasks() {
 		return (int) pendingCleanupCount();
 	}
@@ -2720,7 +2756,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		});
 		for (final var abort : orphaned) {
-			recordAbortNotSent(abort.op(), abort.completionStatus(), "pending at close");
+			recordAbortNotSent(abort.op(), abort.reason(), "pending at close");
 		}
 		if (!orphaned.isEmpty()) {
 			Loggers.ERR.warn("{}: {} multipart abort(s) still pending at close after {} ms; their uploads are recorded orphaned",
@@ -2730,6 +2766,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	void abortAfterFailedCompletion(
 					final CompositeDataOperation op, final Operation.Status completionStatus) {
+		abortUpload(op, failedCompletionReason(completionStatus));
+	}
+
+	/**
+	 * Sends the abort of {@code op}'s upload on a connection of its own and records the upload {@code
+	 * failed_aborted} or {@code failed_orphaned}, each record's text starting with {@code reason}.
+	 */
+	void abortUpload(final CompositeDataOperation op, final String reason) {
 		FullHttpResponse response = null;
 		try {
 			final HttpRequest abortRequest = abortMultipartUploadRequest(op, helperAuthority);
@@ -2748,15 +2792,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							succeeded ? "failed_aborted" : "failed_orphaned",
 							true,
 							succeeded,
-							"completion failed: " + completionStatus + (succeeded ? "" : "; abort failed"));
+							reason + (succeeded ? "" : "; abort failed"));
 		} catch (final Exception e) {
 			emitMultipartLifecycle(
 							op,
 							"failed_orphaned",
 							true,
 							false,
-							"completion failed: " + completionStatus
-											+ "; abort failed: " + e.getClass().getSimpleName());
+							reason + "; abort failed: " + e.getClass().getSimpleName());
 		} finally {
 			if (response != null) {
 				response.release();

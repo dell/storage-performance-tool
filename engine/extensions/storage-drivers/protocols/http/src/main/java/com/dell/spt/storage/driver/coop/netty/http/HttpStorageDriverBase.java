@@ -830,6 +830,20 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		}
 	};
 
+	/** Also stops the URI-arguments expression worker, which the constructor may have started. */
+	@Override
+	protected void releaseAfterFailedConstruction() {
+		try {
+			if (uriQueryInput != null) {
+				uriQueryInput.close();
+			}
+		} catch (final Exception e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to close the URI-arguments input", stepId);
+		} finally {
+			super.releaseAfterFailedConstruction();
+		}
+	}
+
 	@Override
 	protected void doClose() throws IOException {
 		super.doClose();

@@ -2,8 +2,8 @@
   {
     "metrics_schema": 5,
     "scope": "node",
-    "role": "entry",
-    "node_id": "entry-1",
+    "role": "worker",
+    "node_id": "node-1",
     "run_id": "",
     "sample_ts": "2026-09-15T12:00:00Z",
     "step_id": "",

@@ -4,7 +4,7 @@
 1.1. [JSR-223 Compliance](#11-jsr-223-compliance)<br/>
 1.2. [New Version Changes](#12-new-version-changes)<br/>
 2. [DSL](#2-dsl)<br/>
-2.1. [Step](#21-step)<br/>
+2.1. [Load Step](#21-load-step)<br/>
 2.1.1. [Methods](#211-methods)<br/>
 2.1.2. [Types](#212-types)<br/>
 2.1.2.1. [Basic](#2121-basic)<br/>
@@ -13,11 +13,10 @@
 2.1.2.2.2. [Custom](#21222-custom)<br/>
 2.2. [Values Substitution](#22-values-substitution)<br/>
 2.3. [Non-Blocking Execution](#23-non-blocking-execution)<br/>
-2.4. [Resume Support](#24-resume-support)<br/>
 3. [Examples](#3-examples)<br/>
 3.1. [Javascript](#31-javascript)<br/>
 3.1.1. [External Command](#311-external-command)<br/>
-3.1.2. [Load](#312-load)<br/>
+3.1.2. [Linear Load](#312-linear-load)<br/>
 3.1.3. [Weighted Load](#313-weighted-load)<br/>
 3.1.4. [Pipeline Load](#314-pipeline-load)<br/>
 3.1.5. [S3 persisted-data integrity](#315-s3-persisted-data-integrity)<br/>
@@ -45,7 +44,7 @@ functionality has been removed.
 
 * Parallel step wrapper was deprecated and replaced by the
 [non-blocking execution](#23-non-blocking-execution) methods. New methods allow more flexible
-execution flow control, including the [Resume Support](#24-resume-support).
+execution flow control.
 
 * Command step type was removed. The new [external command](#311-external-command) should be called
 using the particular scenario language method.
@@ -91,13 +90,13 @@ steps.
 
 2. ```start()```
 
-    Start/resume the step execution. Returns the same instance with state changed to *STARTED* if
-    call was successful.
+    Start the step execution. Returns the same instance with state changed to *STARTED* if call was
+    successful.
 
 3. ```stop()```
 
-    Stop (with further resumption capability) the step. Returns the same instance with state changed
-    to *STOPPED* if call was successful.
+    Stop the step. Returns the same instance with state changed to *STOPPED* if call was successful.
+    A stopped step cannot be started again: ```start()``` or ```run()``` on it fails the scenario.
 
 4. ```await()```
 
@@ -111,7 +110,8 @@ steps.
 6. ```run()```
 
     The convenience method for blocking execution flow. Includes ```start()```, ```await()``` and
-    ```close()``` calls sequence. Returns nothing.
+    ```close()``` calls sequence. Returns nothing. A step object runs once: a second ```run()``` on
+    it fails the scenario, so build a step with ```config(config)``` for each run.
 
 #### 2.1.2. Types
 
@@ -314,28 +314,6 @@ step2.close();
 **Note**:
 It's necessary to invoke ```close()``` method if asynchronous execution mode is used.
 
-## 2.4. Resume Support
-
-```start``` and ```stop``` methods may be used as resume and pause accordingly (if the particular
-step implementation supports the pausing/resuming).
-
-```javascript
-var startedLoadStep = Load
-    .config(...)
-    .start()
-
-// do something, wait some time, parse the logs, whatever
-...
-
-var pausedLoadStep = startedLoadStep.stop();
-
-// do something more
-...
-
-var resumedLoadStep = pausedLoadStep.start();
-...
-```
-
 ## 3. Examples
 
 The complete set of the example scenarios is available in the
@@ -392,40 +370,80 @@ type so the call may be included into the call chain.
 
 See also the [weighted load spec](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)
 
+A `load.step.id` set in an appended context decides where that context's results go, and the last
+context's id also names the step: see [Step ids](../../../../../../extensions/load-steps/weighted/README.md#step-ids).
+
 Example:
 
 ```javascript
+var itemsFile = "weighted_load_example.csv";
+
+// create the items for the read sub-step and list them in the items file
+PreconditionLoad
+    .config(
+        {
+            "item" : {
+                "output" : {
+                    "file" : itemsFile
+                }
+            },
+            "load" : {
+                "op" : {
+                    "limit" : {
+                        "count" : 1000
+                    }
+                }
+            }
+        }
+    )
+    .run();
+
 WeightedLoad
-    .append(
+    .config(
         {
             "load" : {
-                "generator" : {
-                    "weight" : 20
-                },
                 "step" : {
                     "limit" : {
                         "time" : "5m"
                     }
                 }
-                "type" : "create"
             }
         }
     )
     .append(
         {
             "load" : {
-                "generator" : {
+                "op" : {
+                    "type" : "create",
+                    "weight" : 20
+                }
+            }
+        }
+    )
+    .append(
+        {
+            "item" : {
+                "input" : {
+                    "file" : itemsFile
+                }
+            },
+            "load" : {
+                "op" : {
                     "recycle" : {
-                        "enabled" : true
+                        "mode" : true
                     },
+                    "type" : "read",
                     "weight" : 80
-                },
-                "type" : "read"
+                }
             }
         }
     )
     .run();
 ```
+
+The step reads its time limit from its own configuration, so set it with the ```config``` method.
+Each ```append``` map applies to one sub-step only. The weights limit
+what each sub-step may offer; see the weighted load spec for when the achieved mix follows them.
 
 The ```config``` method appends the configuration structure element to the step.
 An argument should be a dictionary/map with a structure equivalent to the configuration structure
