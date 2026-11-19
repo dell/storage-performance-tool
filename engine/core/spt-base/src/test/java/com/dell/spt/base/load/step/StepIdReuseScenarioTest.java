@@ -32,8 +32,12 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.script.ScriptEngine;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -47,12 +51,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * Scenarios that give two steps one id, on the real linear step and the dummy mock driver: the second
  * CREATE is refused at its start, before any load, and leaves the first one's files as they were; an
- * UPDATE that reuses an id still runs; and the shipped endurance examples give each step its own id.
+ * UPDATE that reuses an id still runs; the shipped endurance examples give each step its own id; and
+ * a copy of a step that has run gets its own id unless the user set the one it copies.
  */
 @Timeout(180)
 class StepIdReuseScenarioTest {
 
 	private static final long TERMINAL_RETENTION_MILLIS = TimeUnit.MINUTES.toMillis(10);
+	private static final String GENERATED_ID_PREFIX = "linear_";
 
 	private final MetricsManagerImpl metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 	private final List<Path> stepDirs = new ArrayList<>();
@@ -62,9 +68,89 @@ class StepIdReuseScenarioTest {
 
 	@AfterEach
 	void removeTheStepFolders() throws IOException {
+		for (final String stepId : ranStepIds()) {
+			if (stepId.startsWith(GENERATED_ID_PREFIX)) {
+				stepDirs.add(stepDir(stepId));
+			}
+		}
 		for (final Path dir : stepDirs) {
 			StepIdReuseAtStartTest.removeFolder(dir);
 		}
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"create", "noop"
+	})
+	void aConfigCopyOfAStepThatHasRunGetsItsOwnGeneratedId(final String opType) throws Exception {
+		final Config config = generatedIdConfig();
+		config.val("load-op-type", opType);
+		config.val("load-op-limit-count", 20);
+
+		assertDoesNotThrow(() -> run("Load.run();\nLoad.config({load:{op:{limit:{count:30}}}}).run();\n", config));
+
+		final Map<Long, Set<String>> idsByCount = generatedIdsByCount();
+		assertEquals(Set.of(20L, 30L), idsByCount.keySet(), idsByCount.toString());
+		assertEquals(1, idsByCount.get(20L).size(), idsByCount.toString());
+		assertEquals(1, idsByCount.get(30L).size(), idsByCount.toString());
+		assertEquals(2, ranStepIds().size(), "each step has its own id: " + idsByCount);
+		if ("create".equals(opType)) {
+			for (final String stepId : ranStepIds()) {
+				assertTrue(Files.exists(stepDir(stepId).resolve(OperationLifecycleArtifact.FILE_NAME)), stepId);
+			}
+		}
+	}
+
+	@Test
+	void anAppendCopyOfAStepThatHasRunGetsItsOwnGeneratedId() throws Exception {
+		final Config config = generatedIdConfig();
+		config.val("load-op-limit-count", 20);
+
+		assertDoesNotThrow(() -> run("var step = Load.config({});\nstep.run();\nstep.append({}).run();\n", config));
+
+		assertEquals(2, ranStepIds().size(), "each step has its own id: " + ranStepIds());
+		assertTrue(ranStepIds().stream().allMatch(stepId -> stepId.startsWith(GENERATED_ID_PREFIX)), ranStepIds().toString());
+	}
+
+	@Test
+	void aCopyOfAStepThatHasRunMayNameItsOwnId() throws Exception {
+		final String stepId = uniqueStepId("own-id");
+		final Config config = generatedIdConfig();
+		config.val("load-op-limit-count", 20);
+
+		assertDoesNotThrow(() -> run(
+						"Load.run();\nLoad.config({load:{step:{id:\"" + stepId + "\"},op:{limit:{count:30}}}}).run();\n",
+						config));
+
+		assertEquals(30, terminalSteps(stepId).get(0).successCount);
+		assertEquals(2, ranStepIds().size(), ranStepIds().toString());
+	}
+
+	@Test
+	void aCopyThatKeepsAUserSetIdIsStillRefused() throws Exception {
+		final String stepId = uniqueStepId("user-set");
+		final String ownId = uniqueStepId("user-set-own");
+		final String scenario = "var step = Load.config({load:{step:{id:\"" + stepId + "\"},op:{limit:{count:20}}}});\n"
+						+ "step.run();\n"
+						+ "step.config({load:{step:{id:\"" + ownId + "\"},op:{limit:{count:30}}}}).run();\n"
+						+ "step.config({load:{op:{limit:{count:40}}}}).run();\n";
+
+		final var thrown = assertThrows(RunTerminalException.class, () -> run(scenario, generatedIdConfig()));
+
+		assertRefused(thrown, stepId);
+		assertEquals(20, terminalSteps(stepId).get(0).successCount, "the refused copy ran operations");
+		assertEquals(30, terminalSteps(ownId).get(0).successCount);
+	}
+
+	@Test
+	void copiesOfAnUnusedPrototypeStillGenerateTheirOwnIds() throws Exception {
+		final Config config = generatedIdConfig();
+
+		assertDoesNotThrow(() -> run(
+						"Load.config({load:{op:{limit:{count:20}}}}).run();\nLoad.config({load:{op:{limit:{count:30}}}}).run();\n",
+						config));
+
+		assertEquals(Set.of(20L, 30L), generatedIdsByCount().keySet());
+		assertEquals(2, ranStepIds().size(), ranStepIds().toString());
 	}
 
 	@Test
@@ -167,9 +253,34 @@ class StepIdReuseScenarioTest {
 	}
 
 	private void run(final String scenario) {
+		run(scenario, config());
+	}
+
+	private void run(final String scenario, final Config config) {
 		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(Thread.currentThread().getContextClassLoader());
-		ScenarioUtil.registerStepTypes(engine, extensions(), config(), metrics);
+		ScenarioUtil.registerStepTypes(engine, extensions(), config, metrics);
 		new RunImpl("step id reuse", scenario, engine, 1).run();
+	}
+
+	/** The configuration of a run without a configured id, as {@code Main.checkAndSetStepId} leaves it. */
+	private Config generatedIdConfig() {
+		final Config config = config();
+		config.val("load-step-id", "none-" + UUID.randomUUID());
+		config.val("load-step-idAutoGenerated", true);
+		return config;
+	}
+
+	private Set<String> ranStepIds() {
+		return metrics.getTerminalSteps().stream().map(entry -> entry.stepId).collect(Collectors.toCollection(TreeSet::new));
+	}
+
+	private Map<Long, Set<String>> generatedIdsByCount() {
+		final Map<Long, Set<String>> idsByCount = new TreeMap<>();
+		for (final TerminalStepEntry step : metrics.getTerminalSteps()) {
+			assertTrue(step.stepId.startsWith(GENERATED_ID_PREFIX), step.stepId);
+			idsByCount.computeIfAbsent(step.successCount, count -> new TreeSet<>()).add(step.stepId);
+		}
+		return idsByCount;
 	}
 
 	private String uniqueStepId(final String name) throws IOException {

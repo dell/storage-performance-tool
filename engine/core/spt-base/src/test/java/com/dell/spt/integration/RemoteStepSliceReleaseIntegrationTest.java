@@ -50,7 +50,12 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -76,6 +81,128 @@ class RemoteStepSliceReleaseIntegrationTest {
 
 	private final List<WeakReference<List<DataOperationImpl<DataItemImpl>>>> ballasts = new ArrayList<>();
 	private final List<String> stepIds = new ArrayList<>();
+	private final AtomicInteger contextCloses = new AtomicInteger();
+
+	@Test
+	void aWorkerShutdownReleasesASliceInAnyState() throws Exception {
+		withWorker((worker, manager, port) -> {
+			final LoadStepService unstarted = newSlice(manager, port);
+			final LoadStepService stopped = newSlice(manager, port);
+			stopped.start();
+			stopped.stop();
+			final LoadStepService abandoned = newSlice(manager, port);
+			abandoned.start();
+			final LoadStepService latest = newSlice(manager, port);
+			latest.start();
+			assertEquals(2, worker.busySliceRunIds().size(), "only the started and unstopped slices are busy");
+
+			worker.close();
+
+			// A slice builds its contexts when it starts, so the unstarted one has none to close.
+			assertEquals(3, contextCloses.get(), "every started slice's context closes once");
+			assertEquals(List.of(), List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()));
+			for (final LoadStepService slice : List.of(unstarted, stopped, abandoned, latest)) {
+				assertThrows(java.rmi.RemoteException.class, slice::loadStepId);
+			}
+			assertEquals(List.of(), worker.busySliceRunIds());
+		});
+	}
+
+	@Test
+	void aWorkerShutdownRacingLateControllerCallsClosesEachSliceOnce() throws Exception {
+		withWorker((worker, manager, port) -> {
+			final List<LoadStepService> slices = new ArrayList<>();
+			for (var i = 0; i < 4; i++) {
+				final LoadStepService slice = newSlice(manager, port);
+				slice.start();
+				slices.add(slice);
+			}
+			final var pool = Executors.newCachedThreadPool();
+			try {
+				final var go = new CountDownLatch(1);
+				final List<Future<?>> calls = new ArrayList<>();
+				calls.add(pool.submit(raced(go, () -> {
+					worker.close();
+					return null;
+				})));
+				for (final LoadStepService slice : slices) {
+					calls.add(pool.submit(raced(go, () -> lateControllerCall(slice::stop))));
+					calls.add(pool.submit(raced(go, () -> lateControllerCall(() -> {
+						slice.close();
+						return null;
+					}))));
+				}
+				go.countDown();
+				for (final Future<?> call : calls) {
+					call.get(60, TimeUnit.SECONDS);
+				}
+			} finally {
+				pool.shutdownNow();
+			}
+			assertEquals(slices.size(), contextCloses.get(), "every slice's context closes once");
+			assertEquals(List.of(), List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()));
+			assertTrue(worker.isClosed());
+		});
+	}
+
+	private static Callable<Void> raced(final CountDownLatch go, final Callable<Void> call) {
+		return () -> {
+			go.await();
+			return call.call();
+		};
+	}
+
+	/** A controller that comes late finds the service gone, which it has to tolerate anyway. */
+	private static Void lateControllerCall(final Callable<?> call) throws Exception {
+		try {
+			call.call();
+		} catch (final java.rmi.RemoteException gone) {
+			// Unexported by the shutdown
+		}
+		return null;
+	}
+
+	private LoadStepService newSlice(final LoadStepManagerService manager, final int port) throws Exception {
+		final Config config = TestConfigBuilder.config();
+		final String stepId = "slice-release-" + UUID.randomUUID();
+		stepIds.add(stepId);
+		config.val("load-step-id", stepId);
+		config.val("load-op-type", "create");
+		return ServiceUtil.resolve(
+						"127.0.0.1", port, manager.newStepService(STEP_TYPE, config, List.of()), LoadStepService.class);
+	}
+
+	private void withWorker(final WorkerTest test) throws Exception {
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		final int port = freePort();
+		final LoadStepManagerServiceImpl worker = new LoadStepManagerServiceImpl(
+						port, List.of(ballastFactory()), new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR));
+		try {
+			worker.start();
+			test.run(worker, ServiceUtil.resolve(
+							"127.0.0.1", port, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class), port);
+		} finally {
+			try {
+				worker.close();
+			} finally {
+				ServiceUtil.shutdown();
+				if (originalHost == null) {
+					System.clearProperty("java.rmi.server.hostname");
+				} else {
+					System.setProperty("java.rmi.server.hostname", originalHost);
+				}
+				for (final String stepId : stepIds) {
+					removeStepFolder(stepId);
+				}
+			}
+		}
+	}
+
+	@FunctionalInterface
+	private interface WorkerTest {
+		void run(LoadStepManagerServiceImpl worker, LoadStepManagerService manager, int port) throws Exception;
+	}
 
 	@Test
 	void aWorkerReleasesEverySliceWhoseStopAndCloseFail() throws Exception {
@@ -240,6 +367,10 @@ class RemoteStepSliceReleaseIntegrationTest {
 		case "hashCode" -> System.identityHashCode(proxy);
 		case "toString" -> "ballast context of " + ballast.size() + " operations";
 		case "activeOpCount" -> ballast.isEmpty() ? 0 : 1;
+		case "close" -> {
+			contextCloses.incrementAndGet();
+			yield null;
+		}
 		default -> defaultValue(method.getReturnType());
 		};
 		return (LoadStepContext) Proxy.newProxyInstance(
