@@ -7,9 +7,11 @@ package portcheck
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	containertypes "github.com/docker/docker/api/types/container"
@@ -74,6 +76,41 @@ func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port
 
 	logging.LogDebug("portcheck", "no containers found using port", "port", port)
 	return nil, nil
+}
+
+// FindHostNetworkEngine finds the SPT-managed node container that serves the API
+// on port from the host's network. Such a container publishes no ports, so only
+// its labels, network mode and --run-port argument identify it. A bridge engine
+// with the same argument holds that port only inside its own network and is not
+// returned. Two matches cannot be told apart, so they are an error.
+func (d *DockerContainerFinder) FindHostNetworkEngine(ctx context.Context, port string) (*ContainerInfo, error) {
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	runPortArg := constants.EngineRunPortArgPrefix + port
+	var found *ContainerInfo
+	for _, c := range containers {
+		if !containerHoldsPorts(c) ||
+			c.Labels[constants.DockerLabelManaged] != "true" ||
+			c.Labels[constants.DockerLabelRole] != constants.DockerRoleNode {
+			continue
+		}
+		inspect, err := d.client.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect container %s: %w", containerutil.ShortID(c.ID), err)
+		}
+		if inspect.ContainerJSONBase == nil || inspect.HostConfig == nil ||
+			!inspect.HostConfig.NetworkMode.IsHost() || !slices.Contains(inspect.Args, runPortArg) {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("more than one host-network SPT engine is set to serve port %s", port)
+		}
+		found = d.containerToInfo(c)
+	}
+	return found, nil
 }
 
 // FindSptContainers finds all containers running Spt images

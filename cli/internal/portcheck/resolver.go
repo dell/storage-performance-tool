@@ -431,28 +431,35 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 	ctx, cancel := context.WithTimeout(ctx, constants.PortConflictForceStopTimeout)
 	defer cancel()
 
-	// If we have container info, stop it directly
-	if info.Container != nil {
-		fmt.Printf("Force stopping container: %s (%s)\n", info.Container.Name, containerutil.ShortID(info.Container.ID))
-
-		err := r.dockerFinder.ForceStopAndRemoveContainer(ctx, info.Container.ID)
-		if err != nil {
-			return &ResolutionResult{
-				Strategy: StrategyForceStop,
-				Success:  false,
-				Message:  fmt.Sprintf("Failed to force stop container: %s", err.Error()),
-				Error:    err,
-			}
-		}
-
-		// Wait and verify
-		r.clock.Sleep(3 * time.Second)
-		return r.verifyResolution(ctx, StrategyForceStop)
+	target, result := r.findForceStopTarget(ctx, info)
+	if result != nil {
+		return result
 	}
 
-	// Try to find any containers using the port
-	container, err := r.dockerFinder.FindContainerUsingPort(ctx, r.Port)
-	if err != nil {
+	fmt.Printf("Force stopping container: %s (%s)\n", target.Name, containerutil.ShortID(target.ID))
+	if err := r.dockerFinder.ForceStopAndRemoveContainer(ctx, target.ID); err != nil {
+		return &ResolutionResult{
+			Strategy: StrategyForceStop,
+			Success:  false,
+			Message:  fmt.Sprintf("Failed to force stop container: %s", err.Error()),
+			Error:    err,
+		}
+	}
+
+	// Wait and verify
+	r.clock.Sleep(3 * time.Second)
+	return r.verifyResolution(ctx, StrategyForceStop)
+}
+
+// findForceStopTarget returns the one container that holds the port: the one
+// detection found, the one publishing the port, or, when an SPT engine answers
+// on the port, its host-network container. Otherwise it returns the failure.
+func (r *ConflictResolver) findForceStopTarget(ctx context.Context, info *ServiceInfo) (*ContainerInfo, *ResolutionResult) {
+	if info.Container != nil {
+		return info.Container, nil
+	}
+
+	lookupFailure := func(err error) *ResolutionResult {
 		return &ResolutionResult{
 			Strategy: StrategyForceStop,
 			Success:  false,
@@ -460,30 +467,24 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 			Error:    err,
 		}
 	}
-
-	if container != nil {
-		fmt.Printf("Found container using port %s: %s\n", r.Port, container.Name)
-		fmt.Printf("Force stopping container...\n")
-
-		err := r.dockerFinder.ForceStopAndRemoveContainer(ctx, container.ID)
+	container, err := r.dockerFinder.FindContainerUsingPort(ctx, r.Port)
+	if err != nil {
+		return nil, lookupFailure(err)
+	}
+	if container == nil && info.IsSpt {
+		container, err = r.dockerFinder.FindHostNetworkEngine(ctx, r.Port)
 		if err != nil {
-			return &ResolutionResult{
-				Strategy: StrategyForceStop,
-				Success:  false,
-				Message:  fmt.Sprintf("Failed to force stop container: %s", err.Error()),
-				Error:    err,
-			}
+			return nil, lookupFailure(err)
 		}
-
-		r.clock.Sleep(3 * time.Second)
-		return r.verifyResolution(ctx, StrategyForceStop)
 	}
-
-	return &ResolutionResult{
-		Strategy: StrategyForceStop,
-		Success:  false,
-		Message:  fmt.Sprintf("No containers found using port %s - service may not be containerized", r.Port),
+	if container == nil {
+		return nil, &ResolutionResult{
+			Strategy: StrategyForceStop,
+			Success:  false,
+			Message:  fmt.Sprintf("No containers found using port %s - service may not be containerized", r.Port),
+		}
 	}
+	return container, nil
 }
 
 // executeRetry re-checks port status

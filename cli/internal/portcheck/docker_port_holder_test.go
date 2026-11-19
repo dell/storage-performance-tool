@@ -26,6 +26,8 @@ type fakeDockerAPI struct {
 	listOpts   []containertypes.ListOptions
 	stopped    []string
 	removed    []string
+	inspects   map[string]containertypes.InspectResponse
+	onRemove   func(containerID string)
 }
 
 func (f *fakeDockerAPI) ContainerList(_ context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error) {
@@ -46,11 +48,16 @@ func (f *fakeDockerAPI) ContainerRemove(_ context.Context, containerID string, _
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, containerID)
+	if f.onRemove != nil {
+		f.onRemove(containerID)
+	}
 	return nil
 }
 
-func (f *fakeDockerAPI) ContainerInspect(_ context.Context, _ string) (containertypes.InspectResponse, error) {
-	return containertypes.InspectResponse{}, nil
+func (f *fakeDockerAPI) ContainerInspect(_ context.Context, containerID string) (containertypes.InspectResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inspects[containerID], nil
 }
 
 func (f *fakeDockerAPI) Close() error { return nil }
