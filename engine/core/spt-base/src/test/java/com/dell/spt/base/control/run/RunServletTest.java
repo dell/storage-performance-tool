@@ -24,7 +24,6 @@ import java.io.IOException;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -164,7 +163,7 @@ class RunServletTest {
 	@Test
 	void aRunSharesNoListWithTheNodeConfig() throws Exception {
 		final var node = TestConfigBuilder.configWithMapSettings();
-		node.val("storage-net-interfaces", new ArrayList<>(List.of("eth0")));
+		node.val("storage-net-interfaces", "eth0"); // set from text, as an engine argument is
 
 		final var withoutDefaults = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, node);
 		final var withDefaults = RunServlet.mergeIncomingWithLocalConfig(defaultsPart("{}\n"), mockResponse, node);

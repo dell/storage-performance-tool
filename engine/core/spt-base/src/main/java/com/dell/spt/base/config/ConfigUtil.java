@@ -15,6 +15,7 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -355,7 +356,9 @@ public interface ConfigUtil {
 	/**
 	 * Copies an {@link ArrayList} or a {@link LinkedList} into a list of its own class, and keeps any
 	 * other list by reference, as a configuration did before: a schema may name the list's class as
-	 * the setting's type.
+	 * the setting's type. A list set from text, such as an engine argument, is an {@link Arrays#asList}
+	 * list, whose elements can be set in place; it is copied into an {@link ArrayList}, which has
+	 * every type that list has that a schema can name.
 	 */
 	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
 	private static Object copyValue(final Object value) {
@@ -364,7 +367,7 @@ public interface ConfigUtil {
 		}
 		if (value instanceof List<?> list) {
 			final List<Object> copy;
-			if (list.getClass() == ArrayList.class) {
+			if (list.getClass() == ArrayList.class || list.getClass() == Arrays.asList().getClass()) {
 				copy = new ArrayList<>(list.size());
 			} else if (list.getClass() == LinkedList.class) {
 				copy = new LinkedList<>();
