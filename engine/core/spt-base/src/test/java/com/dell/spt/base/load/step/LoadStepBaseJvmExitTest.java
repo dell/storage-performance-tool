@@ -209,10 +209,14 @@ class LoadStepBaseJvmExitTest {
 			throw new IllegalStateException("a real failure during the exit");
 		};
 
-		final List<LoggedLine> lines = logOf(() -> assertInstanceOf(RunTerminalException.class, assertThrows(Throwable.class, step::run)));
+		final List<LoggedLine> lines = logOf(() -> assertEquals(
+						"step failed to start; see the engine log",
+						assertInstanceOf(RunTerminalException.class, assertThrows(Throwable.class, step::run)).getMessage()));
 
 		assertTrue(lines.stream().noneMatch(line -> line.message.equals(STOPPED_LINE)), lines::toString);
-		assertTrue(lines.stream().anyMatch(line -> line.message.contains("step failed to start")), lines::toString);
+		assertEquals("a real failure during the exit", step.runFailure().getMessage());
+		// The log level of a logger can differ between test orders; the report is still unclaimed.
+		assertTrue(JvmExit.claimStartStopReport(), "a failed start claimed the exit's stop report");
 	}
 
 	private static void assertStoppedRun(final RecordingStep step) {
