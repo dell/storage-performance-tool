@@ -156,7 +156,7 @@ class LoadStepBaseJvmExitTest {
 
 		final List<LoggedLine> lines = logOf(() -> assertStoppedRun(step));
 
-		assertEquals(1, lines.stream().filter(line -> line.message.equals(STOPPED_LINE) && line.level == Level.INFO).count(), lines::toString);
+		assertEquals(1, lines.stream().filter(line -> line.message.equals(STOPPED_LINE) && Level.INFO.equals(line.level)).count(), lines::toString);
 		assertNoStartFailureLine(lines);
 	}
 
