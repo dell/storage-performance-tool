@@ -257,6 +257,23 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return controlsOperations(contextIndex);
 	}
 
+	/**
+	 * Refuses a stopped step before anything of a new start happens: a restart would run the whole
+	 * step again beside its stopped slices. Local slices keep their restart.
+	 */
+	@Override
+	protected void doStart() throws IllegalStateException {
+		if (isStopped()) {
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							loadStepId(),
+							"this step object has been stopped and cannot be started again; a step object runs once. "
+											+ "Build a new step from a prototype with config() and run that.",
+							null);
+		}
+		super.doStart();
+	}
+
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
