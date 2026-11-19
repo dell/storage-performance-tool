@@ -402,8 +402,12 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	}
 	isList := strings.EqualFold(workloadType, workloadreg.List)
 	objectSizeHuman := ""
-	if strings.TrimSpace(params.ObjectSize) != "" {
+	if trimmedSize := strings.TrimSpace(params.ObjectSize); trimmedSize != "" {
 		objectSizeHuman = formatBytes(sizeBytes)
+		if sizeWarn != nil {
+			// A size range such as 16KiB-256KiB is not one size: show it as given, not as 0 B.
+			objectSizeHuman = trimmedSize
+		}
 	}
 	summary := WorkloadSummary{
 		Type:              workloadType,

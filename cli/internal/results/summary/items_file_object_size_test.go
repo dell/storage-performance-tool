@@ -43,6 +43,14 @@ func TestReadObjectSizeCellAndBullet(t *testing.T) {
 			name: "partial read without evidence", success: 12525, bytes: 12525 * 4 * testKiB, rangeExpected: true,
 			wantCell: notApplicableCell, wantBullet: discovered,
 		},
+		{
+			name: "partial read known only from its evidence", success: 12525, bytes: 12525 * 4 * testKiB,
+			rangeEvidence: true, wantCell: notApplicableCell, wantBullet: discovered,
+		},
+		{
+			name: "partial read of a size range", objectSize: "16KiB-256KiB", success: 1, bytes: 3,
+			rangeEvidence: true, rangeExpected: true, wantCell: "16KiB-256KiB", wantBullet: "16KiB-256KiB",
+		},
 		{name: "no successes", wantCell: notApplicableCell, wantBullet: discovered},
 		{
 			name: "explicit size", objectSize: "64KiB", success: 2190, bytes: 2190 * 64 * testKiB,
