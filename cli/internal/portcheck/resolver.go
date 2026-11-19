@@ -243,7 +243,7 @@ func (r *ConflictResolver) displayConflictInfo(info *ServiceInfo) {
 }
 
 // getUserChoice presents options and gets the user's choice.
-func (r *ConflictResolver) getUserChoice(_ context.Context, info *ServiceInfo) (ResolutionStrategy, error) {
+func (r *ConflictResolver) getUserChoice(ctx context.Context, info *ServiceInfo) (ResolutionStrategy, error) {
 	fmt.Printf("\nResolution Options:\n")
 
 	if info.APIConfirmed {
@@ -265,10 +265,14 @@ func (r *ConflictResolver) getUserChoice(_ context.Context, info *ServiceInfo) (
 	}
 	reader := bufio.NewReader(source)
 	for {
-		input, err := reader.ReadString('\n')
+		input, err := readAnswer(ctx, reader)
 		if errors.Is(err, io.EOF) {
 			fmt.Println()
 			return StrategyAbort, errNoOperatorAnswer
+		}
+		if ctx.Err() != nil {
+			fmt.Println()
+			return StrategyAbort, ctx.Err()
 		}
 		if err != nil {
 			return StrategyAbort, fmt.Errorf("failed to read user input: %w", err)
@@ -306,6 +310,26 @@ func (r *ConflictResolver) getUserChoice(_ context.Context, info *ServiceInfo) (
 	}
 }
 
+// readAnswer reads one line, or returns when ctx ends. A read of a terminal cannot
+// be interrupted, so on cancellation it stays blocked until the process exits.
+func readAnswer(ctx context.Context, reader *bufio.Reader) (string, error) {
+	type answer struct {
+		text string
+		err  error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		text, err := reader.ReadString('\n')
+		answers <- answer{text, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case got := <-answers:
+		return got.text, got.err
+	}
+}
+
 // executeForceResolution handles --force flag resolution
 func (r *ConflictResolver) executeForceResolution(ctx context.Context, info *ServiceInfo) (*ResolutionResult, error) {
 	logging.LogInfo("portcheck", "executing force resolution", "port", r.Port)
@@ -315,7 +339,8 @@ func (r *ConflictResolver) executeForceResolution(ctx context.Context, info *Ser
 	if info.APIConfirmed {
 		fmt.Printf("[FORCE] Attempting graceful stop of Spt test...\n")
 		result := r.executeGracefulStop(ctx, info)
-		if result.Success {
+		// After Ctrl-C, nothing further may be stopped or removed.
+		if result.Success || ctx.Err() != nil {
 			return result, nil
 		}
 
@@ -494,7 +519,16 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 	}
 
 	// Wait and verify
-	r.clock.Sleep(3 * time.Second)
+	select {
+	case <-ctx.Done():
+		return &ResolutionResult{
+			Strategy: StrategyForceStop,
+			Success:  false,
+			Message:  fmt.Sprintf("Stopped waiting for port %s to close: %s", r.Port, ctx.Err()),
+			Error:    ctx.Err(),
+		}
+	case <-r.clock.After(3 * time.Second):
+	}
 	return r.verifyResolution(ctx, StrategyForceStop)
 }
 

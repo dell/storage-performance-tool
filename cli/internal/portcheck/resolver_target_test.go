@@ -6,7 +6,9 @@ package portcheck
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -268,5 +270,89 @@ func TestGracefulStopWaitsForEveryListener(t *testing.T) {
 	}
 	if clock.polls != 3 {
 		t.Errorf("polls = %d, want 3", clock.polls)
+	}
+}
+
+// blockingInput is a terminal nobody answers.
+type blockingInput struct {
+	reading chan struct{}
+	release chan struct{}
+}
+
+func newBlockingInput(t *testing.T) *blockingInput {
+	t.Helper()
+	input := &blockingInput{reading: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(input.release) })
+	return input
+}
+
+func (b *blockingInput) Read([]byte) (int, error) {
+	close(b.reading)
+	<-b.release
+	return 0, io.EOF
+}
+
+// Ctrl-C or SIGTERM ends an unanswered prompt and leaves the engine alone.
+func TestPromptEndsWithTheContext(t *testing.T) {
+	engine := newFakeEngine(t, 41)
+	resolver := engine.resolver(false, true)
+	input := newBlockingInput(t)
+	resolver.input = input
+	defer resolver.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-input.reading
+		cancel()
+	}()
+
+	err := within(t, func() error {
+		_, err := resolver.CheckAndResolveConflicts(ctx)
+		return err
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	assertReadOnly(t, engine.received())
+}
+
+// The wait after a force stop ends with the context, without the verification.
+func TestForceVerificationWaitEndsWithTheContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := fakeDockerWith(hostEngine("holder", "23100"))
+	api.onRemove = func(string) { cancel() }
+	resolver := &ConflictResolver{Port: "23100", dockerFinder: newFakeFinder(api), clock: blockedClock{}}
+
+	result := within(t, func() *ResolutionResult {
+		return resolver.executeForceStop(ctx, &ServiceInfo{
+			IsListening: true, IsSpt: true, APIConfirmed: true, Container: &ContainerInfo{ID: "holder", Name: "holder"},
+		})
+	})
+	if result.Success || !errors.Is(result.Error, context.Canceled) {
+		t.Fatalf("result = %+v, want the cancelled wait", result)
+	}
+}
+
+// After Ctrl-C during the graceful part, --force touches no container.
+func TestForceRemovesNothingAfterCancellation(t *testing.T) {
+	engine := newFakeEngine(t, 41)
+	api := fakeDockerWith(hostEngine("holder", engine.port()))
+	resolver := engine.resolver(true, false)
+	resolver.dockerFinder = newFakeFinder(api)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolver.clock = cancelOnWaitClock{cancel: cancel}
+	defer resolver.Close()
+
+	result := within(t, func() *ResolutionResult {
+		result, _ := resolver.executeForceResolution(ctx, confirmedEngine())
+		return result
+	})
+	if result.Success {
+		t.Fatalf("result = %+v, want failure", result)
+	}
+	if stopped, removed := api.mutations(); len(stopped) != 0 || len(removed) != 0 {
+		t.Errorf("stopped %v, removed %v; want none", stopped, removed)
 	}
 }

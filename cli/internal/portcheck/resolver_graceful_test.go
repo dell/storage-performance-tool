@@ -129,7 +129,7 @@ func TestGracefulStopReportsTheDeadline(t *testing.T) {
 	resolver.clock = clock
 	defer resolver.Close()
 
-	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
+	result := gracefulStopWithin(t, context.Background(), resolver, confirmedEngine())
 	if result.Success {
 		t.Fatal("Success = true while the port stays open")
 	}
@@ -162,17 +162,10 @@ func TestGracefulStopWaitEndsWithTheContext(t *testing.T) {
 	resolver := engine.resolver(false, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// The clock's wait never fires, so only the context can end this one.
-	resolver.clock = blockedClock{}
+	resolver.clock = cancelOnWaitClock{cancel: cancel}
 	defer resolver.Close()
 
-	go func() {
-		for !slices.Contains(engine.received(), engineRequest{http.MethodPost, "/shutdown", ""}) {
-			time.Sleep(time.Millisecond)
-		}
-		cancel()
-	}()
-	result := resolver.executeGracefulStop(ctx, confirmedEngine())
+	result := gracefulStopWithin(t, ctx, resolver, confirmedEngine())
 	if result.Success || !strings.Contains(result.Message, "Stopped waiting for port") {
 		t.Fatalf("result = %+v, want the cancelled wait reported", result)
 	}
@@ -184,6 +177,39 @@ type blockedClock struct{}
 func (blockedClock) Now() time.Time                       { return time.Unix(0, 0) }
 func (blockedClock) Sleep(time.Duration)                  {}
 func (blockedClock) After(time.Duration) <-chan time.Time { return nil }
+
+// cancelOnWaitClock cancels when a wait begins, and the wait itself never fires,
+// so only the context can end it.
+type cancelOnWaitClock struct {
+	blockedClock
+	cancel context.CancelFunc
+}
+
+func (c cancelOnWaitClock) After(time.Duration) <-chan time.Time {
+	c.cancel()
+	return nil
+}
+
+// testBound turns a wait that never ends into a named failure.
+const testBound = 20 * time.Second
+
+func within[T any](t *testing.T, call func() T) T {
+	t.Helper()
+	done := make(chan T, 1)
+	go func() { done <- call() }()
+	select {
+	case value := <-done:
+		return value
+	case <-time.After(testBound):
+		t.Fatalf("no result within %s", testBound)
+		panic("unreachable")
+	}
+}
+
+func gracefulStopWithin(t *testing.T, ctx context.Context, resolver *ConflictResolver, info *ServiceInfo) *ResolutionResult {
+	t.Helper()
+	return within(t, func() *ResolutionResult { return resolver.executeGracefulStop(ctx, info) })
+}
 
 // A refused shutdown is a failure while the port is open, and no wait follows.
 func TestGracefulStopReportsARefusedShutdown(t *testing.T) {
@@ -213,7 +239,7 @@ func TestGracefulStopLeavesAReplacementRunAlone(t *testing.T) {
 	resolver := engine.resolver(false, true)
 	defer resolver.Close()
 
-	result := resolver.executeGracefulStop(context.Background(), confirmedEngine())
+	result := gracefulStopWithin(t, context.Background(), resolver, confirmedEngine())
 	if result.Success || !strings.Contains(result.Message, "replaced by run 42") {
 		t.Fatalf("result = %+v, want the replacement reported", result)
 	}

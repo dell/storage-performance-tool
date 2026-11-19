@@ -54,8 +54,15 @@ func TestUnattendedConflictLeavesTheEngineAlone(t *testing.T) {
 			resolver.input = strings.NewReader("")
 			defer resolver.Close()
 
-			result, err := resolver.CheckAndResolveConflicts(context.Background())
-			assertUnattendedAbort(t, result, err, tt.wantDetails)
+			type outcome struct {
+				result *ResolutionResult
+				err    error
+			}
+			got := within(t, func() outcome {
+				result, err := resolver.CheckAndResolveConflicts(context.Background())
+				return outcome{result, err}
+			})
+			assertUnattendedAbort(t, got.result, got.err, tt.wantDetails)
 			assertReadOnly(t, engine.received())
 		})
 	}
