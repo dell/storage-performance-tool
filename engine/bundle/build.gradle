@@ -1277,6 +1277,11 @@ tasks.register('verifyEngineExitStatusCanary') {
 
 	doLast {
 		def canaryRoot = canaryRootProvider.get().asFile
+		// A run stopped inside the read-only home case leaves that directory read-only; restore it first.
+		def leftoverReadOnly = new File(canaryRoot, 'stale-home-read-only/home/config')
+		if (leftoverReadOnly.isDirectory()) {
+			leftoverReadOnly.setWritable(true, true)
+		}
 		delete canaryRoot
 		canaryRoot.mkdirs()
 		def javaExecutable = new File(
@@ -1491,7 +1496,8 @@ tasks.register('verifyEngineExitStatusCanary') {
 			], 1, ['The Groovy script engine is not installed'])
 			// A home holding a defaults file from another build in a directory the engine cannot write: the
 			// start stops and names the file, rather than running on the stale defaults. Root writes anyway.
-			if (System.getProperty('user.name') != 'root') {
+			if (System.getProperty('user.name') != 'root'
+							&& java.nio.file.FileSystems.default.supportedFileAttributeViews().contains('posix')) {
 				def staleConfigDir = new File(canaryRoot, 'stale-home-read-only/home/config')
 				staleConfigDir.mkdirs()
 				def staleDefaults = new File(staleConfigDir, 'defaults.yaml')

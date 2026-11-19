@@ -17,6 +17,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,6 +56,7 @@ class InstallableJarResourcesTest {
 	private static class FixedResources extends InstallableJarResources {
 
 		final Map<String, byte[]> resources = new HashMap<>();
+		boolean homeSet = true;
 
 		FixedResources with(final String path, final byte[] content) {
 			resources.put(path, content);
@@ -70,6 +72,11 @@ class InstallableJarResourcesTest {
 		@Override
 		protected List<String> resourceFilesToInstall() {
 			return List.copyOf(resources.keySet());
+		}
+
+		@Override
+		boolean homeSetByEnvironment() {
+			return homeSet;
 		}
 	}
 
@@ -145,6 +152,84 @@ class InstallableJarResourcesTest {
 		assertDoesNotThrow(() -> new FixedResources().with(DEFAULTS, BUNDLED).install(appHome));
 
 		assertEquals(mtime, Files.getLastModifiedTime(installed));
+	}
+
+	@Test
+	void aCurrentFileInAWritableHomeIsNotRewritten() throws IOException {
+		final var installed = writeInstalled(DEFAULTS, BUNDLED);
+		final var mtime = FileTime.fromMillis(1_000_000_000_000L);
+		Files.setLastModifiedTime(installed, mtime);
+
+		new FixedResources().with(DEFAULTS, BUNDLED).install(appHome);
+
+		assertEquals(mtime, Files.getLastModifiedTime(installed));
+	}
+
+	@Test
+	void anInstalledFileHasThePermissionsOfAnyNewFile() throws IOException {
+		assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"));
+		final var reference = Files.write(appHome.resolve("reference"), STALE);
+
+		new FixedResources().with(DEFAULTS, BUNDLED).install(appHome);
+
+		assertEquals(
+						Files.getPosixFilePermissions(reference),
+						Files.getPosixFilePermissions(appHome.resolve(DEFAULTS)));
+	}
+
+	@Test
+	void withoutAtomicMovesTheFileIsReplacedInPlace() throws IOException {
+		final var installed = writeInstalled(DEFAULTS, STALE);
+		final var resources = new FixedResources() {
+
+			@Override
+			void moveAtomically(final Path tmpPath, final Path dstPath) throws IOException {
+				throw new AtomicMoveNotSupportedException(tmpPath.toString(), dstPath.toString(), "test");
+			}
+		}.with(DEFAULTS, BUNDLED);
+
+		assertDoesNotThrow(() -> resources.install(appHome));
+
+		assertArrayEquals(BUNDLED, Files.readAllBytes(installed));
+		assertEquals(List.of(), leftoverTempFiles(installed.getParent()));
+	}
+
+	@Test
+	void aFailureOtherThanPermissionAdvisesCheckingTheFile() throws IOException {
+		final var installed = writeInstalled(DEFAULTS, STALE);
+		final var resources = new FixedResources() {
+
+			@Override
+			void moveAtomically(final Path tmpPath, final Path dstPath) throws IOException {
+				throw new FileSystemException(dstPath.toString(), null, "Device or resource busy");
+			}
+		}.with(DEFAULTS, BUNDLED);
+
+		final var message = assertThrows(ResourceInstallException.class, () -> resources.install(appHome)).getMessage();
+
+		assertTrue(message.contains("Device or resource busy"), message);
+		assertTrue(message.endsWith(
+						"Check \"" + installed + "\" and the directory \"" + installed.getParent() + "\", or unset SPT_HOME."),
+						message);
+		assertFalse(message.contains("writable"), message);
+	}
+
+	@Test
+	void aHomeNotSetBySptHomeIsNotAdvisedToUnsetIt() throws IOException {
+		final var installed = writeInstalled(DEFAULTS, STALE);
+		final var resources = new FixedResources() {
+
+			@Override
+			void moveAtomically(final Path tmpPath, final Path dstPath) throws IOException {
+				throw new AccessDeniedException(dstPath.toString());
+			}
+		}.with(DEFAULTS, BUNDLED);
+		resources.homeSet = false;
+
+		final var message = assertThrows(ResourceInstallException.class, () -> resources.install(appHome)).getMessage();
+
+		assertTrue(message.endsWith("Make \"" + installed.getParent() + "\" writable by the engine's user."), message);
+		assertFalse(message.contains("SPT_HOME"), message);
 	}
 
 	@Test
