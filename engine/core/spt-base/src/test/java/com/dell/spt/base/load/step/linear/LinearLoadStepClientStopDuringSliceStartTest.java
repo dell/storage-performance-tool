@@ -217,5 +217,21 @@ class LinearLoadStepClientStopDuringSliceStartTest {
 		public LoadStepService getStepService() {
 			return null;
 		}
+
+		// The node refuses its only step, so it never holds a slice.
+		@Override
+		public List<Long> busySliceRunIds() {
+			return List.of();
+		}
+
+		@Override
+		public boolean hasOpenSlices() {
+			return false;
+		}
+
+		@Override
+		public boolean stopSlicesOfRun(final long runId) {
+			return false;
+		}
 	}
 }
