@@ -29,6 +29,7 @@ import com.dell.spt.base.control.run.RunImpl;
 import com.dell.spt.base.control.run.RunServlet;
 import com.dell.spt.base.env.CoreResourcesToInstall;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.env.ResourceInstallException;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.load.step.ScriptEngineNotInstalledException;
@@ -192,6 +193,10 @@ public final class Main {
 		} catch (final CliArgumentException e) {
 			Loggers.ERR.fatal("{}", e.getMessage());
 			return EXIT_ARGUMENT_ERROR;
+		} catch (final ResourceInstallException e) {
+			// An explained refusal: the app home holds a file the engine cannot install
+			Loggers.ERR.fatal("{}", e.getMessage());
+			return EXIT_FAILURE;
 		} catch (final Exception e) {
 			// A start failure, a scenario failure or a typed terminal failure of the run
 			if (!(e instanceof ReportedFailure)) {
