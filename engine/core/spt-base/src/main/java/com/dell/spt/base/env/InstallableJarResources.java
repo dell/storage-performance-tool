@@ -119,7 +119,16 @@ public abstract class InstallableJarResources implements Installable {
 						? "holds \"" + dstPath + "\" from another build, and the engine cannot replace it"
 						: "lacks \"" + dstPath + "\", and the engine cannot create it";
 		return "The app home \"" + appHomePath + "\" (SPT_HOME) " + state + " (" + cause + "). Make \""
-						+ dstPath.getParent() + "\" writable by the engine's user, or unset SPT_HOME.";
+						+ nearestDirectory(dstPath.getParent()) + "\" writable by the engine's user, or unset SPT_HOME.";
+	}
+
+	/** The directory, or its nearest existing ancestor, that must be writable to install a file into it. */
+	private static Path nearestDirectory(final Path dir) {
+		var existing = dir;
+		while (existing.getParent() != null && !Files.isDirectory(existing)) {
+			existing = existing.getParent();
+		}
+		return existing;
 	}
 
 	private static String describe(final Exception e) {

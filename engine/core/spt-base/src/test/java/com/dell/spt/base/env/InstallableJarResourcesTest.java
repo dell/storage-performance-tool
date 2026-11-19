@@ -178,6 +178,7 @@ class InstallableJarResourcesTest {
 
 		assertTrue(failure.getMessage().contains("lacks \"" + appHome.resolve(DEFAULTS) + "\""), failure.getMessage());
 		assertTrue(failure.getMessage().contains("AccessDeniedException"), failure.getMessage());
+		assertTrue(failure.getMessage().contains("Make \"" + appHome + "\" writable"), failure.getMessage());
 	}
 
 	@Test
