@@ -24,10 +24,12 @@ import java.io.IOException;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.Map;
 import javax.servlet.http.Part;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -98,6 +100,79 @@ class RunServletTest {
 		final var merged = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, TestConfigBuilder.config());
 
 		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
+	}
+
+	private static final String DEFAULTS_SETTING_EVERY_MAP = """
+					storage:
+					  net:
+					    http:
+					      headers:
+					        posted: "1"
+					      uri:
+					        args:
+					          posted: "1"
+					    nodeInterfaces:
+					      posted: "1"
+					  object:
+					    tagging:
+					      tags:
+					        posted: "1"
+					""";
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"storage-net-http-headers",
+			"storage-net-http-uri-args",
+			"storage-object-tagging-tags",
+			"storage-net-nodeInterfaces"
+	})
+	void whatARunWithoutDefaultsSetsInAMapStaysOutOfTheNodeConfig(final String setting) throws Exception {
+		final var node = TestConfigBuilder.configWithMapSettings();
+
+		final var run = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, node);
+		run.val(setting + "-marker", "run1");
+		run.<Object> mapVal(setting).put("direct", "run1");
+
+		assertEquals(Map.of("base", "1", "marker", "run1", "direct", "run1"), run.mapVal(setting));
+		assertEquals(Map.of("base", "1"), node.mapVal(setting));
+		assertEquals(
+						Map.of("base", "1"),
+						RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, node).mapVal(setting));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {
+			"storage-net-http-headers",
+			"storage-net-http-uri-args",
+			"storage-object-tagging-tags",
+			"storage-net-nodeInterfaces"
+	})
+	void whatARunWithDefaultsSetsInAMapStaysOutOfTheNodeConfig(final String setting) throws Exception {
+		final var node = TestConfigBuilder.configWithMapSettings();
+
+		final var run = RunServlet.mergeIncomingWithLocalConfig(
+						defaultsPart(DEFAULTS_SETTING_EVERY_MAP), mockResponse, node);
+		run.val(setting + "-marker", "run1");
+
+		assertEquals(Map.of("base", "1", "posted", "1", "marker", "run1"), run.mapVal(setting));
+		assertEquals(Map.of("base", "1"), node.mapVal(setting));
+		assertEquals(
+						Map.of("base", "1"),
+						RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, node).mapVal(setting));
+	}
+
+	@Test
+	void aRunSharesNoListWithTheNodeConfig() throws Exception {
+		final var node = TestConfigBuilder.configWithMapSettings();
+		node.val("storage-net-interfaces", new ArrayList<>(List.of("eth0")));
+
+		final var withoutDefaults = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, node);
+		final var withDefaults = RunServlet.mergeIncomingWithLocalConfig(defaultsPart("{}\n"), mockResponse, node);
+
+		assertEquals(List.of("eth0"), withoutDefaults.listVal("storage-net-interfaces"));
+		assertEquals(List.of("eth0"), withDefaults.listVal("storage-net-interfaces"));
+		assertNotSame(node.listVal("storage-net-interfaces"), withoutDefaults.listVal("storage-net-interfaces"));
+		assertNotSame(node.listVal("storage-net-interfaces"), withDefaults.listVal("storage-net-interfaces"));
 	}
 
 	/** {@code spt run --engine-override load-op-shuffle=no} posts the value as the text "no". */

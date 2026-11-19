@@ -300,31 +300,51 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Merges the configurations into a new one that shares none of their nested maps. {@code
+	 * Merges the configurations into a new one that shares no nested map or list with them. {@code
 	 * addBranches} adds to the first tree's maps in place, and {@code deepToMap} keeps a map-typed
 	 * value, such as the HTTP headers, by reference, so merging the original trees would change the
-	 * first configuration. Lists are still shared, and nothing writes into them.
+	 * first configuration.
 	 */
 	static Config merge(final String pathSep, final List<Config> configs) {
 		final var schema = configs.stream()
 						.map(Config::schema)
-						.map(ConfigUtil::copyMaps)
+						.map(ConfigUtil::copyMap)
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		final var configTree = configs.stream()
 						.map(Config::deepToMap)
-						.map(ConfigUtil::copyMaps)
+						.map(ConfigUtil::copyMap)
 						.reduce(TreeUtil::addBranches)
 						.orElseGet(Collections::emptyMap);
 		return new BasicConfig(pathSep, schema, configTree);
 	}
 
-	/** Copies the nested maps. A {@link LinkedHashMap} keeps its order: headers go out in the order written. */
-	@SuppressWarnings("unchecked")
-	private static Map<String, Object> copyMaps(final Map<String, Object> tree) {
-		final Map<String, Object> copy = tree instanceof LinkedHashMap ? new LinkedHashMap<>() : new HashMap<>();
-		tree.forEach((key, value) -> copy.put(key, value instanceof Map ? copyMaps((Map<String, Object>) value) : value));
+	/**
+	 * Copies the configuration so that it shares no nested map or list with the original. {@code new
+	 * BasicConfig(config)} copies only the branches and keeps a map- or list-typed value by reference,
+	 * so setting a header on such a copy also sets it on the original.
+	 */
+	static Config copyOf(final Config config) {
+		return new BasicConfig(config.pathSep(), config.schema(), copyMap(Config.deepToMap(config)));
+	}
+
+	/** Copies a map and what it nests. A {@link LinkedHashMap} keeps its order: headers go out in the order written. */
+	private static <K> Map<K, Object> copyMap(final Map<K, ?> map) {
+		final Map<K, Object> copy = map instanceof LinkedHashMap ? new LinkedHashMap<>() : new HashMap<>();
+		map.forEach((key, value) -> copy.put(key, copyValue(value)));
 		return copy;
+	}
+
+	private static Object copyValue(final Object value) {
+		if (value instanceof Map<?, ?> map) {
+			return copyMap(map);
+		}
+		if (value instanceof List<?> list) {
+			final var copy = new ArrayList<Object>(list.size());
+			list.forEach(element -> copy.add(copyValue(element)));
+			return copy;
+		}
+		return value;
 	}
 
 	static void flatten(

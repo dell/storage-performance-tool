@@ -5,12 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -55,6 +57,69 @@ public class ConfigUtilTest {
 		assertEquals(
 						List.of("X-Zulu", "X-Alpha", "X-Mike", "X-Bravo", "X-Yankee", "X-Charlie", "X-Whiskey", "X-Delta"),
 						List.copyOf(merged.mapVal("headers").keySet()));
+	}
+
+	@Test
+	public void testMergeSharesNoListWithItsInputs() {
+		final Map<String, Object> schema = new HashMap<>(Map.of("names", List.class));
+		final List<Object> names = new ArrayList<>(List.of("a"));
+		final Config first = new BasicConfig("-", schema, new HashMap<>(Map.of("names", names)));
+
+		final Config merged = ConfigUtil.merge("-", List.of(first));
+
+		assertEquals(names, merged.listVal("names"));
+		assertNotSame(names, merged.listVal("names"));
+	}
+
+	@Test
+	public void testCopyOfSharesNoMapOrListAndKeepsEveryValue() {
+		final Map<String, Object> schema = new HashMap<>(Map.of(
+						"branch", new HashMap<>(Map.of("headers", Map.class, "names", List.class, "count", int.class)),
+						"title", String.class));
+		final Map<String, Object> nestedInMap = new HashMap<>(Map.of("inner", "1"));
+		final Map<String, Object> headers = new HashMap<>(Map.of("X-Base", "1", "nested", nestedInMap));
+		final Map<String, Object> nestedInList = new HashMap<>(Map.of("inner", "2"));
+		final List<Object> innerList = new ArrayList<>(List.of("x"));
+		final List<Object> names = new ArrayList<>(List.of("a", nestedInList, innerList));
+		final Config source = new BasicConfig("-", schema, new HashMap<>(Map.of(
+						"branch", new HashMap<>(Map.of("headers", headers, "names", names, "count", 7)),
+						"title", "base")));
+
+		final Config copy = ConfigUtil.copyOf(source);
+
+		assertEquals(Config.deepToMap(source), Config.deepToMap(copy));
+		assertEquals(7, copy.intVal("branch-count"));
+		assertEquals("base", copy.stringVal("title"));
+		assertEquals("-", copy.pathSep());
+		final Map<String, Object> copiedHeaders = copy.mapVal("branch-headers");
+		final List<Object> copiedNames = copy.listVal("branch-names");
+		assertNotSame(headers, copiedHeaders);
+		assertNotSame(nestedInMap, copiedHeaders.get("nested"));
+		assertNotSame(names, copiedNames);
+		assertNotSame(nestedInList, copiedNames.get(1));
+		assertNotSame(innerList, copiedNames.get(2));
+	}
+
+	@Test
+	public void testCopyOfTakesAWriteThatTheOriginalDoesNotSee() {
+		final Config source = TestConfigBuilder.configWithHttpHeaders(Map.of("X-Base", "1"));
+
+		final Config copy = ConfigUtil.copyOf(source);
+		copy.val("storage-net-http-headers-X", "run");
+
+		assertEquals(Map.of("X-Base", "1", "X", "run"), copy.mapVal("storage-net-http-headers"));
+		assertEquals(Map.of("X-Base", "1"), source.mapVal("storage-net-http-headers"));
+	}
+
+	@Test
+	public void testCopyOfKeepsTheOrderOfAMapValue() {
+		final Map<String, Object> schema = new HashMap<>(Map.of("headers", Map.class));
+		final Map<String, Object> written = new LinkedHashMap<>();
+		final List<String> names = List.of("X-Zulu", "X-Alpha", "X-Mike", "X-Bravo", "X-Yankee", "X-Charlie");
+		names.forEach(name -> written.put(name, "1"));
+		final Config source = new BasicConfig("-", schema, new HashMap<>(Map.of("headers", written)));
+
+		assertEquals(names, List.copyOf(ConfigUtil.copyOf(source).mapVal("headers").keySet()));
 	}
 
 	@Test
