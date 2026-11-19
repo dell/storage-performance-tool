@@ -526,6 +526,20 @@ public class FileStorageDriverTest {
 		assertEquals(
 						Operation.Status.FAIL_IO,
 						FileStorageDriver.writeFailStatusOf(create, new IOException("Input/output error")));
+		final var update = newOp(OpType.UPDATE, "item", 1, null, tempDir.toString());
+		assertEquals(
+						Operation.Status.RESP_FAIL_SPACE,
+						FileStorageDriver.writeFailStatusOf(update, new IOException("No space left on device")));
+	}
+
+	@Test
+	public void writeFailStatusOfTestsTheDestinationPath() {
+		final File noSpace = new File("/proc");
+		assumeTrue(noSpace.isDirectory() && noSpace.getUsableSpace() == 0, "no directory reports zero usable space");
+		final var create = newOp(OpType.CREATE, "item", 1, null, "/proc/spt-missing-" + System.nanoTime());
+		assertEquals(
+						Operation.Status.RESP_FAIL_SPACE,
+						FileStorageDriver.writeFailStatusOf(create, new IOException("Input/output error")));
 	}
 
 	private static Operation.Status runOne(
@@ -555,6 +569,15 @@ public class FileStorageDriverTest {
 	private static Path linkToDevFull(final Path link) throws IOException {
 		final Path devFull = Path.of("/dev/full");
 		assumeTrue(Files.isWritable(devFull), "/dev/full is not available");
+		// the destination has free space, so only the reason text gives RESP_FAIL_SPACE: it must be the English one
+		try (var probe = Files.newOutputStream(devFull)) {
+			probe.write(1);
+			probe.flush();
+		} catch (final IOException e) {
+			assumeTrue(
+							String.valueOf(e.getMessage()).contains("No space left on device"),
+							"the host reports ENOSPC in another language: " + e.getMessage());
+		}
 		return Files.createSymbolicLink(link, devFull);
 	}
 

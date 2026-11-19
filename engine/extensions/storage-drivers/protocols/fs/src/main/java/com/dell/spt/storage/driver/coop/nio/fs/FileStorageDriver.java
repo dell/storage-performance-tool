@@ -148,9 +148,11 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 
 	// A space failure (RESP_FAIL_SPACE, not retried) only when the reason is ENOSPC or EDQUOT, or when the nearest
 	// existing ancestor of the path has no usable space; otherwise FAIL_IO (retried with --load-op-retry). The
-	// reason is the host's strerror text, which is localized: on a non-English host a space failure is recognized
-	// only by the ancestor test, and stays FAIL_IO while the ancestor still has usable space. A file system that
-	// always reports zero available space (squashfs, an ISO image) labels any failure under it as a space failure.
+	// reason is the host's glibc strerror text, which is localized (and worded otherwise on musl or macOS): on such
+	// a host a space failure is recognized only by the ancestor test, so running out of inodes or over a quota with
+	// blocks still usable is FAIL_IO, on the open route as on the write route. A file system that always reports zero
+	// usable space (squashfs, an ISO image, /proc, /sys), or whose free blocks are all reserved for root, labels any
+	// failure under it as a space failure.
 	static Operation.Status failStatusOf(
 					final String reason, final String path, final ToLongFunction<File> usableSpace) {
 		if (reason != null && (reason.contains(REASON_NO_SPACE) || reason.contains(REASON_QUOTA))) {
