@@ -18,8 +18,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 import org.openjdk.nashorn.api.scripting.JSObject;
 
@@ -300,7 +302,8 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Merges the configurations into a new one that shares no nested map or list with them. {@code
+	 * Merges the configurations into a new one that shares no nested map, {@link ArrayList} or {@link
+	 * LinkedList} with them (see {@link #copyMap}). {@code
 	 * addBranches} adds to the first tree's maps in place, and {@code deepToMap} keeps a map-typed
 	 * value, such as the HTTP headers, by reference, so merging the original trees would change the
 	 * first configuration.
@@ -320,7 +323,8 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Copies the configuration so that it shares no nested map or list with the original. {@code new
+	 * Copies the configuration so that it shares no nested map, {@link ArrayList} or {@link LinkedList}
+	 * with the original (see {@link #copyMap}). {@code new
 	 * BasicConfig(config)} copies only the branches and keeps a map- or list-typed value by reference,
 	 * so setting a header on such a copy also sets it on the original.
 	 */
@@ -328,19 +332,45 @@ public interface ConfigUtil {
 		return new BasicConfig(config.pathSep(), config.schema(), copyMap(Config.deepToMap(config)));
 	}
 
-	/** Copies a map and what it nests. A {@link LinkedHashMap} keeps its order: headers go out in the order written. */
+	/**
+	 * Copies a map and what it nests. A {@link HashMap}, {@link LinkedHashMap} or {@link TreeMap} is
+	 * copied into a map of its own class, because a schema may name that class as a setting's type.
+	 * Any other map becomes a {@link LinkedHashMap}, which keeps its order: headers go out in the
+	 * order written. Every map is copied, because a configuration branch is a map too.
+	 */
+	@SuppressWarnings("unchecked")
 	private static <K> Map<K, Object> copyMap(final Map<K, ?> map) {
-		final Map<K, Object> copy = map instanceof LinkedHashMap ? new LinkedHashMap<>() : new HashMap<>();
+		final Map<K, Object> copy;
+		if (map.getClass() == HashMap.class) {
+			copy = new HashMap<>();
+		} else if (map.getClass() == TreeMap.class) {
+			copy = new TreeMap<>(((TreeMap<K, ?>) map).comparator());
+		} else {
+			copy = new LinkedHashMap<>();
+		}
 		map.forEach((key, value) -> copy.put(key, copyValue(value)));
 		return copy;
 	}
 
+	/**
+	 * Copies an {@link ArrayList} or a {@link LinkedList} into a list of its own class, and keeps any
+	 * other list by reference, as a configuration did before: a schema may name the list's class as
+	 * the setting's type.
+	 */
+	@SuppressWarnings("JdkObsolete") // the copy keeps the class the configuration was given
 	private static Object copyValue(final Object value) {
 		if (value instanceof Map<?, ?> map) {
 			return copyMap(map);
 		}
 		if (value instanceof List<?> list) {
-			final var copy = new ArrayList<Object>(list.size());
+			final List<Object> copy;
+			if (list.getClass() == ArrayList.class) {
+				copy = new ArrayList<>(list.size());
+			} else if (list.getClass() == LinkedList.class) {
+				copy = new LinkedList<>();
+			} else {
+				return value;
+			}
 			list.forEach(element -> copy.add(copyValue(element)));
 			return copy;
 		}

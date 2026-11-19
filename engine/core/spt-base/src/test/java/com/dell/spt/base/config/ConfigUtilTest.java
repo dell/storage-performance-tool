@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
@@ -14,10 +15,14 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class ConfigUtilTest {
 
@@ -120,6 +125,53 @@ public class ConfigUtilTest {
 		final Config source = new BasicConfig("-", schema, new HashMap<>(Map.of("headers", written)));
 
 		assertEquals(names, List.copyOf(ConfigUtil.copyOf(source).mapVal("headers").keySet()));
+	}
+
+	@Test
+	@SuppressWarnings("JdkObsolete") // an extension's schema may name LinkedList
+	public void testMergeAndCopyOfKeepTheClassOfAListOrMapThatTheSchemaNames() {
+		// An extension's defaults may name a concrete class: the configuration refuses any other one.
+		final Map<String, Object> schema = new HashMap<>(Map.of("names", LinkedList.class, "sorted", TreeMap.class));
+		final List<Object> names = new LinkedList<>(List.of("a", "b"));
+		final Map<String, Object> sorted = new TreeMap<>(Comparator.reverseOrder());
+		sorted.put("a", "1");
+		sorted.put("c", "3");
+		sorted.put("b", "2");
+		final Config source = new BasicConfig("-", schema, new HashMap<>(Map.of("names", names, "sorted", sorted)));
+
+		final Config merged = assertDoesNotThrow(() -> ConfigUtil.merge("-", List.of(source)));
+		final Config copy = assertDoesNotThrow(() -> ConfigUtil.copyOf(source));
+
+		for (final Config config : List.of(merged, copy)) {
+			final List<Object> copiedNames = config.listVal("names");
+			final Map<String, Object> copiedSorted = config.mapVal("sorted");
+			assertEquals(LinkedList.class, copiedNames.getClass());
+			assertEquals(names, copiedNames);
+			assertNotSame(names, copiedNames);
+			assertEquals(TreeMap.class, copiedSorted.getClass());
+			assertNotSame(sorted, copiedSorted);
+			copiedSorted.put("d", "4");
+			assertEquals(List.of("d", "c", "b", "a"), List.copyOf(copiedSorted.keySet()));
+		}
+		assertEquals(List.of("c", "b", "a"), List.copyOf(sorted.keySet()));
+	}
+
+	@Test
+	public void testCopyOfKeepsAnyOtherListAndTheOrderOfAnyOtherMap() {
+		final Map<String, Object> schema = new HashMap<>(Map.of("names", List.class, "headers", Map.class));
+		final List<Object> names = Collections.unmodifiableList(new ArrayList<>(List.of("a")));
+		final Map<String, Object> written = new LinkedHashMap<>();
+		final List<String> headerNames = List.of("X-Zulu", "X-Alpha", "X-Mike", "X-Bravo", "X-Yankee", "X-Charlie");
+		headerNames.forEach(name -> written.put(name, "1"));
+		final Config source = new BasicConfig("-", schema, new HashMap<>(Map.of(
+						"names", names, "headers", Collections.unmodifiableMap(written))));
+
+		final Config copy = ConfigUtil.copyOf(source);
+
+		assertSame(names, copy.listVal("names"));
+		assertEquals(headerNames, List.copyOf(copy.mapVal("headers").keySet()));
+		copy.mapVal("headers").put("X-Later", "2");
+		assertEquals(headerNames, List.copyOf(written.keySet()));
 	}
 
 	@Test
