@@ -81,36 +81,42 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					final List<Extension> extensions,
 					final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
-		final var buildInfo = EngineBuildInfoProvider.global();
-		this.config = buildInfo.copyWithProjectedVersion(config);
-		this.extensions = extensions;
-		this.ctxConfigs = ctxConfigs == null ? null
-						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
-		// Before anything reads or records the step configuration, so drivers, worker slices and config.yaml agree.
-		HttpVersioningSynonym.resolve(this.config, this.ctxConfigs);
-		this.metricsMgr = metricsMgr;
-		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
-		// Validate local steps immediately, and clients only when selected for execution.
-		if (!(this instanceof LoadStepClient<?>)) {
-			validateRangeConfiguration();
-			validateNicSetConfiguration();
-		}
 		try {
-			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
-		} catch (final RuntimeException e) {
-			throw new IntegrityTerminalException(
-							IntegrityTerminalException.Category.CONFIGURATION,
-							safeStepId(config),
-							"invalid storage.integrity configuration",
-							e);
+			final var buildInfo = EngineBuildInfoProvider.global();
+			this.config = buildInfo.copyWithProjectedVersion(config);
+			this.extensions = extensions;
+			this.ctxConfigs = ctxConfigs == null ? null
+							: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
+			// Before anything reads or records the step configuration, so drivers, worker slices and config.yaml agree.
+			HttpVersioningSynonym.resolve(this.config, this.ctxConfigs);
+			this.metricsMgr = metricsMgr;
+			// Script bindings eagerly construct dormant client prototypes for every operation/step type.
+			// Validate local steps immediately, and clients only when selected for execution.
+			if (!(this instanceof LoadStepClient<?>)) {
+				validateRangeConfiguration();
+				validateNicSetConfiguration();
+			}
+			try {
+				this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
+			} catch (final RuntimeException e) {
+				throw new IntegrityTerminalException(
+								IntegrityTerminalException.Category.CONFIGURATION,
+								safeStepId(config),
+								"invalid storage.integrity configuration",
+								e);
+			}
+			final StandaloneDeleteConfig standaloneDelete = StandaloneDeleteConfig.from(
+							this.config.configVal("load"));
+			this.standaloneDeleteEnabled = standaloneDelete.enabled();
+			this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
+			this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
+			this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
+			Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
+		} catch (final RuntimeException | Error e) {
+			// DaemonBase() has registered this object: the exit hook must not close a half-built step.
+			abandonRegistration();
+			throw e;
 		}
-		final StandaloneDeleteConfig standaloneDelete = StandaloneDeleteConfig.from(
-						this.config.configVal("load"));
-		this.standaloneDeleteEnabled = standaloneDelete.enabled();
-		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
-		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
-		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
-		Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
 	private void validateRangeConfiguration() {

@@ -192,10 +192,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
 		super(config, extensions, ctxConfigs, metricsMgr);
-		this.failureBudgetController = standaloneDeleteEnabled()
-						? new ObjectFailureBudgetController(
-										ObjectFailureBudgetConfig.from(this.config.configVal("load")))
-						: null;
+		try {
+			this.failureBudgetController = standaloneDeleteEnabled()
+							? new ObjectFailureBudgetController(
+											ObjectFailureBudgetConfig.from(this.config.configVal("load")))
+							: null;
+		} catch (final RuntimeException | Error e) {
+			// The base constructor finished, so this object is registered; a subclass's fields are not set.
+			abandonRegistration();
+			throw e;
+		}
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {

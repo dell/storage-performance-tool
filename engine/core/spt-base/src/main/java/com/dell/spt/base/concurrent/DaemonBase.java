@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -24,10 +25,29 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 		REGISTRY.add(daemonRef);
 	}
 
+	/**
+	 * Takes this daemon out of the registry, so {@link #closeAll()} does not reach it. For a constructor
+	 * that fails: what it leaves behind is only partly built, and closing it would read unset fields.
+	 */
+	protected final void abandonRegistration() {
+		REGISTRY.remove(daemonRef);
+	}
+
 	@Override
 	public final void close() throws IOException {
 		super.close();
 		REGISTRY.remove(daemonRef);
+	}
+
+	/** Whether a registered daemon, still reachable, matches; for tests. */
+	static boolean isRegistered(final Predicate<? super Daemon> matcher) {
+		for (final var daemonRef : REGISTRY) {
+			final var daemon = daemonRef.get();
+			if (daemon != null && matcher.test(daemon)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public static void closeAll() {
