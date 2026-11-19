@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
@@ -311,6 +312,49 @@ public class LoadStepServiceImplTest {
 							() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()),
 							times(1));
 			// Released: closing again releases nothing and throws nothing.
+			assertDoesNotThrow(service::close);
+			assertDoesNotThrow(local::close);
+			assertTrue(service.isClosed());
+			assertTrue(local.isClosed());
+			verify(context, times(1)).close();
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
+	@DisplayName("A slice whose context shutdown keeps failing ends closed and unexported")
+	void sliceWhoseContextShutdownKeepsFailingIsClosedAndUnexported() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		final IntegrityTerminalException shutdownFailure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE post-verification could not complete its full inventory pass");
+		when(context.shutdown()).thenThrow(shutdownFailure);
+		final Config config = sliceConfig("delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-step-limit-time", "0s");
+		final FailingSlice local = new FailingSlice(config, context);
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final int port = freePort();
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			service.start();
+			assertEquals(local.loadStepId(), remote.loadStepId());
+
+			assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, service::stop));
+			assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, service::close));
+
+			assertThrows(RemoteException.class, remote::loadStepId);
+			assertFalse(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(service.name()));
+			verify(context, times(1)).shutdown();
+			verify(context).stop();
+			verify(context).close();
+			// The worker's shutdown and the JVM exit close it again: nothing is released twice.
 			assertDoesNotThrow(service::close);
 			assertDoesNotThrow(local::close);
 			assertTrue(service.isClosed());

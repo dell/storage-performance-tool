@@ -192,6 +192,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
 	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
 	private final DeleteArtifactRecorder deleteArtifactRecorder;
+	// A standalone DELETE outside duration mode shuts down and stops once: the shutdown and stop that
+	// close() repeats after a failed one return, so the close reaches doClose. The failure was thrown
+	// by the first attempt and is the slice's to keep. Duration mode retries its stop until the slice
+	// gives up (releaseAfterFailedStop); other workloads retry as before. Read and written under the
+	// lifecycle lock.
+	private boolean shutdownAttempted;
+	private boolean shutdownFailed;
+	private boolean stopAttempted;
+	private volatile boolean stopRetriesAbandoned;
 	private final Path deleteSelectionManifest;
 	private final DeleteOperationalOutcomeLedger deleteTargetOutcomes;
 	private final AtomicReference<DeleteVerificationReport> deletePreValidationReport = new AtomicReference<>();
@@ -2588,45 +2597,96 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	/** Whether a shutdown or stop that already ran returns when repeated (see shutdownAttempted). */
+	private boolean runsOnce() {
+		return stopRetriesAbandoned || (standaloneDeleteEnabled && !standaloneDeleteDurationMode);
+	}
+
 	@Override
 	protected final void doShutdown() {
-		// Close both admission gates before retry settlement or recovery. Only operations
-		// already past actual driver dispatch remain drain-eligible.
-		prepareOperationDrain();
-		drainDispatchedOperations();
-		verifyDeleteInventoryForDirectLifecycle();
-		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
-						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			driver.shutdown();
-			Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
-		} catch (final RemoteException e) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+		if (shutdownAttempted && runsOnce()) {
+			return;
 		}
+		if (stopRetriesAbandoned) {
+			// Given up before any shutdown: the close releases the context without draining it.
+			shutdownAttempted = true;
+			shutdownFailed = true;
+			return;
+		}
+		// Set before the attempt, cleared when it passes: a failure leaves it set, so the stop only
+		// releases. A retry that passes, where the shutdown is retried, clears it, and that stop runs
+		// in full.
+		// An interrupt leaves shutdownAttempted unset, so the shutdown runs again when repeated.
+		shutdownFailed = true;
+		try {
+			// Close both admission gates before retry settlement or recovery. Only operations
+			// already past actual driver dispatch remain drain-eligible.
+			prepareOperationDrain();
+			drainDispatchedOperations();
+			// The driver stays up for a failed verification: a duration-mode retry verifies with it,
+			// and the stop that follows a failure stops it.
+			verifyDeleteInventoryForDirectLifecycle();
+			try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
+							.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				driver.shutdown();
+				Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
+			} catch (final RemoteException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+			}
+			shutdownFailed = false;
+		} catch (final RuntimeException e) {
+			shutdownAttempted = true;
+			throw e;
+		}
+		shutdownAttempted = true;
 	}
 
 	@Override
 	protected final void doStop() throws IllegalStateException {
-		// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
-		prepareOperationDrain();
-		drainDispatchedOperations();
-		verifyDeleteInventoryForDirectLifecycle();
-		finalizeDeleteVerificationSummary();
-
-		RuntimeException artifactFailure = null;
-		if (deleteArtifactRecorder != null) {
+		if (stopAttempted && runsOnce()) {
+			return;
+		}
+		if (shutdownFailed || stopRetriesAbandoned) {
+			// The drain or verification did not complete, or the slice gave up: no evidence to
+			// finish and no results to output. Release what the stop owns; the close does the rest.
+			RuntimeException failure = closeDeleteVerificationStorage();
 			try {
+				driver.stop();
+			} catch (final RuntimeException e) {
+				failure = appendRecoveryFailure(failure, e);
+			}
+			stopAttempted = true;
+			if (failure != null) {
+				throw failure;
+			}
+			return;
+		}
+		RuntimeException artifactFailure = null;
+		try {
+			// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
+			prepareOperationDrain();
+			drainDispatchedOperations();
+			verifyDeleteInventoryForDirectLifecycle();
+			finalizeDeleteVerificationSummary();
+			if (deleteArtifactRecorder != null) {
 				deleteArtifactRecorder.finish(
 								operationLifecycle.snapshot(),
 								deleteMetricsSnapshot(),
 								deletePreValidationReport.get(),
 								deletePostVerificationReport.get());
-			} catch (final RuntimeException failure) {
-				artifactFailure = failure;
 			}
+		} catch (final RuntimeException failure) {
+			artifactFailure = failure;
 		}
 		artifactFailure = appendRecoveryFailure(artifactFailure, closeDeleteVerificationStorage());
 
-		driver.stop();
+		try {
+			driver.stop();
+		} catch (final RuntimeException e) {
+			artifactFailure = appendRecoveryFailure(artifactFailure, e);
+		}
+		// Only now: a stop cut short by an interrupt runs again when repeated.
+		stopAttempted = true;
 		if (artifactFailure != null) {
 			throw artifactFailure;
 		}
@@ -2997,6 +3057,22 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			i++;
 		}
 		return a.substring(0, i);
+	}
+
+	@Override
+	public final void releaseAfterFailedStop() throws IOException {
+		stopRetriesAbandoned = true;
+		RuntimeException stopFailure = null;
+		try {
+			// Runs once now: the stop that close() repeats returns, whatever this one throws.
+			stop();
+		} catch (final RuntimeException e) {
+			stopFailure = e;
+		}
+		close();
+		if (stopFailure != null) {
+			throw stopFailure;
+		}
 	}
 
 	@Override
