@@ -35,7 +35,8 @@ final preconditionLoad1 = PreconditionLoad
 		]
 	)
 
-// declare the weighted load step instance (20% create operations, 80% read operations)
+// declare the weighted load step instance (create weight 20, read weight 80). The recycled
+// read sub-step holds the create sub-step to its share while all its items fit in the input queue
 final weightedLoad1 = WeightedLoad
 	.config(
 		[

@@ -447,7 +447,7 @@ public final class Main {
 		context.addServlet(new ServletHolder(new ConfigServlet(fullDefaultConfig)), "/config/*");
 		context.addServlet(new ServletHolder(new LogServlet()), "/logs/*");
 		context.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
-		context.addServlet(new ServletHolder(new NodeMetricsHandler(metricsMgr, fullDefaultConfig)), "/metrics/json");
+		context.addServlet(new ServletHolder(new NodeMetricsHandler(metricsMgr, fullDefaultConfig, apiStatus)), "/metrics/json");
 		if (shouldExposeFleetMetrics(fullDefaultConfig)) {
 			context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, fullDefaultConfig)), "/metrics/fleet/json");
 			context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, fullDefaultConfig)), "/metrics/cluster/json");
