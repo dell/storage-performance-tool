@@ -77,6 +77,8 @@ With the `s3`, `s3-aws` and `s3-rdma` storage drivers, `item-data-ranges-thresho
 with a range GET, and the parts are read in parallel. There is nothing to initiate or complete. A
 failed part is retried up to 3 times; if it still fails, the other parts finish and the read counts
 as failed, with that part's status. The read counts once, with the object's size in bytes; the
-bytes of the parts that succeeded also count when the read fails or is retried whole. A split read
+bytes of the parts that succeeded also count when the read fails or is retried whole. Each part
+that succeeds adds one duration and one latency sample, and the read itself adds none, so the
+step's duration and latency statistics describe range requests. A split read
 ignores a requested version ID: each part reads the current object. The `s3-rdma` driver sends these range GETs over HTTP. Through 5.17.0 the `s3-aws` driver did not split
 reads: it failed such a read without a request.

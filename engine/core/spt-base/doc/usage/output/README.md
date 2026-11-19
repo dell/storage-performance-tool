@@ -266,6 +266,12 @@ TtfbMax[us]     | Maximum Time to First Byte
 
 Time to First Byte is populated for body-returning operations when first response body bytes are observed, currently READ and LIST. Non-body operations and empty/no-body samples do not contribute TTFB values.
 
+**Split reads.** For a read split by `item-data-ranges-threshold` (`--part-size` on the CLI), `Duration*`, `DurationSum[s]`, `Latency*` and `Ttfb*` hold one sample per range request that succeeded. The read sends no request of its own and adds no sample, so these columns describe ranges, not whole objects. An object's time from its start to its last range is in `op.trace.csv`. `CountSucc`, `CountFail` and `TP*` still count objects, and `Size` and `BW*` count bytes.
+
+**Multipart uploads.** `Duration*`, `DurationSum[s]` and `Latency*` hold one sample per part and one for the completion request.
+
+On `s3-aws`, the upload's last sample instead covers the whole upload, from its initiation to its completion.
+
 Again, spt only uses 2^10 (1024) multiplier. So 1MB is 1_048_576 bytes.
 
 ## 2.2. Load Step Summary
@@ -318,7 +324,7 @@ Console summary metrics output has YAML format for the better readability:
 ```
 
 * The console summary is displayed only on the entry node. It's not displayed on the additional nodes in the distributed mode.
-* The equation (CONFIGURED_CURRENCY_LEVEL * DRIVER_COUNT * ELAPSED_TIME / OPERATIONS_DURATION_SUM) may be used as efficiency estimate.
+* The equation (CONFIGURED_CURRENCY_LEVEL * DRIVER_COUNT * ELAPSED_TIME / OPERATIONS_DURATION_SUM) may be used as efficiency estimate. For a split read, the sum is that of its range requests.
 * *Mean* rates are calculated as current total count of items/bytes divided by current elapsed time.
 * `Time To First Byte [us]` is reported when the load step has TTFB samples; otherwise it is shown as `N/A`.
 * *Last* rates are calculated as [exponentially decaying moving average](https://en.wikipedia.org/wiki/Moving_average#Exponential_moving_average) where

@@ -84,8 +84,9 @@ without a completed response cannot reuse stale latency or duration samples.
 A READ of an object larger than `item.data.ranges.threshold` (`--part-size` on the CLI) is split
 into parts, as on the `s3` driver: each part is a ranged GET of its bytes in the object, and the
 parts are read in parallel. The read sends no request of its own. It counts once, when its last
-part ends, with the object's size in bytes and a duration from its start to its last part's end;
-each part also records its own duration sample. A failed part is retried up to 3 times; if it still
+part ends, with the object's size in bytes. Each part that succeeds adds one duration and one
+latency sample, and the read adds none; its time from its start to its last part's end is in
+`op.trace.csv`. A failed part is retried up to 3 times; if it still
 fails, the other parts finish and the read fails with that part's status. The bytes of the parts
 that succeeded still count toward the byte total, of a read that fails and of a read that is
 retried whole. A split read ignores a requested version ID, as on `s3`: each part reads the current
