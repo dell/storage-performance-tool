@@ -1220,7 +1220,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final String uri;
 		xml.setLength(0);
 		try {
-			uri = xml.append(SLASH).append(bucket, 0, manifestBucketEnd(bucket)).append('?').append(DELETE_QUERY).toString();
+			uri = appendManifestBucket(xml.append(SLASH), bucket).append('?').append(DELETE_QUERY).toString();
 		} finally {
 			xml.setLength(0);
 		}
@@ -1249,7 +1249,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var uri = THREAD_LOCAL_STRB.get();
 		uri.setLength(0);
 		try {
-			uri.append(SLASH).append(bucket, 0, manifestBucketEnd(bucket)).append(SLASH);
+			appendManifestBucket(uri.append(SLASH), bucket).append(SLASH);
 			appendPercentEncodedPath(uri, target.key());
 			return uri.toString();
 		} finally {
@@ -1258,13 +1258,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Returns where a manifest bucket's name ends: before the one trailing slash it may be written
-	 * with, so that {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that
-	 * row does. Callers append that span, so a trailing slash costs no extra string.
+	 * Appends a manifest bucket's name without the one trailing slash it may be written with, so that
+	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does. A
+	 * name without the slash is appended whole, as before: appending a span of a string is slower.
 	 */
-	private static int manifestBucketEnd(final String bucket) {
+	private static StringBuilder appendManifestBucket(final StringBuilder sb, final String bucket) {
 		final int last = bucket.length() - 1;
-		return last > 0 && bucket.charAt(last) == '/' ? last : bucket.length();
+		return last > 0 && bucket.charAt(last) == '/' ? sb.append(bucket, 0, last) : sb.append(bucket);
 	}
 
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
