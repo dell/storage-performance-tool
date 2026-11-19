@@ -428,19 +428,20 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		final var opType = op.type();
 		final var srcPath = op.srcPath();
 		final HttpMethod httpMethod;
-		final String uriPath;
+		final String itemPath;
 		if (item instanceof DataItem) {
 			httpMethod = dataHttpMethod(opType);
-			uriPath = dataUriPath(item, srcPath, op.dstPath(), opType);
+			itemPath = dataUriPath(item, srcPath, op.dstPath(), opType);
 		} else if (item instanceof TokenItem) {
 			httpMethod = tokenHttpMethod(opType);
-			uriPath = tokenUriPath(item, srcPath, op.dstPath(), opType);
+			itemPath = tokenUriPath(item, srcPath, op.dstPath(), opType);
 		} else if (item instanceof PathItem) {
 			httpMethod = pathHttpMethod(opType);
-			uriPath = pathUriPath(item, srcPath, op.dstPath(), opType);
+			itemPath = pathUriPath(item, srcPath, op.dstPath(), opType);
 		} else {
 			throw new AssertionError("Unsupported item class: " + item.getClass().getName());
 		}
+		final String uriPath = requestPath(itemPath);
 		final var uriQuery = uriQuery();
 		final var uri = uriQuery == null || uriQuery.isEmpty() ? uriPath : uriPath + uriQuery;
 		final var httpHeaders = (HttpHeaders) new DefaultHttpHeaders();
@@ -493,6 +494,22 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		applySharedHeaders(httpHeaders);
 		applyAuthHeaders(httpHeaders, httpMethod, authUri(uriPath, uri), op.credential());
 		return httpRequest;
+	}
+
+	/**
+	 * The request path sent and signed for {@code path}, a path such as {@link #dataUriPath} gives,
+	 * which keeps the item's key as it is. The default is {@code path} itself, so a driver that does
+	 * not override this sends its paths as before. A driver whose target decodes the request path
+	 * returns the path with the characters it must not send raw percent-encoded, and returns the same
+	 * {@code String} when there are none. {@link #httpRequest} and the drivers' own request builders
+	 * apply it to the path before they add a query; the path itself stays as it was for records, such
+	 * as the operation trace, that name the item's key.
+	 *
+	 * @param path a request path without a query
+	 * @return the path to send
+	 */
+	protected String requestPath(final String path) {
+		return path;
 	}
 
 	/**

@@ -418,12 +418,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, bodyBytes.length);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyDataPlaneAuthHeaders(headers, HttpMethod.PUT, s3Path);
+		final String requestPath = requestPath(s3Path);
+		applyDataPlaneAuthHeaders(headers, HttpMethod.PUT, requestPath);
 
 		final FullHttpRequest req = new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
 						HttpMethod.PUT,
-						s3Path,
+						requestPath,
 						Unpooled.wrappedBuffer(bodyBytes),
 						headers,
 						EmptyHttpHeaders.INSTANCE);
@@ -465,12 +466,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyDataPlaneAuthHeaders(headers, HttpMethod.GET, s3Path);
+		final String requestPath = requestPath(s3Path);
+		applyDataPlaneAuthHeaders(headers, HttpMethod.GET, requestPath);
 
 		final FullHttpRequest req = new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
 						HttpMethod.GET,
-						s3Path,
+						requestPath,
 						Unpooled.EMPTY_BUFFER,
 						headers,
 						EmptyHttpHeaders.INSTANCE);

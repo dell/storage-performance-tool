@@ -728,6 +728,59 @@ public class S3TablesStorageDriverTest {
 		assertEquals(64 * 1024 * 1024, S3TablesStorageDriver.DATA_PLANE_GET_MAX_CONTENT_LENGTH);
 	}
 
+	/**
+	 * A data-plane PUT and GET of a key with ?, # or a space send the key encoded and sign the path
+	 * as sent; a key with none of them is sent as it is.
+	 */
+	@Test
+	void dataPlaneRequests_encodeQueryCharactersInTheKeyAndSignThePathSent() throws Exception {
+		final TestDriver drv = new TestDriver(baseConfig("tableCompactionPoll", "127.0.0.1"));
+		drv.executeDataPlaneRequest("/test-bucket/data/a?b c#d.parquet", "abc".getBytes(StandardCharsets.UTF_8), "application/octet-stream");
+		drv.enqueueResponse(okJson("{}"));
+		drv.executeDataPlaneGet("/test-bucket/meta/v?1.json");
+		drv.executeDataPlaneRequest("/test-bucket/data/f-1.parquet", "a".getBytes(StandardCharsets.UTF_8), "application/octet-stream");
+
+		final FullHttpRequest put = drv.log().poll();
+		final FullHttpRequest get = drv.log().poll();
+		final FullHttpRequest plain = drv.log().poll();
+		assertEquals("/test-bucket/data/a%3Fb%20c%23d.parquet", put.uri());
+		assertEquals("/test-bucket/meta/v%3F1.json", get.uri());
+		assertEquals("/test-bucket/data/f-1.parquet", plain.uri());
+		for (final FullHttpRequest request : List.of(put, get, plain)) {
+			assertSignedAsSent(request);
+		}
+	}
+
+	private static final java.util.regex.Pattern AUTH_V4 = java.util.regex.Pattern.compile(
+					"AWS4-HMAC-SHA256 Credential=([^/]+)/(\\d{8})/([^/]*)/([^/]+)/aws4_request, "
+									+ "SignedHeaders=([^,]+), Signature=([0-9a-f]{64})");
+
+	/** Recomputes the request's SigV4 signature as a target does, over the path as sent. */
+	private static void assertSignedAsSent(final FullHttpRequest request) throws Exception {
+		final java.util.regex.Matcher m = AUTH_V4.matcher(request.headers().get("Authorization"));
+		assertTrue(m.matches(), request.headers().get("Authorization"));
+		assertEquals("s3", m.group(4));
+		final String uri = request.uri();
+		assertEquals(-1, uri.indexOf('?'), "the data-plane path carries no query");
+		final StringBuilder canonical = new StringBuilder(request.method().name()).append('\n')
+						.append(uri).append("\n\n");
+		for (final String name : m.group(5).split(";")) {
+			canonical.append(name).append(':').append(request.headers().get(name).trim()).append('\n');
+		}
+		canonical.append('\n').append(m.group(5)).append('\n').append(request.headers().get("x-amz-content-sha256"));
+		final String scope = m.group(2) + '/' + m.group(3) + "/s3/aws4_request";
+		final String stringToSign = "AWS4-HMAC-SHA256\n" + request.headers().get("x-amz-date") + '\n' + scope + '\n'
+						+ java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+										.digest(canonical.toString().getBytes(StandardCharsets.UTF_8)));
+		byte[] key = ("AWS4" + TEST_CRED.getSecret()).getBytes(StandardCharsets.UTF_8);
+		for (final String part : List.of(m.group(2), m.group(3), "s3", "aws4_request", stringToSign)) {
+			final javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+			mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
+			key = mac.doFinal(part.getBytes(StandardCharsets.UTF_8));
+		}
+		assertEquals(java.util.HexFormat.of().formatHex(key), m.group(6), "canonical request:\n" + canonical);
+	}
+
 	private static FullHttpResponse okJson(final String body) {
 		return new DefaultFullHttpResponse(
 						HttpVersion.HTTP_1_1,
