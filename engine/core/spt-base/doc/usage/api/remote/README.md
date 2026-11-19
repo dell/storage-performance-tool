@@ -152,8 +152,10 @@ curl -v -X DELETE -H "If-Match: 1543257350274" http://localhost:9999/run
 ```
 
 A busy node answers `POST /run` with `409 Conflict`, and the request changes nothing: not the run in progress, its
-configuration or `/status`. A node is busy while a run is in progress or finishing its cleanup, or while it holds a busy
-worker slice. A request that cannot be read or merged with the node's configuration still answers `400`.
+configuration or `/status`. A node is busy while a run is in progress or finishing its cleanup, or while it holds a
+worker slice. A node holding a worker slice answers `409` without reading the request. On any other node, defaults that
+name an unknown setting or give a value of the wrong type still answer `400`, and defaults that cannot be parsed answer
+`500`.
 
 A stopped run stays the active run until its cleanup returns: `HEAD /run` answers `200` with its run id, and `GET` and
 `DELETE` with that id answer `200`. After `DELETE /run`, wait for `HEAD /run` to answer `204`, or for a terminal `/status`,
