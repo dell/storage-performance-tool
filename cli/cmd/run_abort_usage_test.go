@@ -114,3 +114,23 @@ func TestCheckPortConflictsReportsUnattendedAbort(t *testing.T) {
 		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
 	}
 }
+
+// The resolver budgets each phase: an overall deadline here would count the time
+// an operator spends at the prompt against the engine's shutdown.
+func TestCheckPortConflictsSetsNoOverallDeadline(t *testing.T) {
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(ctx context.Context, _ string, _ bool) (*portcheck.ResolutionResult, error) {
+		if deadline, ok := ctx.Deadline(); ok {
+			t.Errorf("resolver context has deadline %v", deadline)
+		}
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 9999, "")
+	if err := checkPortConflicts(cmd); err != nil {
+		t.Fatalf("checkPortConflicts() error = %v", err)
+	}
+}

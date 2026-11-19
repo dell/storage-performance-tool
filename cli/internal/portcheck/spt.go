@@ -412,43 +412,38 @@ func (c *SptAPIClient) getMetricsJSON(ctx context.Context) ([]jsonMetricsStep, e
 	return steps, nil
 }
 
-// StopSptTest attempts to stop a running Spt test gracefully
-func StopSptTest(ctx context.Context, baseURL string) error {
-	client := NewSptAPIClient(baseURL, DefaultHTTPTimeout)
-	return client.StopTest(ctx)
-}
-
-// StopTest sends a stop command to the Spt API
-func (c *SptAPIClient) StopTest(ctx context.Context) error {
-	url := c.BaseURL + "/run"
-
-	logging.LogInfo("portcheck", "sending stop command to Spt API", "url", url)
-
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+// StopActiveRun stops whatever run the engine reports as active and returns its
+// ID, or 0 when no run is active. A run that replaces the reported one between
+// the read and the stop was never shown to the caller, so it is left running and
+// reported as an error.
+func (c *SptAPIClient) StopActiveRun(ctx context.Context) (int64, error) {
+	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create stop request: %w", err)
+		return 0, err
 	}
-
-	resp, err := c.HTTPClient.Do(req)
+	if !active {
+		return 0, nil
+	}
+	logging.LogInfo("portcheck", "stopping the active run", "url", c.BaseURL, "run_id", runID)
+	stopped, err := c.StopRun(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("stop request failed: %w", err)
+		return 0, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Handle different response codes
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusAccepted:
-		// Success
-		logging.LogInfo("portcheck", "Spt test stop command accepted",
-			"status", resp.StatusCode)
-		return nil
-	case http.StatusNotFound:
-		// No test was running
-		logging.LogDebug("portcheck", "no test was running to stop")
-		return nil
-	default:
-		return fmt.Errorf("stop command failed with status %d", resp.StatusCode)
+	if stopped {
+		return runID, nil
 	}
+	// The engine found no matching run: it ended, or another one took over.
+	currentID, active, err := c.activeRunID(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("re-read the active run after stopping run %d: %w", runID, err)
+	}
+	if !active {
+		return 0, nil
+	}
+	if currentID == runID {
+		return 0, fmt.Errorf("the engine did not accept the stop of its active run %d", runID)
+	}
+	return 0, fmt.Errorf("run %d was replaced by run %d, which was left running", runID, currentID)
 }
 
 // StopRun asks the engine to stop the run with runID through DELETE /run,

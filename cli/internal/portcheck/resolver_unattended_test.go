@@ -70,6 +70,9 @@ func TestPromptEndOfInputAfterInvalidAnswerAborts(t *testing.T) {
 
 	result, err := resolver.CheckAndResolveConflicts(context.Background())
 	assertUnattendedAbort(t, result, err, "run 41")
+	if !strings.Contains(result.Message, "--force") {
+		t.Errorf("Message = %q, want it to offer --force", result.Message)
+	}
 	assertReadOnly(t, engine.received())
 }
 

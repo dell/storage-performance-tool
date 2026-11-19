@@ -226,57 +226,6 @@ func TestSptAPIClient_getMetrics(t *testing.T) {
 	})
 }
 
-func TestSptAPIClient_StopTest(t *testing.T) {
-	t.Run("successful stop", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != "DELETE" || r.URL.Path != "/run" {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		err := client.StopTest(ctx)
-		if err != nil {
-			t.Errorf("StopTest() error = %v, want nil", err)
-		}
-	})
-
-	t.Run("no test running (404)", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		err := client.StopTest(ctx)
-		if err != nil {
-			t.Errorf("StopTest() error = %v, want nil (404 should be treated as success)", err)
-		}
-	})
-
-	t.Run("stop command failed", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		err := client.StopTest(ctx)
-		if err == nil {
-			t.Errorf("StopTest() error = nil, want error (500)")
-		}
-	})
-}
-
 func TestIsSptAPI(t *testing.T) {
 	t.Run("spt-like API (returns 200)", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -454,23 +403,5 @@ func TestGetSptStatus_HelperFunction(t *testing.T) {
 	}
 	if status.RunID != "42" {
 		t.Errorf("RunID = %v, want %v", status.RunID, "42")
-	}
-}
-
-func TestStopSptTest_HelperFunction(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "DELETE" && r.URL.Path == "/run" {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	}))
-	defer server.Close()
-
-	ctx := context.Background()
-	err := StopSptTest(ctx, server.URL)
-
-	if err != nil {
-		t.Errorf("StopSptTest() error = %v, want nil", err)
 	}
 }

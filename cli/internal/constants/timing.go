@@ -42,6 +42,15 @@ const (
 	// summary are not included.
 	AutoTerminateStopWaitTimeout = 2*AutoResultsShutdownTimeout + APILingerDefault
 
+	// Local port conflict resolution. The detection and force budgets keep the
+	// 30 s the whole resolution used to have. The graceful budget covers the run
+	// stop request, the engine's bounded wait for the run (10 s), its API linger
+	// (api.linger.sec, 20 s by default) and a margin for slow requests.
+	PortConflictDetectionTimeout    = 30 * time.Second       // Bound on identifying what holds the port
+	PortConflictGracefulStopTimeout = 60 * time.Second       // Bound on stopping a run, shutting its engine down and the port closing
+	PortConflictForceStopTimeout    = 30 * time.Second       // Bound on finding and removing the container that holds the port
+	PortConflictReleasePollInterval = 500 * time.Millisecond // Interval between checks that the port has closed
+
 	// Container lifecycle timeouts
 	ContainerShutdownGrace         = 2 * time.Second  // Grace period for container graceful shutdown
 	ContainerCleanupTimeout        = 30 * time.Second // Bounded mandatory container/staging removal budget

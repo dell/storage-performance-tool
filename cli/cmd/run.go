@@ -2199,12 +2199,9 @@ func checkPortConflicts(cmd *cobra.Command) error {
 		"port", sptPort,
 		"force_mode", forceMode)
 
-	// Create context with reasonable timeout for port checking
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Perform port conflict resolution
-	result, err := resolvePortConflictFunc(ctx, sptPort, forceMode)
+	// The resolver bounds each phase itself, so time at its prompt uses no budget.
+	// The command context lets Ctrl-C end a wait for an engine to shut down.
+	result, err := resolvePortConflictFunc(commandContext(cmd), sptPort, forceMode)
 	if err != nil {
 		logger.Error("Port conflict resolution failed", "error", err.Error())
 		return fmt.Errorf("failed to resolve port conflict on %s: %w", sptPort, err)

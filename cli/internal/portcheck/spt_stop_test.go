@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,5 +66,98 @@ func TestStopRunWithoutRunIDSendsNothing(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("StopRun(0) sent %d requests", requests)
+	}
+}
+
+// StopActiveRun takes the ID from HEAD /run and sends exactly that ID back.
+func TestStopActiveRunStopsTheReportedRun(t *testing.T) {
+	engine := newFakeEngine(t, 1763456789012)
+	runID, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+	if err != nil || runID != 1763456789012 {
+		t.Fatalf("StopActiveRun() = %d, %v, want 1763456789012, nil", runID, err)
+	}
+	want := []engineRequest{
+		{http.MethodHead, "/run", ""},
+		{http.MethodDelete, "/run", "1763456789012"},
+	}
+	if got := engine.received(); !slices.Equal(got, want) {
+		t.Fatalf("requests = %+v, want %+v", got, want)
+	}
+}
+
+func TestStopActiveRunWithoutARunSendsNoStop(t *testing.T) {
+	engine := newFakeEngine(t, 0)
+	runID, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+	if err != nil || runID != 0 {
+		t.Fatalf("StopActiveRun() = %d, %v, want 0, nil", runID, err)
+	}
+	assertReadOnly(t, engine.received())
+}
+
+// The run can change between HEAD and DELETE: only its end counts as success.
+func TestStopActiveRunWhenTheRunChanges(t *testing.T) {
+	tests := []struct {
+		name     string
+		onDelete func(*fakeEngine, http.ResponseWriter)
+		wantErr  string
+	}{
+		{
+			name: "204: the run ended",
+			onDelete: func(e *fakeEngine, w http.ResponseWriter) {
+				e.runID = 0
+				w.WriteHeader(http.StatusNoContent)
+			},
+		},
+		{
+			name: "404: the run ended",
+			onDelete: func(e *fakeEngine, w http.ResponseWriter) {
+				e.runID = 0
+				w.WriteHeader(http.StatusNotFound)
+			},
+		},
+		{
+			name: "404: another run took over",
+			onDelete: func(e *fakeEngine, w http.ResponseWriter) {
+				e.runID = 42
+				w.WriteHeader(http.StatusNotFound)
+			},
+			wantErr: "run 41 was replaced by run 42",
+		},
+		{
+			name:     "404: the same run is still active",
+			onDelete: func(_ *fakeEngine, w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) },
+			wantErr:  "did not accept the stop of its active run 41",
+		},
+		{
+			name:     "500",
+			onDelete: func(_ *fakeEngine, w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) },
+			wantErr:  "stop status 500",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := newFakeEngine(t, 41)
+			engine.onDelete = tt.onDelete
+			runID, err := NewSptAPIClient(engine.server.URL, 5*time.Second).StopActiveRun(context.Background())
+			if runID != 0 {
+				t.Errorf("StopActiveRun() run = %d, want 0", runID)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("StopActiveRun() error = %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("StopActiveRun() error = %v, want %q", err, tt.wantErr)
+			}
+			deletes := 0
+			for _, request := range engine.received() {
+				if request.method == http.MethodDelete {
+					deletes++
+				}
+			}
+			if deletes != 1 {
+				t.Errorf("DELETE requests = %d, want 1", deletes)
+			}
+		})
 	}
 }
