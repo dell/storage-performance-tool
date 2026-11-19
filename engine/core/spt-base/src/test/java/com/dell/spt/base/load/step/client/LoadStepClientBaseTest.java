@@ -817,14 +817,17 @@ class LoadStepClientBaseTest {
 		}
 	}
 
-	/** A count-limited step passes this timeout: it saturates in milliseconds and must not overflow. */
+	/**
+	 * A count-limited step passes this timeout: it saturates in milliseconds and must not overflow.
+	 * Each slice needs a second poll, which an overflowed deadline would not give it.
+	 */
 	@Test
 	void awaitWithTheLargestTimeoutReturnsAsSoonAsEverySliceIsDone() throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(
 						testConfig, extensions, ctxConfigs, mockMetricsManager);
 		for (int i = 0; i < 3; i++) {
 			final LoadStep slice = mock(LoadStep.class);
-			when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+			when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false, true);
 			addRawStepSlice(client, slice);
 		}
 

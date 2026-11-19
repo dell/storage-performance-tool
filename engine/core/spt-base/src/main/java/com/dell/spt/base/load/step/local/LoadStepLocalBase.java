@@ -935,8 +935,29 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 			}
 		}
+		if (timeIsOut) {
+			countDown -= settleDoneContexts(stepContextsCopy);
+		}
 
 		return 0 == countDown;
+	}
+
+	/**
+	 * Once the time is up, checks each remaining context once more, without waiting, so a context
+	 * that is already done reaches {@link #contextDone} and reports its failure even when the time
+	 * ran out before the loop above came to it. Returns how many contexts it settled.
+	 */
+	private int settleDoneContexts(final LoadStepContext[] stepContextsCopy) {
+		int settled = 0;
+		for (int i = 0; i < stepContextsCopy.length; i++) {
+			final LoadStepContext stepCtx = stepContextsCopy[i];
+			if (stepCtx != null && stepCtx.isDone()) {
+				contextDone(stepCtx);
+				stepContextsCopy[i] = null;
+				settled++;
+			}
+		}
+		return settled;
 	}
 
 	/**

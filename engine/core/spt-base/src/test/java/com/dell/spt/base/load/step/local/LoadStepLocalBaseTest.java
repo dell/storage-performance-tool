@@ -136,6 +136,27 @@ class LoadStepLocalBaseTest {
 						loadStep.deleteObjectLifecycle());
 	}
 
+	/** A pause can use the whole budget before the loop reaches a context that is already done. */
+	@Test
+	void aDoneContextIsSettledWhenTheTimeRunsOutBeforeTheLoopReachesIt() throws Exception {
+		final LoadStepContext slow = mockContext();
+		final LoadStepContext done = mockContext();
+		when(slow.isDone()).thenAnswer(invocation -> {
+			Thread.sleep(30);
+			return false;
+		});
+		when(slow.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(done.isDone()).thenReturn(true);
+		final Config config = baseConfig();
+		config.val("load-step-id", "await-settles-done");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), slow, done);
+
+		assertFalse(loadStep.awaitContextsForTest(1, TimeUnit.MILLISECONDS));
+
+		assertEquals(List.of(done), loadStep.doneContexts);
+		verify(done, never()).await(anyLong(), any(TimeUnit.class));
+	}
+
 	@Test
 	void countDeleteHoldsEveryContextBeforeStartAndReleasesEveryContextTogether() throws Exception {
 		final Config config = baseConfig();
@@ -1690,6 +1711,13 @@ class LoadStepLocalBaseTest {
 
 		boolean awaitContextsForTest(final long timeout, final TimeUnit unit) {
 			return await(timeout, unit);
+		}
+
+		final List<LoadStepContext> doneContexts = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+		@Override
+		protected void contextDone(final LoadStepContext context) {
+			doneContexts.add(context);
 		}
 
 		void setDurationAuditStateForTest(final long deadlineNanos) throws Exception {
