@@ -6,6 +6,7 @@ import static org.eclipse.jetty.http.MimeTypes.Type.APPLICATION_JSON;
 import static org.eclipse.jetty.http.MimeTypes.Type.MULTIPART_FORM_DATA;
 import static org.eclipse.jetty.http.MimeTypes.Type.TEXT_JSON;
 
+import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.SingleTaskExecutor;
 import com.dell.spt.base.concurrent.SingleTaskExecutorImpl;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
@@ -107,7 +108,7 @@ public class RunServlet extends HttpServlet {
 	@Override
 	protected final void doPost(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException, ServletException {
-		if (scenarioStepSvc.getStepService() != null) {
+		if (!scenarioStepSvc.busySliceRunIds().isEmpty()) {
 			resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			return;
 		}
@@ -144,7 +145,7 @@ public class RunServlet extends HttpServlet {
 					throws RemoteException {
 		runStartLock.lock();
 		try {
-			if (activeTask() != null || scenarioStepSvc.getStepService() != null) {
+			if (activeTask() != null || !scenarioStepSvc.busySliceRunIds().isEmpty()) {
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 				return;
 			}
@@ -154,6 +155,7 @@ public class RunServlet extends HttpServlet {
 			final var run = (Run) new RunImpl(config.stringVal("run-comment"), scenario, scriptEngine, config.longVal("run-id"));
 			final var stepId = config.stringVal("load-step-id");
 			final var runId = config.longVal("run-id");
+			final boolean acceptedBefore = apiStatus.acceptedRun(runId);
 			// Update status before executing
 			apiStatus.setRunning(stepId, runId);
 			final var statusAwareRun = new StatusAwareRun(run, apiStatus);
@@ -165,6 +167,7 @@ public class RunServlet extends HttpServlet {
 			} catch (final RejectedExecutionException e) {
 				// Only this method starts a task and it found the slot free, so this should not happen
 				Loggers.ERR.warn("The scenario executor refused run {} on a node found idle", runId);
+				apiStatus.forgetRefusedRun(runId, acceptedBefore);
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			}
 		} finally {
@@ -210,38 +213,68 @@ public class RunServlet extends HttpServlet {
 	@Override
 	protected final void doGet(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		extractRequestTimestampAndApply(
-						req, resp, (run, runId) -> setRunMatchesResponse(run, resp, runId));
+		extractRequestTimestampAndApply(req, resp, (run, runId) -> {
+			if (busySliceRunIds().contains(runId)) {
+				resp.setStatus(HttpServletResponse.SC_OK);
+			} else {
+				setRunMatchesResponse(run, resp, runId);
+			}
+		});
 	}
 
 	@Override
 	protected final void doDelete(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		extractRequestTimestampAndApply(
-						req,
-						resp,
-						(run, runId) -> stopRunIfMatchesAndSetResponseInst(run, resp, runId));
+		final var runId = requestedRunId(req, resp);
+		if (runId == null) {
+			return;
+		}
+		final var sliceMatched = scenarioStepSvc.stopSlicesOfRun(runId);
+		final var activeTask = activeTask();
+		if (activeTask instanceof Run activeRun && (!sliceMatched || activeRun.runId() == runId)) {
+			stopRunIfMatchesAndSetResponse(activeRun, resp, runId, scenarioExecutor);
+		} else if (sliceMatched) {
+			resp.setStatus(HttpServletResponse.SC_OK);
+		} else if (scenarioStepSvc.hasOpenSlices()) {
+			resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
+		} else {
+			if (activeTask != null) {
+				Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
+			}
+			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+		}
+	}
+
+	/** A local call on the node's own manager, so the remote failure it declares does not happen here. */
+	private List<Long> busySliceRunIds() {
+		try {
+			return scenarioStepSvc.busySliceRunIds();
+		} catch (final RemoteException e) {
+			throw new IllegalStateException("Failed to read the node's step slices", e);
+		}
 	}
 
 	static void setRunTimestampHeader(final Run task, final HttpServletResponse resp) {
 		resp.setHeader(HttpHeader.ETAG.name(), String.valueOf(task.runId()));
 	}
 
+	/** Applies the action to the run in progress or else to the newest running worker slice's run. */
 	void applyForActiveRunIfAny(
 					final HttpServletResponse resp, final BiConsumer<Run, HttpServletResponse> action) throws RemoteException {
 		final var activeTask = activeTask();
-		final var activeService = scenarioStepSvc.getStepService();
-		if (null == activeTask && activeService == null) {
-			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
-		} else if (activeTask instanceof Run activeRun) {
+		if (activeTask instanceof Run activeRun) {
 			action.accept(activeRun, resp);
-		} else if (activeService != null) {
-			final var activeRun = new RunImpl("", "", null, activeService.runId());
-			action.accept(activeRun, resp);
-		} else {
-			Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
-			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+			return;
 		}
+		final var sliceRunIds = scenarioStepSvc.busySliceRunIds();
+		if (!sliceRunIds.isEmpty()) {
+			action.accept(new RunImpl("", "", null, sliceRunIds.get(0)), resp);
+			return;
+		}
+		if (activeTask != null) {
+			Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
+		}
+		resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
 	}
 
 	void extractRequestTimestampAndApply(
@@ -249,21 +282,27 @@ public class RunServlet extends HttpServlet {
 					final HttpServletResponse resp,
 					final BiConsumer<Run, Long> runRespRunIdConsumer)
 					throws IOException {
+		final var runId = requestedRunId(req, resp);
+		if (runId != null) {
+			applyForActiveRunIfAny(resp, (run, resp_) -> runRespRunIdConsumer.accept(run, runId));
+		}
+	}
+
+	/** The run id in the {@code If-Match} header, or {@code null} after answering 400. */
+	private static Long requestedRunId(final HttpServletRequest req, final HttpServletResponse resp)
+					throws IOException {
 		final var rawIncomingRunId = Collections.list(req.getHeaders(HttpHeader.IF_MATCH.toString())).stream()
 						.findAny()
 						.orElse(null);
-
 		if (rawIncomingRunId == null) {
 			resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Missing header: " + HttpHeader.IF_MATCH);
-		} else {
-			try {
-				final var incomingRunId = Long.parseLong(rawIncomingRunId);
-				applyForActiveRunIfAny(
-								resp, (run, resp_) -> runRespRunIdConsumer.accept(run, incomingRunId));
-			} catch (final NumberFormatException e) {
-				resp.sendError(
-								HttpServletResponse.SC_BAD_REQUEST, "Invalid run ID format: " + rawIncomingRunId);
-			}
+			return null;
+		}
+		try {
+			return Long.parseLong(rawIncomingRunId);
+		} catch (final NumberFormatException e) {
+			resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Invalid run ID format: " + rawIncomingRunId);
+			return null;
 		}
 	}
 
@@ -301,13 +340,6 @@ public class RunServlet extends HttpServlet {
 		}
 	}
 
-	private void stopRunIfMatchesAndSetResponseInst(
-					final Run run,
-					final HttpServletResponse resp,
-					final long runId) {
-		stopRunIfMatchesAndSetResponse(run, resp, runId, scenarioExecutor);
-	}
-
 	/**
 	 * Requests cancellation of the active API run and waits for its cleanup and
 	 * terminal-status publication. A false return means the bounded wait expired.
@@ -328,8 +360,9 @@ public class RunServlet extends HttpServlet {
 
 	/**
 	 * Wrapper around a Run that publishes terminal status only after the
-	 * delegate's cleanup has returned: {@code STOPPED} after a requested stop, {@code FAILED} with
-	 * a category and an engine-built message after a scenario failure, else {@code COMPLETED}.
+	 * delegate's cleanup has returned: {@code STOPPED} after a requested stop or once the JVM has begun
+	 * to exit, {@code FAILED} with a category and an engine-built message after a scenario failure,
+	 * else {@code COMPLETED}.
 	 */
 	static final class StatusAwareRun implements Run {
 
@@ -373,10 +406,16 @@ public class RunServlet extends HttpServlet {
 				// A Java error from a call the scenario makes passes the script engine as it is
 				failure = e;
 				throw e;
+			} catch (final Exception e) {
+				// A step refused at JVM exit ends the scenario with this: a stop, not an uncaught failure.
+				if (!(e instanceof InterruptedException && JvmExit.begun())) {
+					throw e;
+				}
 			} finally {
 				try {
-					// A stop's interruption reaches the scenario as a failure, so a requested stop wins.
-					if (stopRequested.get()) {
+					// A stop's interruption reaches the scenario as a failure, so a requested stop wins. The
+					// shutdown hook stops the run with no request, and the scenario may then end normally.
+					if (stopRequested.get() || JvmExit.begun()) {
 						apiStatus.setStopped();
 					} else {
 						if (failure != null) {

@@ -69,6 +69,8 @@ type StepData struct {
 	MissingRequired   []string
 	MissingOptional   []string
 	Notes             []string
+	// UnresolvedOperations is the step's count in neither Success nor Failed; 0 when unavailable.
+	UnresolvedOperations int64
 }
 
 // StepStatus indicates ingestion completeness for a step.
@@ -286,6 +288,8 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 				step.Notes = append(step.Notes, "Partial READ evidence is not terminal")
 			}
 		}
+
+		step.UnresolvedOperations = loadUnresolvedOperations(runDir, sm)
 
 		deleteArtifactsExpected := params.DeleteArtifactsVersion > 0 &&
 			contains(deleteArtifactSteps, sm.StepID)
