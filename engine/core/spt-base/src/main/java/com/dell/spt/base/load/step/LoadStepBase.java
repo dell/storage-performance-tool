@@ -414,6 +414,41 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void doStart() throws IllegalStateException {
 
 		refuseStartAtJvmExit();
+		try {
+			startStep();
+		} catch (final Throwable cause) {
+			final var stop = startStop(cause);
+			if (stop == null) {
+				throw cause;
+			}
+			// Here, not in run(): the shutdown hook's close waits for this start, so the line is queued
+			// before the hook drains the logs.
+			if (JvmExit.claimStartStopReport()) {
+				try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+					Loggers.MSG.info("{}: step start stopped, the engine is exiting", loadStepId());
+				}
+			}
+			throwUnchecked(stop);
+		}
+	}
+
+	/**
+	 * The stop that ended a start with {@code cause}, or null when it is a failure of the start. An
+	 * interrupt can surface as any failure of what it cut short; a typed terminal failure stays one.
+	 */
+	private InterruptedException startStop(final Throwable cause) {
+		if (cause instanceof InterruptedException interrupted) {
+			return interrupted;
+		}
+		if (!Thread.currentThread().isInterrupted() || RunTerminalException.find(cause) != null) {
+			return null;
+		}
+		final var stop = new InterruptedException(loadStepId() + ": stopped while starting");
+		stop.initCause(cause);
+		return stop;
+	}
+
+	private void startStep() {
 		validateRangeConfiguration();
 		validateNicSetConfiguration();
 		// A configured id is tested on this node before the target is touched, so a refused step leaves
@@ -465,7 +500,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	}
 
 	private RuntimeException startFailed(final Throwable cause) {
-		throwUncheckedIfInterrupted(cause);
+		final var stop = startStop(cause);
+		if (stop != null) {
+			throwUnchecked(stop);
+		}
 		final var terminalCause = lifecycleTerminalFailure(
 						IntegrityTerminalException.Category.EXECUTION,
 						"metadata-mode step failed to start",

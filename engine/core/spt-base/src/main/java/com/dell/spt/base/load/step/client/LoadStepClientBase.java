@@ -682,6 +682,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		for (final var nodeAddr : nodeAddrs) {
 			final var fileMgr = resolveFileManager(nodeAddr);
 			if (null == fileMgr) {
+				if (Thread.currentThread().isInterrupted()) {
+					// A stop ended the retries, and the node may yet have been reachable.
+					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while resolving the file manager service @ " + nodeAddr));
+				}
 				throw new IllegalStateException(
 								"Failed to resolve the file manager service @ " + nodeAddr
 												+ ". Ensure the remote node is running with --run-node");
