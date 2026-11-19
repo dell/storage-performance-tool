@@ -18,8 +18,9 @@ import java.util.zip.Adler32;
 /**
  * Installs bundled resources into the app home. A file whose installed copy matches the bundled content is
  * left alone; any other is replaced atomically, through a temporary file in the same directory, so engines
- * sharing a home do not read a half-written file where the file system moves files atomically. A file that still differs or is missing after the attempt
- * stops the start with a {@link ResourceInstallException}.
+ * sharing a home do not read a half-written file where the file system moves files atomically. A file
+ * that still differs or is missing after the attempt stops the start with a
+ * {@link ResourceInstallException}.
  */
 public abstract class InstallableJarResources implements Installable {
 
@@ -124,19 +125,18 @@ public abstract class InstallableJarResources implements Installable {
 						? "holds \"" + dstPath + "\" from another build, and the engine cannot replace it"
 						: "lacks \"" + dstPath + "\", and the engine cannot create it";
 		final var dir = nearestDirectory(dstPath.getParent());
-		final var advice = isPermissionFailure(failure)
-						? "Make \"" + dir + "\" writable by the engine's user"
-						: "Check \"" + dstPath + "\" and the directory \"" + dir + "\"";
+		final var advice = isReadOnlyFileSystem(failure)
+						? "Use a home on a writable file system"
+						: failure instanceof AccessDeniedException
+										? "Make \"" + dir + "\" writable by the engine's user"
+										: "Check \"" + dstPath + "\" and the directory \"" + dir + "\"";
 		final var homeSet = homeSetByEnvironment();
 		return "The app home \"" + appHomePath + "\"" + (homeSet ? " (SPT_HOME) " : " ") + state + " (" + cause
 						+ "). " + advice + (homeSet ? ", or unset SPT_HOME." : ".");
 	}
 
-	/** Whether the failure is one that write permission on the directory would remove. */
-	private static boolean isPermissionFailure(final IOException failure) {
-		if (failure instanceof AccessDeniedException) {
-			return true;
-		}
+	/** Whether the failure is a read-only file system. The reason is the C library's text, so English only. */
+	private static boolean isReadOnlyFileSystem(final IOException failure) {
 		return failure instanceof FileSystemException fsFailure
 						&& fsFailure.getReason() != null
 						&& fsFailure.getReason().contains("Read-only file system");
@@ -144,7 +144,8 @@ public abstract class InstallableJarResources implements Installable {
 
 	/** Whether {@code SPT_HOME} chose the app home, so that unsetting it is advice the user can take. A test seam. */
 	boolean homeSetByEnvironment() {
-		return System.getenv(ENV_SPT_HOME) != null;
+		final var envHome = System.getenv(ENV_SPT_HOME);
+		return envHome != null && !envHome.isEmpty();
 	}
 
 	/** The directory, or its nearest existing ancestor, that must be writable to install a file into it. */

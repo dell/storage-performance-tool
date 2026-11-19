@@ -233,6 +233,22 @@ class InstallableJarResourcesTest {
 	}
 
 	@Test
+	void aReadOnlyFileSystemIsAdvisedToUseAWritableHome() throws IOException {
+		writeInstalled(DEFAULTS, STALE);
+		final var resources = new FixedResources() {
+
+			@Override
+			void moveAtomically(final Path tmpPath, final Path dstPath) throws IOException {
+				throw new FileSystemException(dstPath.toString(), null, "Read-only file system");
+			}
+		}.with(DEFAULTS, BUNDLED);
+
+		final var message = assertThrows(ResourceInstallException.class, () -> resources.install(appHome)).getMessage();
+
+		assertTrue(message.endsWith("Use a home on a writable file system, or unset SPT_HOME."), message);
+	}
+
+	@Test
 	void aStaleFileInAReadOnlyDirectoryStopsTheStart() throws IOException {
 		assumePosixAndNotRoot();
 		final var installed = writeInstalled(DEFAULTS, STALE);
