@@ -414,8 +414,8 @@ func (c *SptAPIClient) getMetricsJSON(ctx context.Context) ([]jsonMetricsStep, e
 
 // StopActiveRun stops whatever run the engine reports as active and returns its
 // ID, or 0 when no run is active. A run that replaces the reported one between
-// the read and the stop was never shown to the caller, so it is left running and
-// reported as an error.
+// the read and the stop was never shown to the caller, so it is not stopped here
+// and is reported as an error.
 func (c *SptAPIClient) StopActiveRun(ctx context.Context) (int64, error) {
 	runID, active, err := c.activeRunID(ctx)
 	if err != nil {
@@ -443,7 +443,7 @@ func (c *SptAPIClient) StopActiveRun(ctx context.Context) (int64, error) {
 	if currentID == runID {
 		return 0, fmt.Errorf("the engine did not accept the stop of its active run %d", runID)
 	}
-	return 0, fmt.Errorf("run %d was replaced by run %d, which was left running", runID, currentID)
+	return 0, fmt.Errorf("run %d was replaced by run %d, which was not stopped", runID, currentID)
 }
 
 // StopRun asks the engine to stop the run with runID through DELETE /run,
