@@ -625,6 +625,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	 * Leaves the weight cycle, so that the share left unused no longer holds back the other
 	 * generators, and runs the listener once, at the first of exhausted input and a reached count
 	 * limit.
+	 *
+	 * <p>Call this only once the generator can ask for no new operation: the cycle grants a retired
+	 * origin every permit it requests, on the understanding that only retries still ask.
 	 */
 	private void notifySchedulingEnd() {
 		if (weightCycle != null) {

@@ -53,6 +53,7 @@ class LoadGeneratorWeightCycleTest {
 			generator.start();
 			awaitCycleLeft();
 			assertEquals(3, output.accepted.get());
+			awaitSignal();
 			settle();
 			assertEquals(1, signals.get());
 			assertTrue(generator.schedulingExhaustionNanos().isEmpty(), "the input was not read to its end");
@@ -91,6 +92,7 @@ class LoadGeneratorWeightCycleTest {
 		try (var generator = generator(config(true, 10, 0), 5, output, true)) {
 			generator.start();
 			awaitCycleLeft();
+			awaitSignal();
 			settle();
 			assertEquals(5, output.accepted.get());
 			assertEquals(1, signals.get(), "the listener runs exactly once");
@@ -125,6 +127,7 @@ class LoadGeneratorWeightCycleTest {
 			generator.retry(new DataOperationImpl<>(
 							0, OpType.CREATE, new DataItemImpl("retried", 0, 64), null, "bucket", null, List.of(), 0));
 			await(() -> output.accepted.get() == 4, "the retry to be dispatched");
+			awaitSignal();
 			settle();
 			assertEquals(1, signals.get());
 			generator.stop();
@@ -133,6 +136,11 @@ class LoadGeneratorWeightCycleTest {
 
 	private void awaitCycleLeft() throws InterruptedException {
 		await(this::cycleWasLeft, "the generator to leave the weight cycle");
+	}
+
+	/** The generator leaves the cycle first and runs the listener after, so one can be seen alone. */
+	private void awaitSignal() throws InterruptedException {
+		await(() -> signals.get() > 0, "the scheduling end to be signalled");
 	}
 
 	/** Uses up the other origin's share, then asks for more: only a new cycle can answer. */

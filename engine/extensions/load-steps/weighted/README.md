@@ -69,11 +69,19 @@ var weightedReadConfig = {
 
 ### When a sub-load finishes first
 
-A sub-load finishes scheduling when it reaches its count limit or its item
-input runs out. The other sub-loads then carry on to their own limits and
-share the cycle by their weights, so the configured ratio no longer applies
-to the finished sub-load. A retry of one of its operations still runs, outside
-the cycle.
+Each cycle gives every sub-load up to its weight in operations, and the next
+cycle starts when those shares are used up. A sub-load finishes scheduling when
+it reaches its count limit or, if it does not recycle its operations, when its
+item input runs out. It then leaves the cycle: the other sub-loads carry on to
+their own limits and share the cycle by their weights, so the configured ratio
+no longer applies to the finished sub-load. A retry of one of its operations
+still runs, outside the cycle.
+
+A sub-load that recycles, which includes every path listing (`list` with
+`item.type=path`), finishes only at its count limit. If it has nothing left to
+issue before then, it keeps its place in the cycle and the other sub-loads stop
+at the end of their shares. The step then ends only at its time limit, and
+without one it does not end.
 
 ## Limitations
 
