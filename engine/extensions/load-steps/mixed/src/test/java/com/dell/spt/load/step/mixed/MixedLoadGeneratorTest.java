@@ -1276,18 +1276,24 @@ class MixedLoadGeneratorTest {
 		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, driver, 1_000);
 		gen.operationLifecycle(lifecycle);
 		dispatch(gen, 300);
-		final List<Operation> sent = new ArrayList<>(held.subList(0, 12));
+		// The schedule is shuffled, so the sent operations are chosen by type: four of each.
+		final List<OpType> types = List.of(OpType.READ, OpType.CREATE, OpType.DELETE);
+		final List<Operation> sent = new ArrayList<>();
+		for (final OpType type : types) {
+			held.stream().filter(op -> op.type() == type).limit(4).forEach(sent::add);
+		}
 		for (final Operation op : sent) {
 			assertTrue(lifecycle.dispatched(op));
 		}
-		final List<OpType> types = List.of(OpType.READ, OpType.CREATE, OpType.DELETE);
 		for (final OpType type : types) {
 			assertEquals(count(held, type), gen.inFlightCount(type), "precondition: held " + type);
 		}
 
 		// The stop: what the driver held unsent becomes unattempted, by recovery or by the driver.
-		for (final Operation op : held.subList(sent.size(), held.size())) {
-			assertTrue(lifecycle.unattempted(op));
+		for (final Operation op : held) {
+			if (sent.stream().noneMatch(sentOp -> sentOp == op)) {
+				assertTrue(lifecycle.unattempted(op));
+			}
 		}
 		// An operation the driver refused was counted out at the refusal, not again here.
 		for (final Operation op : refused) {

@@ -197,7 +197,8 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	 * custody as unattempted, after the transition is recorded. An operation the tracker never
 	 * held, such as one the driver refused at admission, does not reach it. Not installed on, and
 	 * never called by, the disabled tracker. The observer must be bounded, non-blocking, and
-	 * non-throwing.
+	 * non-throwing. The tracker keeps one observer, as for its other observers: a later call
+	 * replaces it, and {@code null} removes it.
 	 */
 	public void unattemptedObserver(final Consumer<O> observer) {
 		if (enabled) {

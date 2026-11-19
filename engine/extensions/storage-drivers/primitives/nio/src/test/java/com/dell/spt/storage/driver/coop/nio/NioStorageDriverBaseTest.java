@@ -845,7 +845,9 @@ public class NioStorageDriverBaseTest {
 
 			drv.closeAdmission();
 			drv.releaseInvokes();
-			awaitLifecycle(drv, () -> queued.lifecycle().state() == OperationLifecycleState.UNATTEMPTED,
+			// The observer runs after the transition is recorded, so wait for it as well as for the state.
+			awaitLifecycle(drv,
+							() -> queued.lifecycle().state() == OperationLifecycleState.UNATTEMPTED && !observed.isEmpty(),
 							"the worker settles the queued operation after the stop");
 
 			assertTrue(drv.recoverQueuedOperations().isEmpty(), "recovery never sees the settled operation");
