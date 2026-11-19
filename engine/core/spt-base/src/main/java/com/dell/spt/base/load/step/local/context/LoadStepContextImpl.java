@@ -20,6 +20,7 @@ import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicSetResources;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
+import com.dell.spt.base.concurrent.RetryDelayScheduler;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -205,10 +206,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
 	 * own body} or {@code LoadStepContextImpl#cancelPendingRetries()} ever resolves a
 	 * given retry - never both, and never neither. This is needed because {@link
-	 * CompletableFuture#cancel} does not reliably mean "the task body never ran": for a
-	 * future produced by {@code runAsync()}, a successful {@code cancel(false)} can still
-	 * race with a task that has already started running on its own executor thread
-	 * (cancelling the future does not interrupt or otherwise stop that thread), so
+	 * Future#cancel} does not reliably mean "the task body never ran": a {@code
+	 * cancel(false)} can still race with a task that has already started running on its
+	 * executor thread (cancelling the future does not interrupt or otherwise stop that
+	 * thread), so
 	 * treating a successful {@code cancel()} as proof the task body will never execute -
 	 * and therefore that it's safe to terminal-fail the operation ourselves - is not safe
 	 * on its own.
@@ -251,7 +252,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			task.run();
 			return CompletableFuture.completedFuture(null);
 		}
-		return CompletableFuture.runAsync(task, CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS));
+		return RetryDelayScheduler.schedule(delayMillis, task);
 	};
 
 	/** Test-only seam: replace the real delayed scheduler with e.g. a synchronous one. */

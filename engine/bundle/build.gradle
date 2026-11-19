@@ -1629,6 +1629,75 @@ tasks.register('verifyEngineExitStatusCanary') {
 				blocked.inputStream.close()
 			}
 
+			// SIGTERM during the first of three steps. The hook ends that step and the scenario goes on, while
+			// the log thread's long sleep holds the hook in its drain: the next step must not start meanwhile.
+			def signalledDir = new File(canaryRoot, 'signal-next-step')
+			def signalledCwd = new File(signalledDir, 'cwd')
+			signalledCwd.mkdirs()
+			def signalledLog = new File(signalledDir, 'log')
+			def signalledStdout = new File(signalledDir, 'stdout.log')
+			def signalledStderr = new File(signalledDir, 'stderr.log')
+			def signalledOutput = { -> signalledStdout.getText('UTF-8') + signalledStderr.getText('UTF-8') }
+			def stepDirs = { ->
+				(new File(signalledLog, 'log').listFiles() ?: [] as File[]).findAll { it.directory && it.name.startsWith('linear_') }
+			}
+			def stepAttempt = 'signal-next-step: starting a step'
+			def stepRunning = 'signal-next-step: step running'
+			// The catches keep a step ended by the signal from failing the scenario before its next start.
+			def signalledScenario = "var step = Load.config({load: {step: {limit: {time: \"30s\"}}}});\n" +
+				"print('${stepAttempt}');\nstep.start();\nprint('${stepRunning}');\n" +
+				"try { step.await(); } catch (e) {}\ntry { step.close(); } catch (e) {}\n"
+			def signalledBuilder = new ProcessBuilder(javaExecutable,
+					'-Dlog4j2.asyncLoggerWaitStrategy=Sleep',
+					'-Dlog4j2.asyncLoggerSleepTimeNs=600000000000',
+					'-jar', jarFile.absolutePath,
+					scenario('signal-next-step', signalledScenario * 3),
+					'--storage-driver-type=dummy-mock')
+				.directory(signalledCwd)
+				.redirectOutput(signalledStdout)
+				.redirectError(signalledStderr)
+			signalledBuilder.environment().put('SPT_HOME', new File(signalledDir, 'home').absolutePath)
+			signalledBuilder.environment().put('SPT_LOG_DIR', signalledLog.absolutePath)
+			def signalled = signalledBuilder.start()
+			try {
+				def startDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(90)
+				// The step directory appears before the step has started: a signal then ends the scenario in
+				// the first start, and it never reaches the second.
+				def firstStepRunning = { -> signalledStdout.getText('UTF-8').contains(stepRunning) }
+				while (!firstStepRunning() && signalled.alive && System.nanoTime() < startDeadline) {
+					Thread.sleep(50)
+				}
+				if (!firstStepRunning()) {
+					throw new GradleException("Packaged engine 'signal-next-step' started no step:\n${signalledOutput()}")
+				}
+				def signalledAt = System.nanoTime()
+				signalled.toHandle().destroy()
+				if (!signalled.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
+					throw new GradleException("Packaged engine 'signal-next-step' did not exit within 30 s of SIGTERM:\n${signalledOutput()}")
+				}
+				def exitMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - signalledAt)
+				if (signalled.exitValue() != 143) {
+					throw new GradleException("Packaged engine 'signal-next-step' exited ${signalled.exitValue()} on SIGTERM, expected 143:\n${signalledOutput()}")
+				}
+				// With no log events queued the engine exits at once, and the next step has no time to start
+				if (exitMillis < 5000) {
+					throw new GradleException("Packaged engine 'signal-next-step' exited ${exitMillis} ms after SIGTERM, too soon for the log drain to have run:\n${signalledOutput()}")
+				}
+				if (stepDirs().size() != 1) {
+					throw new GradleException("Packaged engine 'signal-next-step' started another step after SIGTERM: ${stepDirs()*.name}")
+				}
+				// The first step ended and the scenario went on to its second, which was refused
+				def stepAttempts = signalledStdout.getText('UTF-8').count(stepAttempt)
+				def stepsRunning = signalledStdout.getText('UTF-8').count(stepRunning)
+				if (stepAttempts != 2 || stepsRunning != 1) {
+					throw new GradleException("Packaged engine 'signal-next-step' reached ${stepAttempts} step starts with ${stepsRunning} running, expected 2 with 1:\n${signalledOutput()}")
+				}
+			} finally {
+				if (signalled.alive) {
+					signalled.destroyForcibly()
+				}
+			}
+
 			// The log shutdown stops the context the engine's loggers use. In the packaged jar Log4j cannot
 			// find that context by its caller, so LogManager.shutdown() alone stopped none.
 			def probeDir = new File(canaryRoot, 'log-shutdown-state')
@@ -1642,6 +1711,7 @@ tasks.register('verifyEngineExitStatusCanary') {
 						final var context = ((org.apache.logging.log4j.core.Logger) com.dell.spt.base.logging.Loggers.MSG).getContext();
 						com.dell.spt.base.logging.LogUtil.shutdown();
 						System.out.println("stoppedAfterShutdown=" + context.isStopped());
+						System.out.println("jvmExitBegunAfterShutdown=" + com.dell.spt.base.concurrent.JvmExit.begun());
 					}
 				}
 				'''.stripIndent(), 'UTF-8')
@@ -1663,6 +1733,10 @@ tasks.register('verifyEngineExitStatusCanary') {
 			}
 			if (probe.exitValue() != 0 || !probeOut.getText('UTF-8').contains('stoppedAfterShutdown=true')) {
 				throw new GradleException("The log shutdown left the engine loggers' context running (exit ${probe.exitValue()}):\n${probeOut.getText('UTF-8')}")
+			}
+			// A log shutdown is not a JVM exit: only the shutdown hook's thread marks one
+			if (!probeOut.getText('UTF-8').contains('jvmExitBegunAfterShutdown=false')) {
+				throw new GradleException("The log shutdown marked the JVM as exiting:\n${probeOut.getText('UTF-8')}")
 			}
 		} finally {
 			target.close()
