@@ -370,6 +370,9 @@ type so the call may be included into the call chain.
 
 See also the [weighted load spec](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)
 
+A `load.step.id` set in an appended context decides where that context's results go, and the last
+context's id also names the step: see [Step ids](../../../../../../extensions/load-steps/weighted/README.md#step-ids).
+
 Example:
 
 ```javascript

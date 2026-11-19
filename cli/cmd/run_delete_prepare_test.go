@@ -451,11 +451,28 @@ func TestPrepareDeleteManifestRejectsUnsafeSourcesBeforeScenarioGeneration(t *te
 }
 
 func TestDeleteManifestFailureStopsBeforeEveryOrchestrationSeam(t *testing.T) {
+	requireDeleteManifestStopsBeforeOrchestration(t,
+		"bucket,key,size,version_id\n"+
+			"actual,key,1,\n",
+		"does not match --bucket")
+}
+
+func TestDeleteOfSavedItemsUnderHeaderStopsBeforeEveryOrchestrationSeam(t *testing.T) {
+	requireDeleteManifestStopsBeforeOrchestration(t,
+		"bucket,key,size,version_id\n"+
+			"/b/s0000000/one,2a0f,1024,0/0\n"+
+			"/b/s0000000/two,2a10,1024,0/0\n",
+		"--items-file: record 2 is a saved engine items row (as --save-items writes it: object path, "+
+			"hex offset, size, layer/mask), not a canonical manifest row; the "+
+			`"bucket,key,size,version_id" header does not convert it. `+
+			"Give each object as <bucket>,<key>,<size>,<version_id or empty>")
+}
+
+func requireDeleteManifestStopsBeforeOrchestration(t *testing.T, content, wantDetail string) {
+	t.Helper()
 	t.Chdir(t.TempDir())
 	source := filepath.Join(t.TempDir(), "delete.csv")
-	if err := os.WriteFile(source, []byte(
-		"bucket,key,size,version_id\n"+
-			"actual,key,1,\n"), 0o600); err != nil {
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -510,8 +527,8 @@ func TestDeleteManifestFailureStopsBeforeEveryOrchestrationSeam(t *testing.T) {
 			setGlobalRunFlagForTest(t, name, value)
 		}
 		if err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete}); err == nil ||
-			!strings.Contains(err.Error(), "does not match --bucket") {
-			t.Fatalf("RunE() with hosts %q error = %v", hosts, err)
+			!strings.Contains(err.Error(), wantDetail) {
+			t.Fatalf("RunE() with hosts %q error = %v, want %q", hosts, err, wantDetail)
 		}
 	}
 

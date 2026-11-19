@@ -51,7 +51,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Part;
 
-import com.github.akurilov.confuse.impl.BasicConfig;
 import org.apache.logging.log4j.Level;
 import org.eclipse.jetty.http.HttpHeader;
 
@@ -477,8 +476,9 @@ public class RunServlet extends HttpServlet {
 		final Config configResult;
 		boolean runVersionOverrideAttempted = false;
 		if (defaultsPart == null) {
-			// NOTE: If custom config hasn't been specified in POST request, set the default one
-			configResult = new BasicConfig(aggregatedConfigWithArgs);
+			// NOTE: If custom config hasn't been specified in POST request, set the default one. The run
+			// gets its own maps and lists: what it sets must not stay on the node for later runs.
+			configResult = ConfigUtil.copyOf(aggregatedConfigWithArgs);
 		} else {
 			final var configIncoming = configFromPart(defaultsPart, resp, aggregatedConfigWithArgs.schema());
 			runVersionOverrideAttempted = containsRunVersion(configIncoming);
