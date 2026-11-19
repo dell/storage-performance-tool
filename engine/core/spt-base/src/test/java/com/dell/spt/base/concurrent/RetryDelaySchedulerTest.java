@@ -25,21 +25,44 @@ class RetryDelaySchedulerTest {
 	private static final long FAR_FUTURE_MILLIS = TimeUnit.HOURS.toMillis(1);
 
 	@Test
-	void runsOnTheNamedDaemonThreadWithNothingInherited() throws Exception {
+	void runsOnTheNamedDaemonThread() throws Exception {
 		final var observed = new CompletableFuture<Thread>();
-		final var loader = new ClassLoader(ClassLoader.getSystemClassLoader()) {};
-		final var starter = Thread.currentThread();
-		final var previousLoader = starter.getContextClassLoader();
-		starter.setContextClassLoader(loader);
-		try {
-			runSoon(() -> observed.complete(Thread.currentThread()));
-		} finally {
-			starter.setContextClassLoader(previousLoader);
-		}
+		runSoon(() -> observed.complete(Thread.currentThread()));
 		final var thread = observed.get(10, TimeUnit.SECONDS);
 		assertEquals(RetryDelayScheduler.THREAD_NAME, thread.getName());
 		assertTrue(thread.isDaemon());
-		assertEquals(ClassLoader.getSystemClassLoader(), thread.getContextClassLoader());
+	}
+
+	@Test
+	void theThreadTakesNoClassLoaderFromItsStarter() {
+		final var starter = Thread.currentThread();
+		final var previousLoader = starter.getContextClassLoader();
+		starter.setContextClassLoader(new ClassLoader(ClassLoader.getSystemClassLoader()) {});
+		try {
+			final var thread = RetryDelayScheduler.newThread(() -> {});
+			assertEquals(ClassLoader.getSystemClassLoader(), thread.getContextClassLoader());
+		} finally {
+			starter.setContextClassLoader(previousLoader);
+		}
+	}
+
+	@Test
+	void tasksOfOneContextKeepItAndALaterContextReplacesIt() throws Exception {
+		final var first = new CompletableFuture<String>();
+		final var second = new CompletableFuture<String>();
+		final var other = new CompletableFuture<String>();
+		ThreadContext.put(LOG_KEY, "step-a");
+		try {
+			runSoon(() -> first.complete(ThreadContext.get(LOG_KEY)));
+			runSoon(() -> second.complete(ThreadContext.get(LOG_KEY)));
+			assertEquals("step-a", first.get(10, TimeUnit.SECONDS));
+			assertEquals("step-a", second.get(10, TimeUnit.SECONDS));
+			ThreadContext.put(LOG_KEY, "step-b");
+			runSoon(() -> other.complete(ThreadContext.get(LOG_KEY)));
+			assertEquals("step-b", other.get(10, TimeUnit.SECONDS));
+		} finally {
+			ThreadContext.remove(LOG_KEY);
+		}
 	}
 
 	@Test

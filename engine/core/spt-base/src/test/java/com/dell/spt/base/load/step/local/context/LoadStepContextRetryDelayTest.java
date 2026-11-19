@@ -72,6 +72,7 @@ class LoadStepContextRetryDelayTest {
 			final var step = new Step("retry-delay-shared-" + i, true);
 			step.failOperations(FAILURES);
 			verify(step.generator, timeout(WAIT_MILLIS).times(FAILURES)).retry(any());
+			step.assertDelayedWorkRanOnSchedulerThread(step.retryThreads);
 		}
 		assertEquals(1, schedulerThreadCount());
 	}

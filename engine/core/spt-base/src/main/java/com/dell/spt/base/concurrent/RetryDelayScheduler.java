@@ -17,12 +17,17 @@ import org.apache.logging.log4j.ThreadContext;
  * neither an entry's exit nor a node's shutdown. A per-step executor would reject a retry
  * scheduled after its step was cancelled, and that retry must still end as a counted failure.
  * Each step cancels its own pending tasks, and a cancelled task leaves the queue at once.
+ *
+ * <p>Internal to the engine; not an extension API.
  */
 public final class RetryDelayScheduler {
 
 	public static final String THREAD_NAME = "spt-retry-delay";
 
 	private static final ScheduledThreadPoolExecutor EXECUTOR = newExecutor();
+
+	/** What the timer thread last applied. Only that thread uses this, and its tasks leave it as set. */
+	private static Map<String, String> appliedLogContext = Map.of();
 
 	private RetryDelayScheduler() {}
 
@@ -42,11 +47,15 @@ public final class RetryDelayScheduler {
 						TimeUnit.MILLISECONDS);
 	}
 
-	/** Consecutive retries of one step usually share a context, so most tasks change nothing here. */
+	/**
+	 * Consecutive retries of one step usually share a context, so most tasks change nothing here.
+	 * Reading the thread's own context would copy it, so the comparison uses the last one applied.
+	 */
 	private static void applyLogContext(final Map<String, String> logContext) {
-		if (!logContext.equals(ThreadContext.getImmutableContext())) {
+		if (logContext != appliedLogContext && !logContext.equals(appliedLogContext)) {
 			ThreadContext.clearMap();
 			ThreadContext.putAll(logContext);
+			appliedLogContext = logContext;
 		}
 	}
 
@@ -62,10 +71,10 @@ public final class RetryDelayScheduler {
 	}
 
 	/**
-	 * The thread outlives every step, so it takes nothing from the thread that happens to start
-	 * it: no inherited log context or class loader.
+	 * The thread outlives every step, so it takes neither the log context nor the class loader of
+	 * the thread that happens to start it.
 	 */
-	private static Thread newThread(final Runnable runnable) {
+	static Thread newThread(final Runnable runnable) {
 		final var thread = new Thread(null, runnable, THREAD_NAME, 0, false);
 		thread.setDaemon(true);
 		thread.setContextClassLoader(ClassLoader.getSystemClassLoader());
