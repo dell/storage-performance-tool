@@ -80,8 +80,9 @@ still runs, outside the cycle.
 A sub-load that recycles, which includes every path listing (`list` with
 `item.type=path`), finishes only at its count limit. If it has nothing left to
 issue before then, it keeps its place in the cycle and the other sub-loads stop
-at the end of their shares. The step then ends only at its time limit, and
-without one it does not end.
+at the end of their shares. A sub-load with work beyond its share never gets
+to it, so the step then ends only at its time limit, and without one it does
+not end.
 
 ## Limitations
 
