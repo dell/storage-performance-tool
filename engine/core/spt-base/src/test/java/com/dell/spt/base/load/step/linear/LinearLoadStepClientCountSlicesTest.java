@@ -30,6 +30,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * How a distributed count-limited step gives each of its Engine Participants a count. A slice
@@ -226,6 +228,34 @@ class LinearLoadStepClientCountSlicesTest {
 										+ "add items, or pass fewer --test-hosts",
 						failure.getMessage());
 		assertEquals(List.of(), workers.get(0).metrics().getTerminalSteps(), "the worker's slice never started");
+	}
+
+	/** Each engine recycles its share of the items and stops at its slice, so the slices add up to the count. */
+	@ParameterizedTest
+	@ValueSource(longs = {42, 43
+	})
+	void aCountBasedRecycleStepDoesExactlyItsCountAcrossTheEngines(final long count) throws Exception {
+		startWorkers(1);
+		final Path items = tempDir.resolve("eight.csv");
+		final StringBuilder lines = new StringBuilder();
+		for (int i = 0; i < 8; i++) {
+			lines.append("/bucket/item-").append(i).append(",0,10,0/0\n");
+		}
+		Files.writeString(items, lines);
+		config.val("item-input-file", items.toString());
+		config.val("load-op-type", "update"); // recycles like a read and leaves no artifact to merge
+		config.val("load-op-recycle-mode", true);
+		config.val("load-op-limit-count", count);
+		config.val("load-op-limit-rate", 0);
+		client = new LinearLoadStepClient(config, extensions(), List.of(), entryMgr);
+		assertTimeoutPreemptively(RUN_TIMEOUT, client::run);
+
+		final TerminalStepEntry entryNode = entry(entryMgr, false);
+		final TerminalStepEntry workerNode = entry(workers.get(0).metrics(), false);
+		assertEquals(entryNode.countLimit, entryNode.successCount);
+		assertEquals(workerNode.countLimit, workerNode.successCount);
+		assertEquals(count, entryNode.countLimit + workerNode.countLimit);
+		assertEquals(count, entry(entryMgr, true).successCount);
 	}
 
 	private static List<Extension> extensions() {

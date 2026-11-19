@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 /**
  * Test-only storage driver: every operation completes after a fixed latency {@code L}, with at
@@ -53,6 +54,7 @@ import java.util.function.BooleanSupplier;
  *       by the test or a fixed delay after the driver's admission closes (the drain);
  *   <li>a completion gate: a completion that falls due while a condition holds waits, for a
  *       bounded time, until it no longer holds;
+ *   <li>a completion status chosen per operation, success by default;
  *   <li>a stop probe evaluated when the first stop-path action reaches the driver;
  *   <li>a hook on the step's await loop, which polls {@link #terminalFailure()}, to hold it or
  *       throw from it;
@@ -93,6 +95,7 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	private volatile long slowFirstLatencyNanos;
 	private volatile BooleanSupplier holdWhen = () -> false;
 	private volatile BooleanSupplier gateWhile = () -> false;
+	private volatile Function<? super O, Operation.Status> completionStatus = op -> Operation.Status.SUCC;
 	private volatile boolean holdingStopped;
 	private volatile long releaseAfterAdmissionCloseNanos = -1;
 	private volatile BooleanSupplier stopProbe = () -> true;
@@ -158,6 +161,12 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	/** Delays each completion that falls due while {@code condition} holds, up to the wait bound. */
 	LatencyStorageDriver<I, O> gateCompletionsWhile(final BooleanSupplier condition) {
 		gateWhile = condition;
+		return this;
+	}
+
+	/** Chooses the status each operation completes with, as it completes. */
+	LatencyStorageDriver<I, O> completionStatus(final Function<? super O, Operation.Status> status) {
+		completionStatus = status;
 		return this;
 	}
 
@@ -416,13 +425,14 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 			dataOp.startDataResponse();
 		}
 		op.finishResponse();
-		op.status(Operation.Status.SUCC);
+		final Operation.Status status = completionStatus.apply(op);
+		op.status(status);
 		if (trackData) {
 			if (lifecycle.completionStarted(op)) {
 				@SuppressWarnings("unchecked")
 				final O result = (O) op.result();
 				if (resultOutput.put(result)) {
-					lifecycle.terminal(op, Operation.Status.SUCC);
+					lifecycle.terminal(op, status);
 				}
 			}
 		} else {
