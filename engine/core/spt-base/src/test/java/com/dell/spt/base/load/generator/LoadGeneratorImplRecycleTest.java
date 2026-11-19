@@ -848,7 +848,8 @@ class LoadGeneratorImplRecycleTest {
 		try {
 			capped.doWork(); // exhaust item input
 			final var ops = newOps(circulating);
-			while (output.received.size() < countLimit) {
+			// Each pass sends at least one operation until the count, so a short count ends the loop.
+			for (var pass = 0; pass < countLimit + 20 && output.received.size() < countLimit; pass++) {
 				if (capped.isNothingToRecycle()) {
 					ops.forEach(capped::recycle); // the whole population comes back at once
 				}

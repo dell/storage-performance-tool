@@ -1,7 +1,5 @@
 package com.dell.spt.base.load.step.local;
 
-import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIMEOUT_MILLIS;
-import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.createStepConfig;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.statistics;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.steadySettings;
@@ -38,6 +36,10 @@ class RecycleCountLimitStepTest {
 	private static final long L_MILLIS = 25;
 	// One operation into a wave of eight: the wave that ends the step has more than the count needs.
 	private static final long COUNT = 24L * C + 1;
+	// About 2 s of dispatch, so a late metrics observation still starts the window before the count.
+	private static final long STEADY_COUNT = 80L * C + 1;
+	// Far above any prompt stop, so a stop that waits out the in-flight limit cannot pass.
+	private static final long STOP_WAIT_LIMIT_MILLIS = 30_000;
 
 	@TempDir
 	Path tempDir;
@@ -47,7 +49,7 @@ class RecycleCountLimitStepTest {
 	})
 	void totalsEqualTheCountAndTheSteadyCountStaysWithinIt(final int batchSize) throws Exception {
 		final var driver = driver();
-		final Config config = stepConfig("recycle-exact", C, COUNT);
+		final Config config = stepConfig("recycle-exact", C, STEADY_COUNT);
 		config.val("load-batch-size", batchSize);
 		steadySettings(config, 1.0, 5.0, 0.2);
 		try (final var metricsMgr = new RecordingMetricsManager()) {
@@ -55,14 +57,14 @@ class RecycleCountLimitStepTest {
 			try {
 				step.run();
 				final AllMetricsSnapshot total = metricsMgr.total(step.metrics());
-				assertEquals(COUNT, total.successSnapshot().count());
+				assertEquals(STEADY_COUNT, total.successSnapshot().count());
 				assertEquals(0, total.failsSnapshot().count());
-				assertEquals(COUNT, driver.dispatchedCount());
+				assertEquals(STEADY_COUNT, driver.dispatchedCount());
 				final OperationLifecycleCounters lifecycle = driver.operationLifecycle().counters();
-				assertEquals(COUNT, lifecycle.accepted(), lifecycle.toString());
-				assertEquals(COUNT, lifecycle.terminalResults(), lifecycle.toString());
+				assertEquals(STEADY_COUNT, lifecycle.accepted(), lifecycle.toString());
+				assertEquals(STEADY_COUNT, lifecycle.terminalResults(), lifecycle.toString());
 				final long steadyCount = statistics(step.metrics().steadyResult()).successSnapshot().count();
-				assertTrue(steadyCount <= COUNT, "steady count " + steadyCount);
+				assertTrue(steadyCount <= STEADY_COUNT, "steady count " + steadyCount);
 			} finally {
 				step.close();
 			}
@@ -147,19 +149,25 @@ class RecycleCountLimitStepTest {
 		driver.completionStatus(op -> driver.admissionClosedNanos() == 0 ? Status.SUCC : Status.INTERRUPTED)
 						.holdCompletionsWhen(() -> driver.completedCount() >= holdFrom)
 						.releaseHeldAfterAdmissionClose(20);
+		final Config config = stepConfig("recycle-stop", C, count);
+		config.val("load-op-wait-limit", (int) TimeUnit.MILLISECONDS.toSeconds(STOP_WAIT_LIMIT_MILLIS));
 		try (final var metricsMgr = new RecordingMetricsManager()) {
-			final var step = new ProbeLinearStep(stepConfig("recycle-stop", C, count), driver, metricsMgr);
+			final var step = new ProbeLinearStep(config, driver, metricsMgr);
 			try {
 				step.start();
-				awaitCondition(() -> driver.heldNow() == C, "every circulating operation in flight");
+				final long inFlightDeadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+				while (driver.heldNow() != C) {
+					assertTrue(System.nanoTime() - inFlightDeadlineNanos < 0, "every circulating operation in flight");
+					Thread.sleep(2);
+				}
 
 				final long stopStartNanos = System.nanoTime();
 				step.stop();
-				assertTrue(step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS), "the stopped step ended");
+				assertTrue(step.await(STOP_WAIT_LIMIT_MILLIS, TimeUnit.MILLISECONDS), "the stopped step ended");
 				final long stopMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stopStartNanos);
 
-				// Below the configured wait for in-flight operations, which would otherwise end it.
-				assertTrue(stopMillis < WAIT_TIMEOUT_MILLIS - 1_000, "the stop took " + stopMillis + " ms");
+				// Well below the configured wait for in-flight operations, which would otherwise end it.
+				assertTrue(stopMillis < STOP_WAIT_LIMIT_MILLIS / 2, "the stop took " + stopMillis + " ms");
 				final AllMetricsSnapshot total = metricsMgr.total(step.metrics());
 				assertTrue(total.successSnapshot().count() < count, "the count was not reached");
 				assertEquals(0, driver.activeOpCount());
