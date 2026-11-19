@@ -40,6 +40,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -68,6 +69,10 @@ public class RunServlet extends HttpServlet {
 	private final SingleTaskExecutor scenarioExecutor;
 	private final LoadStepManagerService scenarioStepSvc;
 	private final ApiStatus apiStatus;
+	/** Makes the busy test and everything a start changes one step: a refused request changes nothing. */
+	private final ReentrantLock runStartLock = new ReentrantLock();
+	/** Outlives the executor slot, which a stop clears before the stopped run's cleanup returns. */
+	private volatile StatusAwareRun lastAcceptedRun;
 
 	public RunServlet(
 					final ClassLoader clsLoader,
@@ -104,7 +109,7 @@ public class RunServlet extends HttpServlet {
 	@Override
 	protected final void doPost(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException, ServletException {
-		if (scenarioStepSvc.getStepService() != null) {
+		if (!scenarioStepSvc.busySliceRunIds().isEmpty()) {
 			resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			return;
 		}
@@ -120,10 +125,30 @@ public class RunServlet extends HttpServlet {
 			scenarioPart = null;
 		}
 		try {
+			// Read outside the lock, so that a slow upload does not hold up other requests
 			final var config = mergeIncomingWithLocalConfig(defaultsPart, resp, aggregatedConfigWithArgs);
 			final var scenario = getIncomingScenarioOrDefault(scenarioPart, appHomePath);
 			if (config.longVal("run-id") == 0) {
 				config.val("run-id", System.currentTimeMillis());
+			}
+			startRunUnlessBusy(config, scenario, resp);
+		} catch (final NoSuchMethodException | RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "Failed to run a scenario with the request {}", req);
+			setBadRequestResponse(resp, e);
+		}
+	}
+
+	/**
+	 * Starts the run, or answers 409 with nothing changed: the script engine is shared with the run in
+	 * progress, whose later steps read its bindings.
+	 */
+	private void startRunUnlessBusy(final Config config, final String scenario, final HttpServletResponse resp)
+					throws RemoteException {
+		runStartLock.lock();
+		try {
+			if (activeTask() != null || !scenarioStepSvc.busySliceRunIds().isEmpty()) {
+				resp.setStatus(HttpServletResponse.SC_CONFLICT);
+				return;
 			}
 			// expose the base configuration and the step types
 			ScenarioUtil.configure(scriptEngine, extensions, config, metricsMgr);
@@ -131,20 +156,37 @@ public class RunServlet extends HttpServlet {
 			final var run = (Run) new RunImpl(config.stringVal("run-comment"), scenario, scriptEngine, config.longVal("run-id"));
 			final var stepId = config.stringVal("load-step-id");
 			final var runId = config.longVal("run-id");
+			final boolean acceptedBefore = apiStatus.acceptedRun(runId);
 			// Update status before executing
 			apiStatus.setRunning(stepId, runId);
 			final var statusAwareRun = new StatusAwareRun(run, apiStatus);
 			try {
 				scenarioExecutor.execute(statusAwareRun);
+				lastAcceptedRun = statusAwareRun;
 				resp.setStatus(HttpServletResponse.SC_ACCEPTED);
 				setRunTimestampHeader(statusAwareRun, resp);
 			} catch (final RejectedExecutionException e) {
+				// Only this method starts a task and it found the slot free, so this should not happen
+				Loggers.ERR.warn("The scenario executor refused run {} on a node found idle", runId);
+				apiStatus.forgetRefusedRun(runId, acceptedBefore);
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			}
-		} catch (final NoSuchMethodException | RuntimeException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to run a scenario with the request {}", req);
-			setBadRequestResponse(resp, e);
+		} finally {
+			runStartLock.unlock();
 		}
+	}
+
+	/**
+	 * The task in the executor slot or, once a stop has cleared the slot, the accepted run until its
+	 * cleanup has returned and its terminal status is published.
+	 */
+	private Runnable activeTask() {
+		final var slotTask = scenarioExecutor.task();
+		if (slotTask != null) {
+			return slotTask;
+		}
+		final var run = lastAcceptedRun;
+		return run == null || run.isFinished() ? null : run;
 	}
 
 	/**
@@ -172,38 +214,68 @@ public class RunServlet extends HttpServlet {
 	@Override
 	protected final void doGet(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		extractRequestTimestampAndApply(
-						req, resp, (run, runId) -> setRunMatchesResponse(run, resp, runId));
+		extractRequestTimestampAndApply(req, resp, (run, runId) -> {
+			if (busySliceRunIds().contains(runId)) {
+				resp.setStatus(HttpServletResponse.SC_OK);
+			} else {
+				setRunMatchesResponse(run, resp, runId);
+			}
+		});
 	}
 
 	@Override
 	protected final void doDelete(final HttpServletRequest req, final HttpServletResponse resp)
 					throws IOException {
-		extractRequestTimestampAndApply(
-						req,
-						resp,
-						(run, runId) -> stopRunIfMatchesAndSetResponseInst(run, resp, runId));
+		final var runId = requestedRunId(req, resp);
+		if (runId == null) {
+			return;
+		}
+		final var sliceMatched = scenarioStepSvc.stopSlicesOfRun(runId);
+		final var activeTask = activeTask();
+		if (activeTask instanceof Run activeRun && (!sliceMatched || activeRun.runId() == runId)) {
+			stopRunIfMatchesAndSetResponse(activeRun, resp, runId, scenarioExecutor);
+		} else if (sliceMatched) {
+			resp.setStatus(HttpServletResponse.SC_OK);
+		} else if (scenarioStepSvc.hasOpenSlices()) {
+			resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
+		} else {
+			if (activeTask != null) {
+				Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
+			}
+			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+		}
+	}
+
+	/** A local call on the node's own manager, so the remote failure it declares does not happen here. */
+	private List<Long> busySliceRunIds() {
+		try {
+			return scenarioStepSvc.busySliceRunIds();
+		} catch (final RemoteException e) {
+			throw new IllegalStateException("Failed to read the node's step slices", e);
+		}
 	}
 
 	static void setRunTimestampHeader(final Run task, final HttpServletResponse resp) {
 		resp.setHeader(HttpHeader.ETAG.name(), String.valueOf(task.runId()));
 	}
 
+	/** Applies the action to the run in progress or else to the newest running worker slice's run. */
 	void applyForActiveRunIfAny(
 					final HttpServletResponse resp, final BiConsumer<Run, HttpServletResponse> action) throws RemoteException {
-		final var activeTask = scenarioExecutor.task();
-		final var activeService = scenarioStepSvc.getStepService();
-		if (null == activeTask && activeService == null) {
-			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
-		} else if (activeTask instanceof Run activeRun) {
+		final var activeTask = activeTask();
+		if (activeTask instanceof Run activeRun) {
 			action.accept(activeRun, resp);
-		} else if (activeService != null) {
-			final var activeRun = new RunImpl("", "", null, activeService.runId());
-			action.accept(activeRun, resp);
-		} else {
-			Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
-			resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+			return;
 		}
+		final var sliceRunIds = scenarioStepSvc.busySliceRunIds();
+		if (!sliceRunIds.isEmpty()) {
+			action.accept(new RunImpl("", "", null, sliceRunIds.get(0)), resp);
+			return;
+		}
+		if (activeTask != null) {
+			Loggers.ERR.warn("The scenario executor runs an alien task: {}", activeTask);
+		}
+		resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
 	}
 
 	void extractRequestTimestampAndApply(
@@ -211,21 +283,27 @@ public class RunServlet extends HttpServlet {
 					final HttpServletResponse resp,
 					final BiConsumer<Run, Long> runRespRunIdConsumer)
 					throws IOException {
+		final var runId = requestedRunId(req, resp);
+		if (runId != null) {
+			applyForActiveRunIfAny(resp, (run, resp_) -> runRespRunIdConsumer.accept(run, runId));
+		}
+	}
+
+	/** The run id in the {@code If-Match} header, or {@code null} after answering 400. */
+	private static Long requestedRunId(final HttpServletRequest req, final HttpServletResponse resp)
+					throws IOException {
 		final var rawIncomingRunId = Collections.list(req.getHeaders(HttpHeader.IF_MATCH.toString())).stream()
 						.findAny()
 						.orElse(null);
-
 		if (rawIncomingRunId == null) {
 			resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Missing header: " + HttpHeader.IF_MATCH);
-		} else {
-			try {
-				final var incomingRunId = Long.parseLong(rawIncomingRunId);
-				applyForActiveRunIfAny(
-								resp, (run, resp_) -> runRespRunIdConsumer.accept(run, incomingRunId));
-			} catch (final NumberFormatException e) {
-				resp.sendError(
-								HttpServletResponse.SC_BAD_REQUEST, "Invalid run ID format: " + rawIncomingRunId);
-			}
+			return null;
+		}
+		try {
+			return Long.parseLong(rawIncomingRunId);
+		} catch (final NumberFormatException e) {
+			resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Invalid run ID format: " + rawIncomingRunId);
+			return null;
 		}
 	}
 
@@ -261,13 +339,6 @@ public class RunServlet extends HttpServlet {
 		} else {
 			resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
 		}
-	}
-
-	private void stopRunIfMatchesAndSetResponseInst(
-					final Run run,
-					final HttpServletResponse resp,
-					final long runId) {
-		stopRunIfMatchesAndSetResponse(run, resp, runId, scenarioExecutor);
 	}
 
 	/**
@@ -371,6 +442,11 @@ public class RunServlet extends HttpServlet {
 			}
 			delegate.run();
 			return null;
+		}
+
+		/** True once the cleanup has returned and the terminal status is published. */
+		boolean isFinished() {
+			return completion.getCount() == 0;
 		}
 
 		boolean stopAndAwait(

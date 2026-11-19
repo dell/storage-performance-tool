@@ -103,6 +103,30 @@ class LoadStepBaseJvmExitTest {
 	}
 
 	@Test
+	void aSecondRunEndsAsAStopAndKeepsTheRecordOfTheFirst() {
+		final var step = new RecordingStep(config());
+		step.run();
+		JvmExit.markBegun();
+
+		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, step::run));
+
+		assertEquals(null, step.runFailure());
+	}
+
+	@Test
+	void aStoppedStepStartedAgainEndsAsAStop() throws Exception {
+		final Config config = config();
+		config.val("load-step-node-addrs", List.of());
+		final List<Extension> extensions = List.of(new LinearLoadStepExtension<>(), new DummyStorageDriverMockExtension<>());
+		try (var step = new LinearLoadStepClient(config, extensions, List.of(), mock(MetricsManager.class))) {
+			step.stop();
+			JvmExit.markBegun();
+
+			assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, step::start));
+		}
+	}
+
+	@Test
 	void aStepStartsAsBeforeWhileTheJvmIsNotExiting() {
 		final var step = new RecordingStep(config());
 

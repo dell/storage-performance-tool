@@ -53,6 +53,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runnable {
@@ -65,6 +66,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected final List<Config> ctxConfigs;
 	protected final MetricsManager metricsMgr;
 	protected final List<MetricsContext<? extends AllMetricsSnapshot>> metricsContexts = new ArrayList<>();
+	private final ReentrantLock metricsUnregisterLock = new ReentrantLock();
 
 	private final AtomicLong timeLimitSec = new AtomicLong(Long.MAX_VALUE);
 	private final boolean integrityModeEnabled;
@@ -196,7 +198,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	/**
 	 * Returns the first failure observed by the most recent {@link #run()} call, including failures
 	 * swallowed to preserve the legacy behavior of ordinary load steps. A failure to start isn't one
-	 * of those: it ends the run.
+	 * of those: it ends the run. A call refused because the step has already run leaves this as it was.
 	 */
 	public final Throwable runFailure() {
 		return runFailure;
@@ -204,6 +206,16 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	@Override
 	public final void run() {
+		// Before the resets: the refused call leaves the record of the run that did happen.
+		if (isClosed()) {
+			refuseStartAtJvmExit();
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							loadStepId(),
+							"this step object has already run; a step object runs once. "
+											+ "Build a step with config() for each run and call run() on a step that has not run.",
+							null);
+		}
 		runFailure = null;
 		completedRunMetricsSnapshots = null;
 		RunTerminalException terminalCause = null;
@@ -387,15 +399,21 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	/** Called when {@link #doStart} refuses this step because the JVM is exiting. */
 	protected void onStartRefusedAtJvmExit() {}
 
-	@Override
-	protected void doStart() throws IllegalStateException {
-
-		// The shutdown hook ends the running step without stopping the scenario, which reaches its next
-		// step here. Ending as a stop, this step touches neither the target nor a result directory.
+	/**
+	 * The shutdown hook ends the running step without stopping the scenario, which reaches its next
+	 * step here. Ending as a stop, this step touches neither the target nor a result directory.
+	 */
+	private void refuseStartAtJvmExit() {
 		if (JvmExit.begun()) {
 			onStartRefusedAtJvmExit();
 			throwUnchecked(new InterruptedException(loadStepId() + ": not started, the engine is exiting"));
 		}
+	}
+
+	@Override
+	protected void doStart() throws IllegalStateException {
+
+		refuseStartAtJvmExit();
 		try {
 			startStep();
 		} catch (final Throwable cause) {
@@ -572,7 +590,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStop() {
 
-		metricsContexts.forEach(metricsMgr::unregister);
+		// A signal runs this on the shutdown hook while the scenario thread runs it from await: one
+		// caller at a time, so every context's terminal output is written before either goes on to close.
+		metricsUnregisterLock.lock();
+		try {
+			metricsContexts.forEach(metricsMgr::unregister);
+		} finally {
+			metricsUnregisterLock.unlock();
+		}
 
 		// A step fenced before its deferred Load Interval has no elapsed time to account.
 		if (startTimeSec < 0) {
