@@ -98,7 +98,48 @@ class PipelineCompositeRefusalBeforeListingTest {
 		}
 	}
 
+	/**
+	 * A scenario's threshold reaches the entry as text, {@code "0"} included. A context at 0 cannot be
+	 * refused, so the entry's check builds no driver for it: the step builds as many drivers as one
+	 * whose contexts leave the threshold at its default.
+	 */
+	@Test
+	void aContextThresholdOfZeroBuildsNoExtraDriver() throws Exception {
+		final int atDefault = driversBuilt(null);
+		final int atZero = driversBuilt(0);
+		assertTrue(atDefault > 0);
+		assertEquals(atDefault, atZero, "a context at threshold 0 builds no driver for the check");
+		assertEquals(atZero, driversBuilt("0"));
+	}
+
+	/** The drivers a run builds with both contexts at {@code threshold}, or at the default for {@code null}. */
+	private int driversBuilt(final Object threshold) throws Exception {
+		created.set(0);
+		closed.set(0);
+		try (var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			final var client = threshold == null ? client(metrics, Map.of(), Map.of()) : client(metrics, threshold);
+			assertTimeoutPreemptively(RUN_TIMEOUT, () -> {
+				try {
+					client.run();
+				} catch (final RuntimeException ignored) {
+					// The empty listing leaves the step nothing to read; only the drivers count here.
+				}
+			});
+		}
+		assertEquals(created.get(), closed.get(), "every driver built is closed");
+		return created.get();
+	}
+
 	private PipelineLoadStepClient client(final MetricsManagerImpl metrics, final Object secondThreshold)
+					throws Exception {
+		return client(
+						metrics,
+						Map.of("item", Map.of("data", Map.of("ranges", Map.of("threshold", 0)))),
+						Map.of("item", Map.of("data", Map.of("ranges", Map.of("threshold", secondThreshold)))));
+	}
+
+	private PipelineLoadStepClient client(
+					final MetricsManagerImpl metrics, final Map<String, Object> first, final Map<String, Object> second)
 					throws Exception {
 		final Config config = defaultConfig();
 		config.val("load-step-id", "pipeline-composite-" + UUID.randomUUID());
@@ -117,9 +158,7 @@ class PipelineCompositeRefusalBeforeListingTest {
 		when(factory.create(anyString(), any(), any(), anyBoolean(), anyInt()))
 						.thenAnswer(invocation -> probe(new DummyStorageDriverMock(invocation.getArgument(2))));
 		final List<Extension> extensions = List.of(new PipelineLoadStepExtension(), factory);
-		return new PipelineLoadStepClient(config, extensions, null, metrics)
-						.append(Map.of("item", Map.of("data", Map.of("ranges", Map.of("threshold", 0)))))
-						.append(Map.of("item", Map.of("data", Map.of("ranges", Map.of("threshold", secondThreshold)))));
+		return new PipelineLoadStepClient(config, extensions, null, metrics).append(first).append(second);
 	}
 
 	/** A driver without composite support that records each listing and each close. */

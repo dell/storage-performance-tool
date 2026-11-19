@@ -96,6 +96,23 @@ class CompositeRefusalAtClientTest {
 		assertEquals(1, closed.get(), "the entry's item input driver is closed");
 	}
 
+	/**
+	 * A malformed data input layer size fails the step before any slice starts, as in 5.17.0: the
+	 * entry parses it before it builds its driver, so the failure is not taken for a failed close.
+	 */
+	@Test
+	void aMalformedLayerSizeFailsBeforeAnySliceStarts() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		final LoadStepFactory<LoadStep, ?> stepFactory = stepFactory(slice);
+		final var config = config(0, stepFactory);
+		config.val("item-data-input-layer-size", "4XB");
+		final var client = new TestLoadStepClient(config, extensions, List.of(), mock(MetricsManager.class));
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+		assertEquals("step failed to start; see the engine log", failure.getMessage());
+		assertEquals(0, created.get(), "no driver is built");
+		verify(stepFactory, never()).createLocal(any(), anyList(), anyList(), any());
+	}
+
 	/** A PATH LIST never reads the DATA threshold, so a malformed one changes nothing, as in 5.17.0. */
 	@Test
 	void aListWithAMalformedThresholdOnADriverWithSupportClosesItsDriver() throws Exception {

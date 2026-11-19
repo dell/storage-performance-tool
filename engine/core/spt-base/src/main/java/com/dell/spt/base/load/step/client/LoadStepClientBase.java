@@ -716,16 +716,27 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/** The data input the entry's driver for {@code config} reads its data from. */
 	private static DataInput entryDataInput(final Config config) throws IOException {
+		return entryDataInput(config, entryDataLayerSize(config));
+	}
+
+	/**
+	 * The data input layer size of {@code config}. The entry parses it before it builds its driver, so
+	 * a malformed size fails the step before any slice starts, as in 5.17.0.
+	 */
+	private static SizeInBytes entryDataLayerSize(final Config config) {
+		final var itemDataInputLayerSizeRaw = config.configVal("item").configVal("data").configVal("input").configVal("layer").val("size");
+		if (itemDataInputLayerSizeRaw instanceof String) {
+			return BinarySizeFormat.parseSize((String) itemDataInputLayerSizeRaw);
+		}
+		return new SizeInBytes(TypeUtil.typeConvert(itemDataInputLayerSizeRaw, int.class));
+	}
+
+	/** The data input the entry's driver for {@code config} reads its data from, at {@code itemDataLayerSize}. */
+	private static DataInput entryDataInput(final Config config, final SizeInBytes itemDataLayerSize)
+					throws IOException {
 		final var itemDataConfig = config.configVal("item").configVal("data");
 		final var itemDataInputConfig = itemDataConfig.configVal("input");
 		final var itemDataInputLayerConfig = itemDataInputConfig.configVal("layer");
-		final var itemDataInputLayerSizeRaw = itemDataInputLayerConfig.val("size");
-		final SizeInBytes itemDataLayerSize;
-		if (itemDataInputLayerSizeRaw instanceof String) {
-			itemDataLayerSize = BinarySizeFormat.parseSize((String) itemDataInputLayerSizeRaw);
-		} else {
-			itemDataLayerSize = new SizeInBytes(TypeUtil.typeConvert(itemDataInputLayerSizeRaw, int.class));
-		}
 		return DataInput.instance(
 						itemDataInputConfig.stringVal("file"),
 						itemDataInputConfig.stringVal("seed"),
@@ -808,8 +819,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.info("{}: skipping item input scatter for LIST workload", loadStepId());
 		}
 
+		final var itemDataLayerSize = entryDataLayerSize(config);
 		try (
-						final var dataInput = entryDataInput(config);
+						final var dataInput = entryDataInput(config, itemDataLayerSize);
 						final var storageDriver = StorageDriver.instance(
 										extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, loadStepId())) {
 			// The driver is owned from here, so a refusal or any other failure below closes it.
@@ -1126,9 +1138,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 *
 	 * <p>Whether a driver declares {@link CompositeOperationsUnsupported} is known only from the class
 	 * its factory builds, so this builds the context's driver once, checks it and closes it. It does so
-	 * only for a context that makes CREATE or READ operations with a threshold that is not a number
-	 * of 0 or less, as the default is. A driver that fails to build here is left to the distribution,
-	 * which reports it as before.
+	 * only for a context that makes CREATE or READ operations with a threshold above 0. A scenario's
+	 * threshold arrives as text, so it is parsed first; one that does not parse is left to the step
+	 * slice. A driver that fails to build here is left to the distribution, which reports it as before.
 	 */
 	private void refuseCompositeInAppendedContexts() {
 		if (ctxConfigs == null) {
@@ -1139,8 +1151,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (!controlsOperations(ctxIndex) || compositeCheckedOpTypes(ctxConfig).isEmpty()) {
 				continue;
 			}
-			final var rawThreshold = ctxConfig.configVal("item-data-ranges").val("threshold");
-			if (rawThreshold instanceof Number number && number.doubleValue() <= 0) {
+			final long threshold;
+			try {
+				threshold = CompositeOperationSupport.sizeThreshold(ctxConfig.configVal("item-data-ranges"));
+			} catch (final RuntimeException malformed) {
+				// Left to the step slice, whose own parse fails the run, as in 5.17.0.
+				continue;
+			}
+			if (threshold <= 0) {
 				continue;
 			}
 			try (
