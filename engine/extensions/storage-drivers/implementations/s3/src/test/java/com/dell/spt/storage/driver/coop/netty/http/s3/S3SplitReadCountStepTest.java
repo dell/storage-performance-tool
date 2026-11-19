@@ -11,7 +11,6 @@ import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,10 +26,12 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Load steps of reads split into ranges, on the {@code s3} driver and its NIC-set driver against the
- * loopback stub, which records every range it is asked for. A read is counted when its last range
- * ends, so the step's count is the complete sets of ranges the target served, whenever the step ends.
- * Its bytes are those of every range served: {@code count * object size} plus the ranges of the reads
- * the stop left with a range unsent, which are the only reads that may be unresolved.
+ * loopback stub. A read is counted when its last range ends, so the step's count is the complete sets
+ * of ranges the client completed, whenever the step ends. The ranges completed are the client's own
+ * range results, from the step's operation trace: a request the stub received is not one the client
+ * completed. The step's bytes are those of every range completed: {@code count * object size} plus
+ * the ranges of the reads the stop left with a range unsent, which are the only reads that may be
+ * unresolved.
  */
 @Timeout(180)
 final class S3SplitReadCountStepTest {
@@ -43,6 +44,11 @@ final class S3SplitReadCountStepTest {
 	private static final int FEW_OBJECTS = 16;
 	private static final int CONCURRENCY = 4;
 	private static final int TIME_LIMIT_SECONDS = 3;
+	/**
+	 * The time limits a recycling step tries in turn, until its objects have been read more than once:
+	 * a loaded host may read fewer than {@link #FEW_OBJECTS} + 1 objects in the first.
+	 */
+	private static final List<Integer> RECYCLING_TIME_LIMITS_SECONDS = List.of(TIME_LIMIT_SECONDS, 6, 12, 24);
 	private static final int WAIT_LIMIT_SECONDS = 60;
 	/** A range's first attempt and the driver's three retries. */
 	private static final int RANGE_ATTEMPTS = 4;
@@ -50,6 +56,7 @@ final class S3SplitReadCountStepTest {
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private final Map<String, Long> bytes = new ConcurrentHashMap<>();
+	private final RangeResultTrace trace = new RangeResultTrace();
 	private String stepId;
 
 	@TempDir
@@ -64,6 +71,7 @@ final class S3SplitReadCountStepTest {
 
 	@AfterEach
 	void stop() throws Exception {
+		trace.close();
 		stub.close();
 		NicSetLoopback.awaitNoNicIoThreads();
 	}
@@ -75,7 +83,7 @@ final class S3SplitReadCountStepTest {
 
 		final var counts = S3NicSetWorkloadTest.runScenario(stub.listeners(1), stepId, scenario, bytes).get(CONTEXT);
 
-		assertCounted(counts, served(request -> true));
+		assertCounted(counts, completed(path -> true));
 	}
 
 	@Test
@@ -85,19 +93,33 @@ final class S3SplitReadCountStepTest {
 		final var counts = S3NicSetWorkloadTest.runScenario(
 						stub.listeners(1), new NicSetLoopback.Factory(), stepId, scenario, bytes).get(CONTEXT);
 
-		assertCounted(counts, served(request -> true));
+		assertCounted(counts, completed(path -> true));
 	}
 
-	/** Recycled reads circulate until the limit: each complete set of an object's ranges is one read. */
+	/**
+	 * Recycled reads circulate until the limit: each complete set of an object's ranges is one read.
+	 * Each step is checked; a longer one follows until the objects have been read more than once.
+	 */
 	@Test
 	void aTimeLimitedRecyclingStepCountsEveryCompleteSetOfRanges() throws Exception {
-		final var scenario = timeLimited(true, "", "", items(FEW_OBJECTS));
+		final var items = items(FEW_OBJECTS);
+		RangeResultTrace.Completed completed = null;
+		for (final var limit : RECYCLING_TIME_LIMITS_SECONDS) {
+			stepId = "split-read-count-recycled-" + limit + "s-" + System.nanoTime();
+			bytes.clear();
+			final var scenario = timeLimited(limit, true, "", "", items);
 
-		final var counts = S3NicSetWorkloadTest.runScenario(stub.listeners(1), stepId, scenario, bytes).get(CONTEXT);
+			final var counts = S3NicSetWorkloadTest.runScenario(stub.listeners(1), stepId, scenario, bytes).get(CONTEXT);
 
-		final var served = served(request -> true);
-		assertCounted(counts, served);
-		assertTrue(served.complete() > FEW_OBJECTS, () -> "the objects were read more than once: " + served);
+			completed = completed(path -> true);
+			assertCounted(counts, completed);
+			if (completed.complete() > FEW_OBJECTS) {
+				return;
+			}
+		}
+		final var last = completed;
+		throw new AssertionError("the objects were not read more than once in " + RECYCLING_TIME_LIMITS_SECONDS
+						+ " s: " + last);
 	}
 
 	/** Verified ranges of real objects: each read ends only after its last range is verified. */
@@ -114,7 +136,7 @@ final class S3SplitReadCountStepTest {
 
 		final var counts = S3NicSetWorkloadTest.runScenario(stub.listeners(1), stepId, scenario, bytes).get(CONTEXT);
 
-		assertCounted(counts, served(request -> true));
+		assertCounted(counts, completed(path -> true));
 	}
 
 	/**
@@ -130,15 +152,17 @@ final class S3SplitReadCountStepTest {
 
 		final var counts = S3NicSetWorkloadTest.runScenario(stub.listeners(1), stepId, scenario, bytes).get(CONTEXT);
 
-		final var served = served(refused.negate());
+		// A refused object's reads complete at most three ranges each, but its attempts can add up to a
+		// set: only the objects never refused have complete sets. The stub's requests bound the refused.
+		final var completed = completed(path -> objectIndex(path) % 40 != 0);
 		final var refusedObjects = stub.objectRequests().stream().filter(refused)
 						.map(NicSetLoopback.Request::path).distinct().count();
-		assertEquals(served.complete(), counts.get(0), () -> counts + " against " + served);
+		assertEquals(completed.complete(), counts.get(0), () -> counts + " against " + completed);
 		assertTrue(counts.get(1) <= refusedObjects, () -> counts + " with " + refusedObjects + " objects refused");
-		assertEquals(served.bytes(), bytes.get(CONTEXT), () -> "bytes of " + served);
+		assertEquals(completed.bytes(), bytes.get(CONTEXT), () -> "bytes of " + completed);
 		final var unresolved = unresolved();
-		assertTrue(unresolved <= served.incomplete() + refusedObjects,
-						() -> unresolved + " unresolved against " + served + " and " + refusedObjects + " objects refused");
+		assertTrue(unresolved <= completed.incomplete() + refusedObjects,
+						() -> unresolved + " unresolved against " + completed + " and " + refusedObjects + " objects refused");
 	}
 
 	/** The count limit is exact: the reads it admits all finish and nothing more is read. */
@@ -149,9 +173,11 @@ final class S3SplitReadCountStepTest {
 		final var counts = S3NicSetWorkloadTest.runScenario(
 						stub.listeners(1), stepId, countLimited(limit, "", items(MANY_OBJECTS)), bytes).get(CONTEXT);
 
-		final var served = served(request -> true);
-		assertEquals(List.of((long) limit, 0L), counts, served::toString);
-		assertEquals(new Served(limit, 0, (long) limit * OBJECT_SIZE), served);
+		final var completed = completed(path -> true);
+		assertEquals(List.of((long) limit, 0L), counts, completed::toString);
+		assertEquals(new RangeResultTrace.Completed(limit, 0, (long) limit * OBJECT_SIZE), completed);
+		assertEquals((long) limit * RANGES, stub.objectRequests().stream().filter(S3SplitReadCountStepTest::isRange).count(),
+						"no range beyond the limit's reads is sent");
 		assertEquals(0, unresolved());
 	}
 
@@ -189,44 +215,24 @@ final class S3SplitReadCountStepTest {
 								"op": {"type": "read", "limit": {"count": %d}, "wait": {"limit": %d}%s}
 							},
 							"storage": {"driver": {"limit": {"concurrency": %d}}},
-							"item": {"data": {"ranges": {"threshold": "%d"}}, "input": {"file": "%s"}}
+							"item": {"data": {"ranges": {"threshold": "%d"}}, "input": {"file": "%s"}},
+							"output": {"metrics": {"trace": {"persist": true}}}
 						}).run();
 						""".formatted(limit, WAIT_LIMIT_SECONDS, opSettings, CONCURRENCY, RANGE_SIZE, items);
 	}
 
-	private void assertCounted(final List<Long> counts, final Served served) throws IOException {
-		assertTrue(served.complete() > 0, served::toString);
-		assertEquals(List.of(served.complete(), 0L), counts, served::toString);
-		assertEquals(served.bytes(), bytes.get(CONTEXT), () -> "bytes of " + served);
+	private void assertCounted(final List<Long> counts, final RangeResultTrace.Completed completed) throws IOException {
+		assertTrue(completed.complete() > 0, completed::toString);
+		assertEquals(List.of(completed.complete(), 0L), counts, completed::toString);
+		assertEquals(completed.bytes(), bytes.get(CONTEXT), () -> "bytes of " + completed);
 		final var unresolved = unresolved();
-		assertTrue(unresolved <= served.incomplete(), () -> unresolved + " unresolved against " + served);
+		assertTrue(unresolved <= completed.incomplete(), () -> unresolved + " unresolved against " + completed);
 	}
 
-	/**
-	 * What the target served of the ranges {@code answered} selects. An object's complete sets are the
-	 * times its least-read range was served; an object with some ranges served more often than that
-	 * was being read when the step ended.
-	 */
-	private Served served(final Predicate<NicSetLoopback.Request> answered) {
-		final Map<String, Map<Long, Long>> byObject = new HashMap<>();
-		stub.objectRequests().stream().filter(request -> isRange(request) && answered.test(request))
-						.forEach(request -> byObject.computeIfAbsent(request.path(), unused -> new HashMap<>())
-										.merge(rangeStart(request), 1L, Long::sum));
-		var complete = 0L;
-		var incomplete = 0L;
-		var served = 0L;
-		for (final var ranges : byObject.values()) {
-			final var least = ranges.size() < RANGES ? 0 : ranges.values().stream().mapToLong(Long::longValue).min().orElse(0);
-			final var most = ranges.values().stream().mapToLong(Long::longValue).max().orElse(0);
-			complete += least;
-			incomplete += most > least ? 1 : 0;
-			served += ranges.values().stream().mapToLong(Long::longValue).sum() * RANGE_SIZE;
-		}
-		return new Served(complete, incomplete, served);
+	/** What the client completed of the objects {@code counted} picks, by their paths. */
+	private RangeResultTrace.Completed completed(final Predicate<String> counted) throws InterruptedException {
+		return trace.completed(stepId, RANGE_SIZE, RANGES, counted);
 	}
-
-	/** The complete sets of ranges served, the objects with an incomplete set, and the bytes served. */
-	private record Served(long complete, long incomplete, long bytes) {}
 
 	private static boolean isRange(final NicSetLoopback.Request request) {
 		return "GET".equals(request.method()) && request.range() != null;
@@ -238,7 +244,10 @@ final class S3SplitReadCountStepTest {
 	}
 
 	private static int objectIndex(final NicSetLoopback.Request request) {
-		final var path = request.path();
+		return objectIndex(request.path());
+	}
+
+	private static int objectIndex(final String path) {
 		return Integer.parseInt(path.substring(path.lastIndexOf('-') + 1));
 	}
 
@@ -252,6 +261,11 @@ final class S3SplitReadCountStepTest {
 	}
 
 	private static String timeLimited(final boolean recycle, final String opSettings, final String dataSettings, final String items) {
+		return timeLimited(TIME_LIMIT_SECONDS, recycle, opSettings, dataSettings, items);
+	}
+
+	private static String timeLimited(final int seconds, final boolean recycle, final String opSettings, final String dataSettings,
+					final String items) {
 		return """
 						Load.config({
 							"load": {
@@ -259,9 +273,10 @@ final class S3SplitReadCountStepTest {
 								"op": {"type": "read", "limit": {"count": 0}, "recycle": {"mode": %s}, "wait": {"limit": %d}%s}
 							},
 							"storage": {"driver": {"limit": {"concurrency": %d}}},
-							"item": {"data": {"ranges": {"threshold": "%d"}%s}, "input": {"file": "%s"}}
+							"item": {"data": {"ranges": {"threshold": "%d"}%s}, "input": {"file": "%s"}},
+							"output": {"metrics": {"trace": {"persist": true}}}
 						}).run();
-						""".formatted(TIME_LIMIT_SECONDS, recycle, WAIT_LIMIT_SECONDS, opSettings, CONCURRENCY, RANGE_SIZE,
+						""".formatted(seconds, recycle, WAIT_LIMIT_SECONDS, opSettings, CONCURRENCY, RANGE_SIZE,
 						dataSettings, items);
 	}
 

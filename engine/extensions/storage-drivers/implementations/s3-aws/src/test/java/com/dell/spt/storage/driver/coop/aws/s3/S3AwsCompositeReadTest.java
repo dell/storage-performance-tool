@@ -65,8 +65,10 @@ import org.junit.jupiter.api.io.TempDir;
  * GET at its position in the object, whatever the item's offset in the data ring, which every test
  * makes nonzero. The read is counted once, when its last part ends, with its parts' bytes and a
  * duration from its initial pass to that end. A step's count is therefore the complete sets of
- * ranges the target served, whenever the step ends, and only a read with a range unsent at the stop
- * can be unresolved.
+ * ranges the client completed, whenever the step ends, and only a read with a range unsent at the
+ * stop can be unresolved. The step tests take the ranges completed from the client's own range
+ * results, in the step's operation trace: a request the stub received is not one the client
+ * completed.
  */
 @Timeout(value = 240, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3AwsCompositeReadTest {
@@ -89,6 +91,11 @@ final class S3AwsCompositeReadTest {
 	private static final int MANY_OBJECTS = 5_000;
 	private static final int FEW_OBJECTS = 16;
 	private static final String STEP_TIME_LIMIT = "3s";
+	/**
+	 * The time limits a recycling step tries in turn, until its objects have been read more than once:
+	 * a loaded host may read fewer than {@link #FEW_OBJECTS} + 1 objects in the first.
+	 */
+	private static final List<String> RECYCLING_TIME_LIMITS = List.of(STEP_TIME_LIMIT, "6s", "12s", "24s");
 	private static final String LONG_TIME_LIMIT = "120s";
 	/** One object in this many has a range the target refuses, in the tests that refuse any. */
 	private static final int REFUSED_ONE_IN = 8;
@@ -97,6 +104,7 @@ final class S3AwsCompositeReadTest {
 	private static final String OP_RETRY = ", \"retry\": true, \"retryLimit\": 1";
 
 	private final RangeStub stub = new RangeStub();
+	private final RangeResultTrace trace = new RangeResultTrace();
 	private String stepId;
 
 	@TempDir
@@ -104,6 +112,7 @@ final class S3AwsCompositeReadTest {
 
 	@AfterEach
 	void stop() {
+		trace.close();
 		stub.close();
 	}
 
@@ -234,13 +243,24 @@ final class S3AwsCompositeReadTest {
 		assertCounted(outcome);
 	}
 
-	/** Recycled reads circulate until the limit: each complete set of an object's ranges is one read. */
+	/**
+	 * Recycled reads circulate until the limit: each complete set of an object's ranges is one read.
+	 * Each step is checked; a longer one follows until the objects have been read more than once.
+	 */
 	@Test
 	void aTimeLimitedRecyclingStepCountsEveryCompleteSetOfRanges() throws Exception {
-		final var outcome = splitStep(STEP_TIME_LIMIT, 0, true, "", FEW_OBJECTS);
+		RangeResultTrace.Completed completed = null;
+		for (final var limit : RECYCLING_TIME_LIMITS) {
+			final var outcome = splitStep(limit, 0, true, "", FEW_OBJECTS);
 
-		assertCounted(outcome);
-		assertTrue(served().complete() > FEW_OBJECTS, () -> "the objects were read more than once: " + served());
+			assertCounted(outcome);
+			completed = completed();
+			if (completed.complete() > FEW_OBJECTS) {
+				return;
+			}
+		}
+		final var last = completed;
+		throw new AssertionError("the objects were not read more than once in " + RECYCLING_TIME_LIMITS + ": " + last);
 	}
 
 	/** The count limit is exact: the reads it admits all finish and nothing more is read. */
@@ -250,8 +270,10 @@ final class S3AwsCompositeReadTest {
 
 		final var outcome = splitStep(LONG_TIME_LIMIT, limit, false, "", MANY_OBJECTS);
 
-		assertEquals(List.of((long) limit, 0L, (long) limit * STEP_OBJECT_SIZE), outcome, () -> served().toString());
-		assertEquals(new Served(limit, 0, (long) limit * STEP_OBJECT_SIZE), served());
+		final var completed = completed();
+		assertEquals(List.of((long) limit, 0L, (long) limit * STEP_OBJECT_SIZE), outcome, completed::toString);
+		assertEquals(new RangeResultTrace.Completed(limit, 0, (long) limit * STEP_OBJECT_SIZE), completed);
+		assertEquals((long) limit * STEP_RANGES, stub.served.size(), "no range beyond the limit's reads is sent");
 		assertEquals(0, unresolved());
 	}
 
@@ -279,11 +301,11 @@ final class S3AwsCompositeReadTest {
 
 		final var outcome = splitStep(STEP_TIME_LIMIT, 0, false, "", MANY_OBJECTS);
 
-		final var served = served();
-		assertEquals(served.complete(), outcome.get(0), () -> outcome + " against " + served);
+		final var completed = completed();
+		assertEquals(completed.complete(), outcome.get(0), () -> outcome + " against " + completed);
 		assertEquals(readsOutOfAttempts(), outcome.get(1), () -> outcome + " against " + stub.gets);
-		assertEquals(served.bytes(), outcome.get(2), () -> outcome + " against " + served);
-		assertUnresolvedWithin(served);
+		assertEquals(completed.bytes(), outcome.get(2), () -> outcome + " against " + completed);
+		assertUnresolvedWithin(completed);
 	}
 
 	/**
@@ -297,13 +319,16 @@ final class S3AwsCompositeReadTest {
 
 		final var outcome = splitStep(STEP_TIME_LIMIT, 0, false, OP_RETRY, MANY_OBJECTS);
 
-		final var served = served();
+		// A refused object's attempts complete at most three ranges each, but can add up to a set: only
+		// the objects never refused have complete sets. The stub's requests bound the refused.
+		final var completed = trace.completed(stepId, STEP_RANGE_SIZE, STEP_RANGES, path -> !refusedObject(path));
 		final var refusedObjects = stub.gets.stream().map(get -> get.split(" ")[1]).distinct()
 						.filter(S3AwsCompositeReadTest::refusedObject).count();
-		assertEquals(served.complete(), outcome.get(0), () -> outcome + " against " + served);
+		assertEquals(completed.complete(), outcome.get(0), () -> outcome + " against " + completed);
 		assertTrue(outcome.get(1) <= refusedObjects, () -> outcome + " with " + refusedObjects + " objects refused");
-		assertEquals(served.bytes(), outcome.get(2), () -> outcome + " against " + served);
-		assertUnresolvedWithin(served);
+		assertEquals(completed.bytes(), outcome.get(2), () -> outcome + " against " + completed);
+		// An object with an incomplete set, refused or not, may have the read the stop left unresolved.
+		assertUnresolvedWithin(completed());
 	}
 
 	/**
@@ -327,16 +352,16 @@ final class S3AwsCompositeReadTest {
 		assertEquals(0, unresolved());
 	}
 
-	private void assertCounted(final List<Long> outcome) throws IOException {
-		final var served = served();
-		assertTrue(served.complete() > 0, served::toString);
-		assertEquals(List.of(served.complete(), 0L, served.bytes()), outcome, served::toString);
-		assertUnresolvedWithin(served);
+	private void assertCounted(final List<Long> outcome) throws Exception {
+		final var completed = completed();
+		assertTrue(completed.complete() > 0, completed::toString);
+		assertEquals(List.of(completed.complete(), 0L, completed.bytes()), outcome, completed::toString);
+		assertUnresolvedWithin(completed);
 	}
 
-	private void assertUnresolvedWithin(final Served served) throws IOException {
+	private void assertUnresolvedWithin(final RangeResultTrace.Completed completed) throws IOException {
 		final var unresolved = unresolved();
-		assertTrue(unresolved <= served.incomplete(), () -> unresolved + " unresolved against " + served);
+		assertTrue(unresolved <= completed.incomplete(), () -> unresolved + " unresolved against " + completed);
 	}
 
 	private static boolean refusedObject(final String path) {
@@ -347,44 +372,32 @@ final class S3AwsCompositeReadTest {
 		return Integer.parseInt(path.substring(path.lastIndexOf('-') + 1));
 	}
 
-	/** The reads whose refused range used all its attempts and whose other ranges were all served. */
-	private long readsOutOfAttempts() {
-		final Map<String, Long> attempts = stub.gets.stream()
-						.filter(get -> get.endsWith(" bytes=" + STEP_RANGE_SIZE + "-" + (2 * STEP_RANGE_SIZE - 1)))
-						.collect(Collectors.groupingBy(get -> get.split(" ")[1], Collectors.counting()));
-		final Map<String, Long> servedRanges = stub.served.stream()
-						.collect(Collectors.groupingBy(range -> range.split(" ")[0], Collectors.counting()));
-		return attempts.entrySet().stream()
-						.filter(entry -> refusedObject(entry.getKey()) && entry.getValue() == DRIVER_ATTEMPTS_PER_PART
-										&& servedRanges.getOrDefault(entry.getKey(), 0L) == STEP_RANGES - 1)
+	/**
+	 * The reads whose refused range, by the client's results, failed every attempt with the stub's
+	 * refusal and whose other ranges all succeeded. Each object is read once.
+	 */
+	private long readsOutOfAttempts() throws InterruptedException {
+		final var refusal = Operation.Status.RESP_FAIL_AUTH.name();
+		final Map<String, Long> refusedAttempts = new HashMap<>();
+		final Map<String, Long> succeededRanges = new HashMap<>();
+		for (final var row : trace.rows(stepId)) {
+			if (refusal.equals(row[3])) {
+				refusedAttempts.merge(row[1], 1L, Long::sum);
+			} else if ("SUCC".equals(row[3]) && Integer.toString(STEP_RANGE_SIZE).equals(row[8])) {
+				succeededRanges.merge(row[1], 1L, Long::sum);
+			}
+		}
+		// The read's own failure is one more row with the refusal.
+		return refusedAttempts.entrySet().stream()
+						.filter(entry -> refusedObject(entry.getKey()) && entry.getValue() >= DRIVER_ATTEMPTS_PER_PART
+										&& succeededRanges.getOrDefault(entry.getKey(), 0L) == STEP_RANGES - 1)
 						.count();
 	}
 
-	/**
-	 * What the target served. An object's complete sets are the times its least-read range was served;
-	 * an object with some ranges served more often than that was being read when the step ended.
-	 */
-	private Served served() {
-		final Map<String, Map<String, Long>> byObject = new HashMap<>();
-		stub.served.forEach(range -> {
-			final var fields = range.split(" ");
-			byObject.computeIfAbsent(fields[0], unused -> new HashMap<>()).merge(fields[1], 1L, Long::sum);
-		});
-		var complete = 0L;
-		var incomplete = 0L;
-		var bytes = 0L;
-		for (final var ranges : byObject.values()) {
-			final var least = ranges.size() < STEP_RANGES ? 0 : ranges.values().stream().mapToLong(Long::longValue).min().orElse(0);
-			final var most = ranges.values().stream().mapToLong(Long::longValue).max().orElse(0);
-			complete += least;
-			incomplete += most > least ? 1 : 0;
-			bytes += ranges.values().stream().mapToLong(Long::longValue).sum() * STEP_RANGE_SIZE;
-		}
-		return new Served(complete, incomplete, bytes);
+	/** What the client completed in the last step, of every object. */
+	private RangeResultTrace.Completed completed() throws InterruptedException {
+		return trace.completed(stepId, STEP_RANGE_SIZE, STEP_RANGES, path -> true);
 	}
-
-	/** The complete sets of ranges served, the objects with an incomplete set, and the bytes served. */
-	private record Served(long complete, long incomplete, long bytes) {}
 
 	/** {@code unresolved} in the last step's {@code operation.lifecycle.csv}, which reconciles. */
 	private long unresolved() throws IOException {
@@ -416,7 +429,8 @@ final class S3AwsCompositeReadTest {
 								"op": {"type": "read", "limit": {"count": %d}, "recycle": {"mode": %s}, "wait": {"limit": 60}%s}
 							},
 							"storage": {"driver": {"limit": {"concurrency": 4}}},
-							"item": {"input": {"file": "%s"}, "data": {"ranges": {"threshold": "%d"}}}
+							"item": {"input": {"file": "%s"}, "data": {"ranges": {"threshold": "%d"}}},
+							"output": {"metrics": {"trace": {"persist": true}}}
 						}).run();
 						""".formatted(timeLimit, count, recycle, opSettings, items.toString().replace("\\", "/"), STEP_RANGE_SIZE));
 	}
