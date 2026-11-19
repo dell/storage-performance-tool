@@ -319,7 +319,7 @@ public interface ConfigUtil {
 		return new BasicConfig(pathSep, schema, configTree);
 	}
 
-	/** Copies the nested maps. An ordered map stays ordered: headers go out in the order written. */
+	/** Copies the nested maps. A {@link LinkedHashMap} keeps its order: headers go out in the order written. */
 	@SuppressWarnings("unchecked")
 	private static Map<String, Object> copyMaps(final Map<String, Object> tree) {
 		final Map<String, Object> copy = tree instanceof LinkedHashMap ? new LinkedHashMap<>() : new HashMap<>();
