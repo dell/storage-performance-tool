@@ -2,6 +2,7 @@ package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
+import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
@@ -11,14 +12,17 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import com.github.akurilov.commons.system.SizeInBytes;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -45,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
@@ -1243,6 +1248,118 @@ class MixedLoadGeneratorTest {
 	}
 
 	@Test
+	@DisplayName("Operations the driver held unsent count out once at stop; refused and sent ones are not counted out")
+	@Timeout(30)
+	void heldOperationsCountOutWhenUnattemptedAndRefusedOrSentOnesDoNot() throws Exception {
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		for (int i = 0; i < 100; i++) {
+			pool.addDeleteItem(new ItemImpl("to-delete-" + i));
+		}
+		final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+		final List<Operation> held = new ArrayList<>();
+		final List<Operation> refused = new ArrayList<>();
+		final AtomicInteger puts = new AtomicInteger();
+		// A cooperative driver's admission: every third operation is refused and the tracker never
+		// holds it; the others are queued in the driver's custody.
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				if (puts.incrementAndGet() % 3 == 0) {
+					refused.add(op);
+					return false;
+				}
+				assertTrue(lifecycle.driverQueued(op));
+				held.add(op);
+				return true;
+			}
+		};
+		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, driver, 1_000);
+		gen.operationLifecycle(lifecycle);
+		dispatch(gen, 300);
+		final List<Operation> sent = new ArrayList<>(held.subList(0, 12));
+		for (final Operation op : sent) {
+			assertTrue(lifecycle.dispatched(op));
+		}
+		final List<OpType> types = List.of(OpType.READ, OpType.CREATE, OpType.DELETE);
+		for (final OpType type : types) {
+			assertEquals(count(held, type), gen.inFlightCount(type), "precondition: held " + type);
+		}
+
+		// The stop: what the driver held unsent becomes unattempted, by recovery or by the driver.
+		for (final Operation op : held.subList(sent.size(), held.size())) {
+			assertTrue(lifecycle.unattempted(op));
+		}
+		// An operation the driver refused was counted out at the refusal, not again here.
+		for (final Operation op : refused) {
+			lifecycle.unattempted(op);
+		}
+		// One still dispatched at the drain deadline stays counted.
+		assertEquals(sent.size(), lifecycle.expireTerminalDeadline());
+
+		assertTrue(lifecycle.counters().unattempted() > 0, "precondition: operations were unattempted");
+		assertFalse(refused.isEmpty(), "precondition: operations were refused");
+		for (final OpType type : types) {
+			assertTrue(count(sent, type) > 0, "precondition: a sent " + type);
+			assertEquals(count(sent, type), gen.inFlightCount(type), type + " still counted");
+		}
+	}
+
+	@Test
+	@DisplayName("A part of an unattempted composite does not count out; the composite counts out once")
+	void anUnattemptedCompositeCountsOutOnceAndItsPartsNever() throws Exception {
+		try (final DataInput dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4KB"), 4, false)) {
+			final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+			final List<Operation> held = new ArrayList<>();
+			final Output<Operation> driver = new AcceptingOutput() {
+				@Override
+				public boolean put(final Operation op) {
+					assertTrue(lifecycle.driverQueued(op));
+					held.add(op);
+					return true;
+				}
+			};
+			final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+			weights.put(OpType.READ, 50);
+			weights.put(OpType.CREATE, 50);
+			final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+			builders.put(OpType.READ, testBuilder(OpType.READ, null));
+			builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null, item -> {
+				final DataItemImpl dataItem = new DataItemImpl(item.name(), 0, 2048);
+				dataItem.dataInput(dataInput);
+				return (Operation) new CompositeDataOperationImpl<>(0, OpType.CREATE, dataItem, null, "/bucket", null, null, 0, 1024);
+			}));
+			final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
+							new PoolItemInput<>(makeItems(10)), builders, driver, 1_000, mockNewItemSupplier());
+			gen.operationLifecycle(lifecycle);
+			dispatch(gen, 40);
+			final List<Operation> composites = held.stream().filter(op -> op instanceof CompositeOperation).toList();
+			assertTrue(composites.size() >= 2, "precondition: composites were dispatched");
+			final int creates = composites.size();
+			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "precondition");
+
+			// The first composite started: its parts were queued, then taken back unsent.
+			final CompositeOperation started = (CompositeOperation) composites.get(0);
+			assertTrue(lifecycle.dispatched(started));
+			for (final Object part : started.subOperations()) {
+				assertTrue(part instanceof PartialOperation);
+				assertTrue(lifecycle.driverQueued((Operation) part));
+				assertTrue(lifecycle.unattempted((Operation) part));
+			}
+			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "unattempted parts change nothing");
+
+			// The second never started, and counts out once however often it is settled.
+			final Operation neverStarted = composites.get(1);
+			assertTrue(lifecycle.unattempted(neverStarted));
+			assertFalse(lifecycle.unattempted(neverStarted));
+			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "one composite counted out");
+		}
+	}
+
+	private static long count(final List<Operation> ops, final OpType type) {
+		return ops.stream().filter(op -> op.type() == type).count();
+	}
+
+	@Test
 	@DisplayName("Legacy PUT completion hook is removed from MixedLoadGenerator")
 	void legacyPutCompletionHookRemoved() {
 		assertThrows(NoSuchMethodException.class,
@@ -1425,6 +1542,13 @@ class MixedLoadGeneratorTest {
 	/** Creates a builder that records the op type when buildOp is called. */
 	private static OperationsBuilder<Item, Operation<Item>> testBuilder(
 					final OpType opType, final ConcurrentLinkedQueue<OpType> tracker) {
+		return testBuilder(opType, tracker, item -> new OperationImpl<>(0, opType, item, null, null, null));
+	}
+
+	/** Creates a builder that records the op type when buildOp is called, and builds with {@code factory}. */
+	private static OperationsBuilder<Item, Operation<Item>> testBuilder(
+					final OpType opType, final ConcurrentLinkedQueue<OpType> tracker,
+					final Function<Item, Operation<Item>> factory) {
 		return new OperationsBuilder<>() {
 			private OpType type = opType;
 
@@ -1474,7 +1598,7 @@ class MixedLoadGeneratorTest {
 				if (tracker != null) {
 					tracker.add(opType);
 				}
-				return new OperationImpl<>(0, opType, item, null, null, null);
+				return factory.apply(item);
 			}
 
 			@Override

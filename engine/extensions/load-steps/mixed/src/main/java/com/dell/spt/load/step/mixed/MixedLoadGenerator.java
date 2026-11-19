@@ -7,6 +7,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.LogUtil;
@@ -379,6 +380,20 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	@Override
 	public void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {
 		this.operationLifecycle = lifecycle == null ? OperationLifecycleTracker.disabled() : lifecycle;
+		if (lifecycle != null && lifecycle.isEnabled()) {
+			lifecycle.unattemptedObserver(this::onOperationUnattempted);
+		}
+	}
+
+	/**
+	 * Counts out an operation the driver accepted but never sent, which publishes no result at
+	 * stop. A part of a composite was never counted in, so only the composite itself counts out.
+	 * Runs inside the tracker's unattempted transition, so it must stay bounded and non-throwing.
+	 */
+	void onOperationUnattempted(final O op) {
+		if (!(op instanceof PartialOperation)) {
+			onOperationCompleted(op);
+		}
 	}
 
 	/**

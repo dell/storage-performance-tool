@@ -108,6 +108,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private final Consumer<O> dispatchPublicationObserver;
 	private volatile Consumer<O> dispatchObserver;
 	private volatile Consumer<O> terminalObserver;
+	private volatile Consumer<O> unattemptedObserver;
 	private final Set<IdentityKey<O>> outstanding = ConcurrentHashMap.newKeySet();
 	private final ReferenceQueue<O> compatibilityReferences = new ReferenceQueue<>();
 	private final Map<WeakIdentityKey<O>, CompatibilityState> compatibilityStates = new HashMap<>();
@@ -189,6 +190,19 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	 */
 	public void dispatchObserver(final Consumer<O> observer) {
 		dispatchObserver = observer;
+	}
+
+	/**
+	 * Installs a callback which runs once for each operation that leaves generator or driver
+	 * custody as unattempted, after the transition is recorded. An operation the tracker never
+	 * held, such as one the driver refused at admission, does not reach it. Not installed on, and
+	 * never called by, the disabled tracker. The observer must be bounded, non-blocking, and
+	 * non-throwing.
+	 */
+	public void unattemptedObserver(final Consumer<O> observer) {
+		if (enabled) {
+			unattemptedObserver = observer;
+		}
 	}
 
 	/** Clears completed-run counters before a representative lifecycle restart. */
@@ -654,10 +668,16 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!transition(op, lifecycle(op), OperationLifecycleState.UNATTEMPTED)) {
 			return false;
 		}
-		outstanding.remove(identityKey(op));
+		final boolean heldInCustody = outstanding.remove(identityKey(op));
 		unattempted.increment();
 		synchronized (unattemptedOperations) {
 			unattemptedOperations.add(op);
+		}
+		if (heldInCustody) {
+			final var observer = unattemptedObserver;
+			if (observer != null) {
+				observer.accept(op);
+			}
 		}
 		return true;
 	}
