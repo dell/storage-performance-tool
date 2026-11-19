@@ -183,10 +183,14 @@ func (r *ConflictResolver) unattendedAbortMessage(info *ServiceInfo) string {
 			r.Port, engineRunDetails(info.Status))
 	}
 	if info.IsSpt {
-		return fmt.Sprintf("port %s is held by a container that looks like SPT, but no SPT API answered there (%s); "+
+		holder := "a container"
+		if info.Container != nil {
+			holder = fmt.Sprintf("container %s (%s)", info.Container.Name, info.Container.Image)
+		}
+		return fmt.Sprintf("port %s is held by %s, which looks like SPT but no SPT API answered there; "+
 			"it was left running. Use --force to remove it and free the port, "+
 			"or --api-port with --rmi-registry-port to run alongside it",
-			r.Port, info.GetServiceDescription())
+			r.Port, holder)
 	}
 	return fmt.Sprintf("port %s is in use (%s); it was left running. "+
 		"Free the port, or use --api-port with --rmi-registry-port to run alongside it",

@@ -136,9 +136,17 @@ func TestUnattendedMessageForALookalikeContainer(t *testing.T) {
 	resolver := holder.resolver(false, false)
 	defer resolver.Close()
 
+	info, err := resolver.checkService(context.Background())
+	if err != nil {
+		t.Fatalf("checkService() error = %v", err)
+	}
+	if info.Status == nil || info.Status.RunID != "" || info.Status.State != "" || info.IsTestActive() {
+		t.Errorf("status = %+v, want no run or state invented", info.Status)
+	}
+
 	result, err := resolver.CheckAndResolveConflicts(context.Background())
-	assertUnattendedAbort(t, result, err, "looks like SPT")
-	for _, invented := range []string{"state RUNNING", "run detected", "held by an SPT engine"} {
+	assertUnattendedAbort(t, result, err, "container dashboard (spt-dashboard), which looks like SPT")
+	for _, invented := range []string{"RUNNING", "detected", "held by an SPT engine"} {
 		if strings.Contains(result.Message, invented) {
 			t.Errorf("Message = %q, must not contain %q", result.Message, invented)
 		}
