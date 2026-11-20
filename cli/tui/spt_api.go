@@ -785,17 +785,12 @@ func (c *SptAPIClient) StopTest() error {
 
 	logging.LogInfo("spt-api", "stopping test", "runID", runID)
 
-	// Build the DELETE request URL
-	url := c.baseURL + "/run"
-	if runID != "" {
-		url = fmt.Sprintf("%s?runId=%s", url, runID)
-	}
-
-	// Send DELETE request
-	req, err := http.NewRequest("DELETE", url, nil)
+	// The engine stops only the run named by If-Match.
+	req, err := http.NewRequest(http.MethodDelete, c.baseURL+"/run", nil)
 	if err != nil {
 		return fmt.Errorf("failed to create DELETE request: %w", err)
 	}
+	req.Header.Set("If-Match", runID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

@@ -1219,7 +1219,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} finally {
 			xml.setLength(0);
 		}
-		final var uri = SLASH + deleteRequest.bucket() + '?' + DELETE_QUERY;
+		final var bucket = deleteRequest.bucket();
+		final String uri;
+		xml.setLength(0);
+		try {
+			uri = appendManifestBucket(xml.append(SLASH), bucket).append('?').append(DELETE_QUERY).toString();
+		} finally {
+			xml.setLength(0);
+		}
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1245,12 +1252,27 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var uri = THREAD_LOCAL_STRB.get();
 		uri.setLength(0);
 		try {
-			uri.append(SLASH).append(bucket).append(SLASH);
+			appendManifestBucket(uri.append(SLASH), bucket).append(SLASH);
 			appendPercentEncodedPath(uri, target.key());
 			return uri.toString();
 		} finally {
 			uri.setLength(0);
 		}
+	}
+
+	/**
+	 * Appends a manifest bucket's name without the one trailing slash it may be written with, so that
+	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does. The
+	 * name is always appended whole, as before, and the slash then dropped: appending a span of a
+	 * string is slower than appending it whole and shortening the builder.
+	 */
+	private static StringBuilder appendManifestBucket(final StringBuilder sb, final String bucket) {
+		sb.append(bucket);
+		final int last = bucket.length() - 1;
+		if (last > 0 && bucket.charAt(last) == '/') {
+			sb.setLength(sb.length() - 1);
+		}
+		return sb;
 	}
 
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
@@ -1265,7 +1287,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		final String bucketPath = SLASH + target.bucket();
+		// The same key prepare() stores the bucket's credential under.
+		final String bucketPath = requestNewPathCacheKey(SLASH + target.bucket());
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,

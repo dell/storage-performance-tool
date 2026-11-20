@@ -9,6 +9,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/tui"
+	"github.com/spf13/cobra"
 )
 
 // fakeAbortResolve simulates a detected port conflict where the user chooses Abort.
@@ -88,5 +89,95 @@ func TestAbortDoesNotPrintUsage(t *testing.T) {
 	}
 	if strings.Contains(out, "Usage:") {
 		t.Errorf("unexpected usage/help output after abort: %s", out)
+	}
+}
+
+// An abort nobody chose reports what holds the port and what to do, not a
+// cancellation by the user.
+func TestCheckPortConflictsReportsUnattendedAbort(t *testing.T) {
+	const message = "port 9999 is held by an SPT engine (run 41, state RUNNING); it was left running."
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{
+			Strategy: portcheck.StrategyAbort,
+			Message:  message,
+			Error:    portcheck.ErrPortConflictUnattended,
+		}, nil
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 9999, "")
+	err := checkPortConflicts(cmd)
+	if err == nil || err.Error() != message {
+		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
+	}
+}
+
+// The resolver budgets each phase: an overall deadline here would count the time
+// an operator spends at the prompt against the engine's shutdown.
+func TestCheckPortConflictsSetsNoOverallDeadline(t *testing.T) {
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(ctx context.Context, _ string, _ bool) (*portcheck.ResolutionResult, error) {
+		if deadline, ok := ctx.Deadline(); ok {
+			t.Errorf("resolver context has deadline %v", deadline)
+		}
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 9999, "")
+	if err := checkPortConflicts(cmd); err != nil {
+		t.Fatalf("checkPortConflicts() error = %v", err)
+	}
+}
+
+// An interrupted recheck at the conflict prompt says it was interrupted, not that
+// the port is still in use: the probe that was cut short showed nothing.
+func TestCheckPortConflictsReportsAnInterruptedRetry(t *testing.T) {
+	const message = "Interrupted while rechecking port 23999: context canceled"
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{
+			Strategy: portcheck.StrategyRetry,
+			Message:  message,
+			Error:    context.Canceled,
+		}, nil
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 23999, "")
+	err := checkPortConflicts(cmd)
+	if err == nil || err.Error() != message {
+		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
+	}
+}
+
+// Sol re-review 5 Low 8: Ctrl-C at the conflict prompt, or during detection,
+// returns the cancellation with the resolver's interruption, which is what the
+// command reports, not a generic failure to resolve the conflict.
+func TestCheckPortConflictsReportsAnInterruptionAtThePrompt(t *testing.T) {
+	const message = "Interrupted while waiting for an answer about port 23999: context canceled"
+	prevResolver := resolvePortConflictFunc
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{
+			Strategy: portcheck.StrategyRetry,
+			Message:  message,
+			Error:    context.Canceled,
+		}, context.Canceled
+	}
+	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Int(flagAPIPort, 23999, "")
+	err := checkPortConflicts(cmd)
+	if err == nil || err.Error() != message {
+		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
 	}
 }
