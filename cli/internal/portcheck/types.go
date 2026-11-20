@@ -6,15 +6,35 @@ package portcheck
 
 import (
 	"fmt"
+	"net"
 	"time"
 )
 
 // ServiceInfo represents information about a service using a port
 type ServiceInfo struct {
-	IsListening bool           // Whether the port is listening
-	IsSpt       bool           // Whether the service appears to be Spt
-	Status      *SptStatus     // Spt status if detected (nil if not Spt)
-	Container   *ContainerInfo // Docker container info if found (nil if none)
+	IsListening bool // Whether the port is listening
+	IsSpt       bool // Whether the service appears to be Spt
+	// APIConfirmed is true when the SPT API answered on the port. IsSpt alone
+	// may rest on a container's name, image or labels, which is enough to
+	// describe the holder but not to send it API requests that change anything.
+	APIConfirmed bool
+	Status       *SptStatus // Spt status if detected (nil if not Spt)
+	// Container is the one container whose published binding covers Address
+	// (nil if none, or if more than one does). It is the only container that a
+	// force stop of this conflict may remove, and an API request that changes
+	// the engine is sent only while it still publishes Address. A container of a
+	// daemon not reached through a local socket is never set here.
+	Container *ContainerInfo
+	// Address is the address that accepted detection's connection. Every HTTP
+	// request after that probe, detection's and the actions', goes to it, and a
+	// force stop acts only while the same address answers.
+	Address net.IP
+	// Publishers names the containers whose bindings cover Address when there is
+	// more than one, so none of them is shown as the holder.
+	Publishers []string
+	// ListingFailed is set when detection could not list the containers, so
+	// none could be shown.
+	ListingFailed bool
 }
 
 // SptStatus represents the status of a running Spt test
@@ -29,6 +49,9 @@ type SptStatus struct {
 	TotalItems     int64         `json:"totalItems,omitempty"`     // Total operations (if known)
 	StartTime      time.Time     `json:"startTime,omitempty"`      // When the test started
 	EndTime        time.Time     `json:"endTime,omitempty"`        // When the test ended (if completed)
+	RunActive      bool          `json:"-"`                        // HEAD /run reports an active run with RunID
+	RunningSince   string        `json:"-"`                        // /status start time of the active run, if this engine started it
+	Worker         bool          `json:"-"`                        // /status names no run or another one: a worker of RunID
 }
 
 // ContainerInfo represents information about a Docker container
