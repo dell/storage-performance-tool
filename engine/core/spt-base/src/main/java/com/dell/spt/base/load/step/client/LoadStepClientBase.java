@@ -188,6 +188,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
+	// Of this start: how many slices, in slice order, returned from their start(), and whether the
+	// start ended as a stop. A stopped start publishes the slice files of those slices only.
+	private volatile int startedSliceCount;
+	private volatile boolean startStopped;
 
 	static int activeFailureBudgetSnapshotFlightCount() {
 		return FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS
@@ -294,12 +298,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 											+ "Build a new step from a prototype with config() and run that.",
 							null);
 		}
-		super.doStart();
+		try {
+			super.doStart();
+		} catch (final Throwable cause) {
+			// The base class ends a start that a stop cut short, or refused at JVM exit, with this.
+			if (cause instanceof InterruptedException) {
+				startStopped = true;
+			}
+			throw cause;
+		}
 	}
 
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
+		// Reset where a start really begins: a restart the base class refuses (at JVM exit) keeps the
+		// count of the start before it, so its close still publishes that start's slices.
+		startedSliceCount = 0;
+		startStopped = false;
 		resetDurationLifecycleForStart();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			// need to set the once generated step id
@@ -1360,6 +1376,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			try {
 				stepSlice.start();
+				startedSliceCount = i + 1;
 			} catch (final Exception e) {
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
@@ -3217,7 +3234,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
 			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
 				try {
-					deleteArtifactAggregator.close();
+					if (startStopped && deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
+						aggregator.closeAfterStoppedStart(startedSliceCount);
+					} else {
+						deleteArtifactAggregator.close();
+					}
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					failedDeleteArtifactAggregators.add(deleteArtifactAggregator);
@@ -3232,7 +3253,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
 			for (final var aggregator : operationLifecycleAggregators) {
 				try {
-					aggregator.close();
+					closeSliceLoggerArtifact(aggregator);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(terminalCause,
@@ -3251,7 +3272,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
-					integrityLogFileAggregator.close();
+					closeSliceLoggerArtifact(integrityLogFileAggregator);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(
@@ -3300,8 +3321,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			for (final var itemOutputFileAggregator : itemOutputFileAggregators) {
 				try {
 					if (itemOutputFileAggregator instanceof CsvArtifactAggregator csvAggregator) {
-						csvAggregator.close(terminalFailureCountsByOpType.getOrDefault(
-										csvAggregator.artifactOpType(), -1L));
+						final long failedOperationCount = terminalFailureCountsByOpType.getOrDefault(
+										csvAggregator.artifactOpType(), -1L);
+						if (startStopped) {
+							csvAggregator.closeAfterStoppedStart(failedOperationCount, startedSliceCount);
+						} else {
+							csvAggregator.close(failedOperationCount);
+						}
 					} else {
 						itemOutputFileAggregator.close();
 					}
@@ -3378,6 +3404,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				durationCleanupRetryPending = false;
 			}
 			closeRetainedDurationPhases();
+		}
+	}
+
+	/**
+	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
+	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
+	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
+	 * started, nothing is published.
+	 */
+	private void closeSliceLoggerArtifact(final AutoCloseable aggregator) throws Exception {
+		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+			sliceArtifact.closeAfterStoppedStart(startedSliceCount);
+		} else {
+			aggregator.close();
 		}
 	}
 

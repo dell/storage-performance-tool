@@ -66,8 +66,27 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 
 	@Override
 	public void close() {
+		publish(sourceNames.size());
+	}
+
+	/**
+	 * Publishes the evidence of a step whose start ended as a stop, from its first
+	 * {@code startedSlices} slices: those whose start returned. The others wrote nothing to publish.
+	 * With none, publishes nothing. A missing source of a started slice is still a failure.
+	 */
+	void closeAfterStoppedStart(final int startedSlices) {
+		if (startedSlices < 0 || startedSlices > sourceNames.size()) {
+			throw new IllegalArgumentException(
+							"started slices " + startedSlices + " not in 0.." + sourceNames.size());
+		}
+		if (startedSlices > 0) {
+			publish(startedSlices);
+		}
+	}
+
+	private void publish(final int sliceCount) {
 		try {
-			collectAndPublish();
+			collectAndPublish(sliceCount);
 		} catch (final IntegrityTerminalException e) {
 			throw e;
 		} catch (final Exception e) {
@@ -76,13 +95,13 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 		}
 	}
 
-	private void collectAndPublish() throws IOException {
+	private void collectAndPublish(final int sliceCount) throws IOException {
 		DeleteArtifactAggregation.retainSelection(
 						stepId, outputDirectory, selection, selectionCompletion);
 		LogUtil.flushAll();
 		Files.createDirectories(outputDirectory);
-		final List<DeleteArtifactAggregation.NodeSource> sources = new ArrayList<>(sourceNames.size());
-		for (int nodeIndex = 0; nodeIndex < sourceNames.size(); nodeIndex++) {
+		final List<DeleteArtifactAggregation.NodeSource> sources = new ArrayList<>(sliceCount);
+		for (int nodeIndex = 0; nodeIndex < sliceCount; nodeIndex++) {
 			final SourceNames names = sourceNames.get(nodeIndex);
 			sources.add(new DeleteArtifactAggregation.NodeSource(
 							collect(nodeIndex, names.totals(), DeleteArtifacts.METRICS_FILE_NAME),
@@ -92,7 +111,7 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 							collect(nodeIndex, names.verification(), DeleteArtifacts.VERIFICATION_FILE_NAME)));
 		}
 		DeleteArtifactAggregation.publish(
-						stepId, outputDirectory, sources, contributorIds, selection, selectionCompletion);
+						stepId, outputDirectory, sources, contributorIds.subList(0, sliceCount), selection, selectionCompletion);
 	}
 
 	private Path collect(final int nodeIndex, final String remoteName, final String artifactName)
