@@ -197,6 +197,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Unreachable remote node fails sooner** — A step whose remote node refuses the connection now fails about 2 minutes sooner: the entry no longer sleeps after its last connection try, and that try's log line no longer says it will reconnect.
 - **Connection tries to a remote node time out after 10 s** — An entry now gives up on each connection try to a remote node after 10 s. When the network dropped the connection, a try used to take about 2 minutes, and a stop request could not end it; a stop request (`DELETE /run`) now takes effect within about 10 s. A node that is only late is still found.
 - **Close failures at engine exit are logged** — A failure to close a step, driver or other engine service while the engine exits is now logged as a warning on the console and in the engine's own `errors.log`, under `log/none-<timestamp>/`, not in the step's `errors.log`; it was printed on stderr in only a few runs and was usually lost. Affected all releases.
+- **Recycle steps with output duplicates** — A recycle step with `load.op.output.duplicates=true` no longer ends early with "no load operations to recycle (all failed?)". It now runs to its count or time limit. A step whose operations have all failed still ends at once.
 
 ## [5.17.0] - 2026-11-11
 
