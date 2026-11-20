@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -53,6 +54,21 @@ func (buckets *savedItemsBuckets) add(bucket string) {
 	}
 }
 
+// The reasons for a row whose key may not be the stored key. Such a file is converted by hand.
+const (
+	savedItemsTildeReason = `has a "~" in its key, as a versioned write names a version ` +
+		`(key~versionId, and the version ID can hold "/"); a saved items file deletes current keys ` +
+		"only, so convert such a file by hand to a canonical bucket,key,size,version_id manifest " +
+		"of the stored keys and versions"
+	savedItemsPercentReason = `has a "%" in its object name, and a write can store a percent ` +
+		"escape decoded, so the row may not name the stored key; convert such a file by hand to a " +
+		"canonical bucket,key,size,version_id manifest of the stored keys"
+)
+
+// savedItemsLineTooLong is the reason for a line whose content, without its line end, is longer
+// than the canonical record limit.
+var savedItemsLineTooLong = fmt.Sprintf("exceeds %d bytes without its line end", maxCanonicalCSVRecordBytes)
+
 // savedItemsLineError is a refusal of one line of a saved items file. It names the line and the
 // reason, never the line's content, and the two formats DELETE accepts.
 func savedItemsLineError(line int, reason string) error {
@@ -99,10 +115,15 @@ func parseSavedItemLine(line string) (ManifestRecord, string) {
 	case strings.HasPrefix(key, "/"):
 		return ManifestRecord{}, `has an object key that starts with "/"`
 	}
-	if strings.ContainsRune(key[strings.LastIndexByte(key, '/')+1:], '~') {
-		return ManifestRecord{}, `has a "~" in the last segment of its key, as a versioned write ` +
-			"names a version (key~versionId); a saved items file deletes current keys only, and " +
-			"exact versions need a canonical manifest"
+	// A versioned Netty write names a version as key~versionId, and a version ID can hold "/", so
+	// the suffix is not always in the last segment: a "~" anywhere in the key is refused.
+	if strings.ContainsRune(key, '~') {
+		return ManifestRecord{}, savedItemsTildeReason
+	}
+	// A Netty S3 write can send a %XX in a name as a URI escape, so the target stores the decoded
+	// key, while a DELETE addresses the literal "%": the row may name another object.
+	if strings.ContainsRune(name, '%') {
+		return ManifestRecord{}, savedItemsPercentReason
 	}
 	if !isSavedItemOffset(offset) {
 		return ManifestRecord{}, "has an offset that is not a hexadecimal 64-bit integer"
@@ -122,12 +143,14 @@ func parseSavedItemLine(line string) (ManifestRecord, string) {
 // the last line may have no line end. One line that cannot be converted refuses the whole file.
 // It returns the number of rows read.
 func readSavedItems(input io.Reader, publish func(ManifestRecord, int) error) (int, error) {
-	// One line, its line end and one byte more fit the buffer, so a longer line is seen as such.
+	// A line of the longest content and a CRLF fit the buffer; the content's length is checked
+	// after the line end is stripped, so the limit is the same for LF, CRLF and no line end.
 	lines := bufio.NewReaderSize(input, maxCanonicalCSVRecordBytes+2)
+	tooLong := savedItemsLineTooLong
 	for number := 1; ; number++ {
 		line, err := lines.ReadSlice('\n')
 		if errors.Is(err, bufio.ErrBufferFull) {
-			return number - 1, savedItemsLineError(number, fmt.Sprintf("exceeds %d bytes", maxCanonicalCSVRecordBytes))
+			return number - 1, savedItemsLineError(number, tooLong)
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
 			return number - 1, fmt.Errorf("read items file line %d: %w", number, err)
@@ -138,6 +161,9 @@ func readSavedItems(input io.Reader, publish func(ManifestRecord, int) error) (i
 		line = bytes.TrimSuffix(line, []byte("\n"))
 		if err == nil {
 			line = bytes.TrimSuffix(line, []byte("\r"))
+		}
+		if len(line) > maxCanonicalCSVRecordBytes {
+			return number - 1, savedItemsLineError(number, tooLong)
 		}
 		record, reason := parseSavedItemLine(string(line))
 		if reason != "" {
@@ -159,7 +185,55 @@ func readSavedItems(input io.Reader, publish func(ManifestRecord, int) error) (i
 func savedRowUnderBareCRHeader(firstRecord []byte) error {
 	verdict := scanAsEngineReads(bytes.NewReader(firstRecord), engineScan{firstRecord: 1, fileStart: true})
 	if verdict.found && verdict.underHeader {
-		return savedItemRowError(verdict.record)
+		return deleteSavedItemRowError(verdict.record)
 	}
 	return nil
+}
+
+// savedItemsConflictError refuses a saved items file that gives one object two sizes. It names
+// the two source lines, not the object: rawPath is the stager's unsorted copy, whose data record n
+// is the saved file's line n, and conflict is the sort's record of the object.
+func savedItemsConflictError(rawPath string, conflict ManifestRecord) error {
+	first, second, err := findSavedItemsConflict(rawPath, conflict)
+	if err != nil || second == 0 {
+		return errors.New("items file gives one object two sizes on two of its lines")
+	}
+	return fmt.Errorf("items file lines %d and %d give the same object two sizes", first, second)
+}
+
+// findSavedItemsConflict returns the first line naming conflict's identity and the first line
+// after it that names the identity with another size.
+func findSavedItemsConflict(rawPath string, conflict ManifestRecord) (first, second int, err error) {
+	raw, err := os.Open(rawPath) // #nosec G304 -- private staging path created by the stager
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = raw.Close() }()
+	reader := newCanonicalCSVReader(raw)
+	if _, err = reader.Read(); err != nil {
+		return 0, 0, err
+	}
+	var firstSize int64
+	for line := 1; ; line++ {
+		fields, readErr := reader.Read()
+		if errors.Is(readErr, io.EOF) {
+			return first, 0, nil
+		}
+		if readErr != nil {
+			return 0, 0, readErr
+		}
+		record, parseErr := parseManifestRecord(fields, line)
+		if parseErr != nil {
+			return 0, 0, parseErr
+		}
+		if record.identity() != conflict.identity() {
+			continue
+		}
+		switch {
+		case first == 0:
+			first, firstSize = line, record.size
+		case record.size != firstSize:
+			return first, line, nil
+		}
+	}
 }

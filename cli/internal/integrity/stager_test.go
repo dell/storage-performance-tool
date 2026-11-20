@@ -93,9 +93,9 @@ func TestStageRefusesSavedEngineItemRowsUnderCanonicalHeader(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, tempDir, _ string, err error) {
-				if err == nil || err.Error() != savedItemRowMessage(test.record) {
-					t.Fatalf("error = %v, want %q", err, savedItemRowMessage(test.record))
+			stageThroughEveryNamedRoute(t, header+test.rows, func(t *testing.T, route, tempDir, _ string, err error) {
+				if want := savedItemRowMessageOn(route, test.record); err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
 				}
 				requireEmptyDir(t, tempDir)
 			})
@@ -110,8 +110,8 @@ func TestStageDeleteChecksSavedItemRowsBeforeBucketAssertion(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := StageDeleteInputManifest(source, 325, 0, "asserted")
-	if err == nil || err.Error() != savedItemRowMessage("2") {
-		t.Fatalf("StageDeleteInputManifest() error = %v, want %q", err, savedItemRowMessage("2"))
+	if err == nil || err.Error() != deleteSavedItemRowMessage("2") {
+		t.Fatalf("StageDeleteInputManifest() error = %v, want %q", err, deleteSavedItemRowMessage("2"))
 	}
 }
 
@@ -140,7 +140,7 @@ func TestStageHeaderRefusalExplainsSavedItemsFile(t *testing.T) {
 			name:       "header and rows on bare-CR line ends",
 			content:    "bucket,key,size,version_id\r/b/s0/name,2a0f,1024,0/0\r",
 			want:       savedItemRowMessage("2"),
-			deleteWant: savedItemRowMessage("2"),
+			deleteWant: deleteSavedItemRowMessage("2"),
 		},
 		{name: "canonical rows", content: "b,k,1024,\n", want: headerMessage, deleteWant: notAnObjectPath(1)},
 		{name: "canonical row with hex key", content: "b,2a0f,1024,\n", want: headerMessage, deleteWant: notAnObjectPath(1)},
@@ -302,9 +302,9 @@ func TestStageRefusesSavedRowsEndedByABareCR(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, tempDir, _ string, err error) {
-				if err == nil || err.Error() != savedItemRowMessage(test.record) {
-					t.Fatalf("error = %v, want %q", err, savedItemRowMessage(test.record))
+			stageThroughEveryNamedRoute(t, header+test.rows, func(t *testing.T, route, tempDir, _ string, err error) {
+				if want := savedItemRowMessageOn(route, test.record); err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
 				}
 				requireEmptyDir(t, tempDir)
 			})
@@ -369,14 +369,22 @@ func TestStageReadsANamedPipeOnce(t *testing.T) {
 			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field", ""},
 		{"blank line after the header", "bucket,key,size,version_id\n\nb,k,1024,\n",
 			"stage canonical input: canonical record 2 has 1 fields, want 4", ""},
-		{"unterminated quote", `"unterminated`, "read canonical header: unterminated quoted field", ""},
+		{"unterminated quote", `"unterminated`, "read canonical header: unterminated quoted field",
+			savedItemsLineMessage(1, "has 1 fields, want 4")},
+		// DELETE reads a first line the canonical reader refuses as a saved row, from the bytes
+		// already read and the rest of the same open input.
+		{"quote inside the first saved name", `/b/k"1,2a0f,10,0/0` + "\n/b/s0/two,2a10,1024,0/0\n",
+			headerMessage + ": " + savedItemRowMessage("1"), savedItemsLineMessage(1, "has a quote in the object name")},
+		{"first saved line at the line limit", "/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes-len("/b/,2a0f,10,0/0")) +
+			",2a0f,10,0/0\n/b/s0/two,2a10,1024,0/0\n", headerMessage + ": " + savedItemRowMessage("1"), "accepted"},
 		{"quote inside a saved object path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
-			savedItemRowMessage("2"), ""},
+			savedItemRowMessage("2"), deleteSavedItemRowMessage("2")},
 		{
 			// The canonical reader met the end of the stream, so the last row is complete.
-			name:    "final saved row without a line end after a bare CR",
-			content: "bucket,key,size,version_id\nb,k,1024,\r/b/s0/one,2a0f,1024,0/0",
-			want:    savedItemRowMessage("3"),
+			name:       "final saved row without a line end after a bare CR",
+			content:    "bucket,key,size,version_id\nb,k,1024,\r/b/s0/one,2a0f,1024,0/0",
+			want:       savedItemRowMessage("3"),
+			deleteWant: deleteSavedItemRowMessage("3"),
 		},
 	}
 	routes := map[string]func(source string) error{
@@ -455,9 +463,9 @@ func TestStageJudgesEveryBareCRRecordAndCountsAsTheEngine(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, tempDir, _ string, err error) {
-				if err == nil || err.Error() != savedItemRowMessage(test.record) {
-					t.Fatalf("error = %v, want %q", err, savedItemRowMessage(test.record))
+			stageThroughEveryNamedRoute(t, header+test.rows, func(t *testing.T, route, tempDir, _ string, err error) {
+				if want := savedItemRowMessageOn(route, test.record); err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
 				}
 				requireEmptyDir(t, tempDir)
 			})
@@ -498,14 +506,15 @@ func TestStageKeepsEarlierBareCRRowsOnTheirOwn(t *testing.T) {
 // judges only what is already buffered, and otherwise keeps the canonical reader's error.
 func TestStageRefusalDoesNotWaitOnAnOpenWriter(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		want    string
+		name       string
+		content    string
+		want       string
+		deleteWant string // when DELETE differs
 	}{
 		{"quote inside a canonical key", "bucket,key,size,version_id\n" + `sample,key"x,1024,` + "\n",
-			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field"},
+			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field", ""},
 		{"buffered saved row with a quote inside its path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
-			savedItemRowMessage("2")},
+			savedItemRowMessage("2"), deleteSavedItemRowMessage("2")},
 	}
 	sources := map[string]func(t *testing.T) (path string, writer *os.File){
 		"named pipe": func(t *testing.T) (string, *os.File) {
@@ -554,8 +563,12 @@ func TestStageRefusalDoesNotWaitOnAnOpenWriter(t *testing.T) {
 					go func() { done <- stage(source) }()
 					select {
 					case err := <-done:
-						if err == nil || err.Error() != test.want {
-							t.Fatalf("error = %v, want %q", err, test.want)
+						want := test.want
+						if routeName == "delete" && test.deleteWant != "" {
+							want = test.deleteWant
+						}
+						if err == nil || err.Error() != want {
+							t.Fatalf("error = %v, want %q", err, want)
 						}
 					case <-time.After(10 * time.Second):
 						_ = writer.Close() // lets the stager finish

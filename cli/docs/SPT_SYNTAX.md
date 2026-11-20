@@ -222,8 +222,9 @@ A file without that header is read as the `items.csv` an S3 `write --save-items`
 `/<bucket>/<key>,<hex offset>,<size>,<layer>/<mask>` becomes the current-key row
 `<bucket>,<key>,<size>,`, and the rest of this section applies unchanged. It deletes current keys
 only, so a versioned bucket keeps its data versions and gets delete markers. A row that can't be
-mapped safely to one object, such as a name without a leading `/`, a `~` version suffix or a comma in
-the key, refuses the whole file with its line number. Pass `--bucket` as a check, and
+mapped safely to one object, such as a name without a leading `/`, a `~` anywhere in the key, a `%`
+anywhere in the name or a comma in the key, refuses the whole file with its line number. Pass
+`--bucket` (the first path segment of the saved names) as a check, and
 `--validate-inventory` to check that the rows name real objects; `--verify` does not catch wrong
 keys. See [S3 DELETE](S3_DELETE.md#saved-s3-items-file).
 

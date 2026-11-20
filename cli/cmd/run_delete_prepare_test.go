@@ -465,7 +465,22 @@ func TestDeleteOfSavedItemsUnderHeaderStopsBeforeEveryOrchestrationSeam(t *testi
 		"--items-file: record 2 is a saved engine items row (as --save-items writes it: object path, "+
 			"hex offset, size, layer/mask), not a canonical manifest row; the "+
 			`"bucket,key,size,version_id" header does not convert it. `+
-			"Give each object as <bucket>,<key>,<size>,<version_id or empty>")
+			"Give each object as <bucket>,<key>,<size>,<version_id or empty>, or remove the header "+
+			"line: delete --items-file reads a saved S3 items file as it is saved, without a header")
+}
+
+// A saved row whose key may not be the stored one, for a "%" or a "~" anywhere, is refused before
+// anything starts, and the refusal does not print the row.
+func TestDeleteOfASavedItemsFileWithAPercentOrATildeStopsBeforeEveryOrchestrationSeam(t *testing.T) {
+	for name, content := range map[string]string{
+		"percent escape":          "/asserted/s0/k1,2a0f,10,0/0\n/asserted/r%41/k2,2a10,10,0/0\n",
+		"version ID with a slash": "/asserted/s0/k1~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,2a0f,10,0/0\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireDeleteManifestStopsBeforeOrchestration(t, content, "convert such a file by hand to a canonical "+
+				"bucket,key,size,version_id manifest of the stored keys")
+		})
+	}
 }
 
 func requireDeleteManifestStopsBeforeOrchestration(t *testing.T, content, wantDetail string) {
@@ -604,7 +619,7 @@ func TestPrepareDeleteOfASavedItemsFileStagesItsCanonicalSelection(t *testing.T)
 		t.Fatalf("DeleteSavedItems = %+v, want 2 converted rows", params.DeleteSavedItems)
 	}
 	summary := formatScenarioParams(params)
-	wantLine := "DELETE Source: saved S3 items file (write --save-items), 2 rows converted to current-key deletes; buckets: b"
+	wantLine := `DELETE Source: saved S3 items file (write --save-items), 2 rows converted to current-key deletes; buckets: "b"`
 	if !strings.Contains(summary, wantLine+"\n") || strings.Contains(summary, "explicit canonical manifest") {
 		t.Fatalf("summary does not name the saved items source:\n%s", summary)
 	}
@@ -619,13 +634,23 @@ func TestSavedItemsSourceLineNamesTheFirstBucketsAndTheirCount(t *testing.T) {
 		want   string
 	}{
 		{scenario.SavedItemsSource{Rows: 1, Buckets: []string{"b"}, BucketCount: 1},
-			"1 row converted to current-key deletes; buckets: b"},
+			`1 row converted to current-key deletes; buckets: "b"`},
 		{scenario.SavedItemsSource{Rows: 4, Buckets: []string{"b1", "b2"}, BucketCount: 2},
-			"4 rows converted to current-key deletes; buckets: b1, b2"},
+			`4 rows converted to current-key deletes; buckets: "b1", "b2"`},
 		{scenario.SavedItemsSource{Rows: 9, Buckets: []string{"b1", "b2", "b3"}, BucketCount: 5},
-			"9 rows converted to current-key deletes; buckets: b1, b2, b3, ... (5 buckets)"},
+			`9 rows converted to current-key deletes; buckets: "b1", "b2", "b3", ... (5 buckets)`},
 		{scenario.SavedItemsSource{Rows: 3000, Buckets: []string{"b1", "b2", "b3"}, BucketCount: 1024, MoreBuckets: true},
-			"3000 rows converted to current-key deletes; buckets: b1, b2, b3, ... (more than 1024 buckets)"},
+			`3000 rows converted to current-key deletes; buckets: "b1", "b2", "b3", ... (more than 1024 buckets)`},
+		// A bucket is any bytes of a row up to the second "/": control bytes are quoted, and a
+		// long name is cut to 64 bytes at a rune boundary.
+		{scenario.SavedItemsSource{Rows: 1, Buckets: []string{"b\x1b[31mRED"}, BucketCount: 1},
+			`1 row converted to current-key deletes; buckets: "b\x1b[31mRED"`},
+		{scenario.SavedItemsSource{Rows: 1, Buckets: []string{strings.Repeat("q", 64)}, BucketCount: 1},
+			`1 row converted to current-key deletes; buckets: "` + strings.Repeat("q", 64) + `"`},
+		{scenario.SavedItemsSource{Rows: 1, Buckets: []string{strings.Repeat("q", 65)}, BucketCount: 1},
+			`1 row converted to current-key deletes; buckets: "` + strings.Repeat("q", 64) + `"…`},
+		{scenario.SavedItemsSource{Rows: 1, Buckets: []string{strings.Repeat("q", 63) + "é"}, BucketCount: 1},
+			`1 row converted to current-key deletes; buckets: "` + strings.Repeat("q", 63) + `"…`},
 	}
 	for _, test := range tests {
 		source := test.source
@@ -651,7 +676,7 @@ func TestRunDeleteOfASavedItemsFilePrintsItsSourceAtStaging(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("RunE() error = %v", runErr)
 	}
-	want := "DELETE Source: saved S3 items file (write --save-items), 2 rows converted to current-key deletes; buckets: qualification"
+	want := `DELETE Source: saved S3 items file (write --save-items), 2 rows converted to current-key deletes; buckets: "qualification"`
 	if strings.Count(output, want+"\n") != 2 {
 		t.Fatalf("output names the saved items source %d times, want at staging and in the options:\n%s",
 			strings.Count(output, want+"\n"), output)
@@ -670,5 +695,5 @@ func TestDeleteOfASavedItemsFileChecksTheBucketBeforeEveryOrchestrationSeam(t *t
 	requireDeleteManifestStopsBeforeOrchestration(t,
 		"/asserted/s0000000/one,2a0f,1024,0/0\n"+
 			"/other/s0000000/two,2a10,1024,0/0\n",
-		`--items-file: items file line 2 bucket "other" does not match --bucket "asserted"`)
+		`--items-file: items file line 2 has a bucket (the first segment of its object name) that does not match --bucket "asserted"`)
 }

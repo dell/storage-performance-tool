@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -3769,7 +3770,11 @@ func formatScenarioParams(params scenario.Params) string {
 // savedItemsSourceLine describes a DELETE --items-file read as a saved S3 items file: its format,
 // the rows converted and its distinct buckets.
 func savedItemsSourceLine(source *scenario.SavedItemsSource) string {
-	buckets := strings.Join(source.Buckets, ", ")
+	names := make([]string, 0, len(source.Buckets))
+	for _, bucket := range source.Buckets {
+		names = append(names, consoleBucketName(bucket))
+	}
+	buckets := strings.Join(names, ", ")
 	switch {
 	case source.MoreBuckets:
 		buckets += fmt.Sprintf(", ... (more than %d buckets)", source.BucketCount)
@@ -3783,6 +3788,22 @@ func savedItemsSourceLine(source *scenario.SavedItemsSource) string {
 	return fmt.Sprintf(
 		"DELETE Source: saved S3 items file (write --save-items), %d %s converted to current-key deletes; buckets: %s",
 		source.Rows, rows, buckets)
+}
+
+// maxConsoleBucketBytes bounds a bucket name from an items file on the console.
+const maxConsoleBucketBytes = 64
+
+// consoleBucketName quotes a bucket name read from a file, so control bytes cannot reach the
+// terminal, and cuts a long one at a rune boundary to maxConsoleBucketBytes, marked with "…".
+func consoleBucketName(bucket string) string {
+	if len(bucket) <= maxConsoleBucketBytes {
+		return fmt.Sprintf("%q", bucket)
+	}
+	cut := maxConsoleBucketBytes
+	for cut > 0 && !utf8.RuneStart(bucket[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%q…", bucket[:cut])
 }
 
 func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {

@@ -624,13 +624,18 @@ versioned bucket the data versions stay and each DELETE adds a delete marker; ex
 canonical manifest. One row that can't be mapped safely to one object refuses the whole file before
 anything starts, with exit 1 and the line number: a name that does not start with `/` (an `fs` or
 mock-driver row, or a canonical file without its header), an empty bucket or key, a key starting
-with `/`, a `~` in the key's last segment (a versioned write's `key~versionId`), a comma in the key
-(more than four fields), a quote in the name, a blank line, a bare CR, invalid UTF-8, or a malformed
-offset, size or layer/mask. The file must come from an S3 write: an absolute `fs` path reads as an S3
-path, so pass `--bucket`, which is a recommended check. The CLI cannot see whether a row names a
-real object (for example rows that an `s3-aws` write before 5.17.1 saved with a trailing-slash
-bucket, which stored other keys): `--validate-inventory` checks that the selected objects exist
-before timing, and `--verify` does not catch wrong keys, because their HEADs also answer 404. A
+with `/`, a `~` anywhere in the key (a versioned write's `key~versionId`, whose version ID can hold
+`/`), a `%` anywhere in the name (a Netty write can store a `%XX` escape decoded, a known 5.17.1
+limit), a comma in the key (more than four fields), a quote in the name, a line over 1 MiB, a blank
+line, a bare CR, invalid UTF-8, or a malformed offset, size or layer/mask; convert a file refused
+for `~` or `%` by hand to a canonical manifest of the stored keys. The error gives the line number
+and reason, never the row's bucket or key. The file must come from an S3 write: an absolute `fs`
+path reads as an S3 path, so pass `--bucket`, which is a recommended check and must be the first
+path segment of the saved names (`b` for a write with `--bucket b/sub/`). The CLI cannot see whether
+a row names a real object (for example rows that an `s3-aws` write before 5.17.1 saved with a
+trailing-slash bucket, which stored other keys): `--validate-inventory` checks that every selected
+key exists before the timed phase, and `--verify` does not catch wrong keys, because a 404 for a
+selected key counts it as verified absent, not as deleted. A
 multi-bucket file needs `--delete-batch-size=1`. `--object-count` caps after the canonical sort, not
 in file order. Rows saved by a manifest-driven read of a key that starts with `/` lose that slash.
 `read-verify --items-file` still takes canonical manifests only.

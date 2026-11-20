@@ -99,7 +99,18 @@ const (
 		"hex offset, size, layer/mask), not a canonical manifest row; the " +
 		`"bucket,key,size,version_id" header does not convert it. ` +
 		"Give each object as <bucket>,<key>,<size>,<version_id or empty>"
+	// deleteSavedItemRowAdvice ends the refusal on DELETE, which reads a saved file without the header.
+	deleteSavedItemRowAdvice = ", or remove the header line: delete --items-file reads a saved S3 " +
+		"items file as it is saved, without a header"
 )
+
+// savedItemRowRefusalFor is savedItemRowRefusal as the workload gives it.
+func savedItemRowRefusalFor(workload string) string {
+	if workload == WorkloadTypeDelete {
+		return savedItemRowRefusal + deleteSavedItemRowAdvice
+	}
+	return savedItemRowRefusal
+}
 
 // mountedItemFileRoutes lists the flags whose file reaches the engine without being staged.
 var mountedItemFileRoutes = []struct {
@@ -211,7 +222,7 @@ func TestPrepareExternalItemFilesRefusesSavedItemsOnStagedRoutes(t *testing.T) {
 			params := test.params
 			params.ItemsFile = writeItemFile(t, canonicalItemsHeader+rows)
 			_, err := PrepareExternalItemFiles(params)
-			want := "--items-file: " + savedItemRowRefusal
+			want := "--items-file: " + savedItemRowRefusalFor(params.WorkloadType)
 			if err == nil || err.Error() != want {
 				t.Fatalf("PrepareExternalItemFiles() error = %v, want %q", err, want)
 			}
@@ -245,7 +256,7 @@ func TestPrepareExternalItemFilesRefusesSavedItemsAfterAnEarlierBareCRRow(t *tes
 			params := test.params
 			params.ItemsFile = writeItemFile(t, content)
 			_, err := PrepareExternalItemFiles(params)
-			want := "--items-file: " + strings.Replace(savedItemRowRefusal, "record 2 ", "record 4 ", 1)
+			want := "--items-file: " + strings.Replace(savedItemRowRefusalFor(params.WorkloadType), "record 2 ", "record 4 ", 1)
 			if err == nil || err.Error() != want {
 				t.Fatalf("PrepareExternalItemFiles() error = %v, want %q", err, want)
 			}

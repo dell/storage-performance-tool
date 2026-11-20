@@ -54,6 +54,13 @@ func savedItemRowError(recordNumber int) error {
 		recordNumber, strings.Join(canonicalHeader, ","))
 }
 
+// deleteSavedItemRowError is savedItemRowError for DELETE, which also reads a saved S3 items file
+// without the header, so it adds that removing the header line is the other way.
+func deleteSavedItemRowError(recordNumber int) error {
+	return fmt.Errorf("%w, or remove the header line: delete --items-file reads a saved S3 items "+
+		"file as it is saved, without a header", savedItemRowError(recordNumber))
+}
+
 // RefuseSavedItemsUnderHeader returns an error when the engine would read path as a canonical
 // manifest whose first data row is a saved engine items row. info is the caller's StatItemsFile of
 // path; the check reads only that regular file, opened without waiting for a writer and confirmed

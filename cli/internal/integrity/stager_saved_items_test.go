@@ -160,9 +160,13 @@ func TestStageDeleteRefusesSavedItemsFilesWithAnUnsafeLine(t *testing.T) {
 		{"bucket only", good + "/qq7,2a0f,10,0/0\n", 2, "has no object key after the bucket"},
 		{"bucket and slash only", good + "/qq7/,2a0f,10,0/0\n", 2, "has no object key after the bucket"},
 		{"key starting with a slash", good + "/b//qq7,2a0f,10,0/0\n", 2, `has an object key that starts with "/"`},
-		{"version suffix", good + "/b/s0/qq7~v1,2a0f,10,0/0\n", 2,
-			`has a "~" in the last segment of its key, as a versioned write names a version (key~versionId); ` +
-				"a saved items file deletes current keys only, and exact versions need a canonical manifest"},
+		{"version suffix", good + "/b/s0/qq7~v1,2a0f,10,0/0\n", 2, tildeReason},
+		// The examples of review 1: a version ID holding "/" puts the "~" before the last segment.
+		{"version ID with a slash on line 1", "/b/s0/qq7~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,ff,10,0/0\n" + good, 1, tildeReason},
+		{"version ID with a slash on a later line", good + good + "/b/s0/qq7~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,ff,10,0/0\n", 3, tildeReason},
+		// A Netty write can store r%41 as rA, so the row may name another object.
+		{"percent escape on line 1", "/b/r%41/qq7,2a0f,10,0/0\n" + good, 1, percentReason},
+		{"percent escape on a later line", good + good + "/b/r%41/qq7,2a0f,10,0/0\n", 3, percentReason},
 		{"comma in the key", good + "/b/a,qq7/k,2a0f,10,0/0\n", 2, "has more than 4 fields: a comma in the object key cannot be told from a field separator"},
 		{"quote in the name", good + `/b/qq7"x,2a0f,10,0/0` + "\n", 2, "has a quote in the object name"},
 		{"invalid UTF-8", good + "/b/qq7\xff,2a0f,10,0/0\n", 2, "is not valid UTF-8"},
@@ -179,7 +183,13 @@ func TestStageDeleteRefusesSavedItemsFilesWithAnUnsafeLine(t *testing.T) {
 		{"refused line after many good ones", strings.Repeat(good, 5000) + "/b/qq7,2a0f,10,0/0,x\n", 5001,
 			"has more than 4 fields: a comma in the object key cannot be told from a field separator"},
 		{"line over 1 MiB", good + "/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes) + ",2a0f,10,0/0\n", 2,
-			fmt.Sprintf("exceeds %d bytes", maxCanonicalCSVRecordBytes)},
+			fmt.Sprintf("exceeds %d bytes without its line end", maxCanonicalCSVRecordBytes)},
+		// The canonical reader refuses these first lines: DELETE reads them as saved rows, so
+		// line 1 gets its own reason, not the header's.
+		{"quote inside the first name", `/b/qq7"1,2a0f,10,0/0` + "\n" + good, 1, "has a quote in the object name"},
+		{"unterminated quote on line 1", `"/b/qq7,2a0f,10,0/0`, 1, "has a quote in the object name"},
+		{"first line over 1 MiB", "/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes) + ",2a0f,10,0/0\n" + good, 1,
+			fmt.Sprintf("exceeds %d bytes without its line end", maxCanonicalCSVRecordBytes)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -198,30 +208,127 @@ func TestStageDeleteRefusesSavedItemsFilesWithAnUnsafeLine(t *testing.T) {
 	}
 }
 
-// The canonical reader refuses these first records, so DELETE keeps today's refusal for them.
-func TestStageDeleteRefusesASavedItemsFileWhoseFirstRecordCannotBeRead(t *testing.T) {
+// An empty file has no line to read as a saved row, so DELETE keeps read-verify's refusal.
+func TestStageDeleteRefusesAnEmptyItemsFileAsReadVerifyDoes(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	_, err := StageDeleteInputManifest(writeStagerSource(t, ""), 442, 0, "")
+	if err == nil {
+		t.Fatal("error = nil, want the file refused")
+	}
+	_, _, _, readVerifyErr := StageInputManifest(writeStagerSource(t, ""), 442)
+	if readVerifyErr == nil || readVerifyErr.Error() != err.Error() {
+		t.Fatalf("DELETE error = %v, want read-verify's %v", err, readVerifyErr)
+	}
+	requireEmptyDir(t, tempDir)
+}
+
+// read-verify keeps today's refusal of a first line the canonical reader refuses.
+func TestStageInputManifestKeepsItsRefusalOfAnUnreadableFirstLine(t *testing.T) {
+	const headerMessage = `items file must use exact header ["bucket" "key" "size" "version_id"]`
 	tests := []struct {
 		name    string
 		content string
+		want    string
 	}{
-		{"empty file", ""},
-		{"quote inside the first name", `/b/k"1,2a0f,10,0/0` + "\n/b/k2,2a10,10,0/0\n"},
-		{"unterminated quote", `"/b/k,2a0f,10,0/0`},
+		{"quote inside the first name", `/b/k"1,2a0f,10,0/0` + "\n/b/k2,2a10,10,0/0\n",
+			headerMessage + ": " + savedItemRowMessage("1")},
+		{"unterminated quote", `"/b/k,2a0f,10,0/0`, "read canonical header: unterminated quoted field"},
+		{"first line over 1 MiB", "/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes) + ",2a0f,10,0/0\n",
+			headerMessage + ": " + savedItemRowMessage("1")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			tempDir := t.TempDir()
-			t.Setenv("TMPDIR", tempDir)
-			_, err := StageDeleteInputManifest(writeStagerSource(t, test.content), 442, 0, "")
-			if err == nil {
-				t.Fatal("error = nil, want the file refused")
+			_, _, _, err := StageInputManifest(writeStagerSource(t, test.content), 442)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("StageInputManifest() error = %v, want %q", err, test.want)
 			}
-			_, _, _, readVerifyErr := StageInputManifest(writeStagerSource(t, test.content), 442)
-			if readVerifyErr == nil || readVerifyErr.Error() != err.Error() {
-				t.Fatalf("DELETE error = %v, want read-verify's %v", err, readVerifyErr)
-			}
-			requireEmptyDir(t, tempDir)
 		})
+	}
+}
+
+// A saved line has one payload limit, 1 MiB without its line end, on every line and with every
+// line end.
+func TestStageDeleteOfSavedItemsHasOneLineLimit(t *testing.T) {
+	const good = "/b/s0/good,2a0f,10,0/0"
+	// row returns a saved row of exactly length bytes.
+	row := func(length int) string {
+		const fixed = "/b/" + ",2a0f,10,0/0"
+		return "/b/" + strings.Repeat("q", length-len(fixed)) + ",2a0f,10,0/0"
+	}
+	tooLong := fmt.Sprintf("exceeds %d bytes without its line end", maxCanonicalCSVRecordBytes)
+	for _, ending := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}, {"no line end", ""}} {
+		for _, length := range []int{maxCanonicalCSVRecordBytes, maxCanonicalCSVRecordBytes + 1} {
+			for _, line := range []int{1, 2} {
+				t.Run(fmt.Sprintf("%s/%d bytes/line %d", ending.name, length, line), func(t *testing.T) {
+					content := row(length) + ending.value
+					if line == 2 {
+						separator := ending.value
+						if separator == "" {
+							separator = "\n"
+						}
+						content = good + separator + content
+					}
+					tempDir := t.TempDir()
+					t.Setenv("TMPDIR", tempDir)
+					staged, err := StageDeleteInputManifest(writeStagerSource(t, content), 446, 0, "")
+					if length == maxCanonicalCSVRecordBytes {
+						if err != nil {
+							t.Fatalf("error = %v, want the line accepted", err)
+						}
+						_ = os.RemoveAll(staged.StagingDir)
+						if staged.ConvertedRows != line || staged.Completion.UniqueRecordCount != line {
+							t.Fatalf("staged = %+v, want %d rows", staged, line)
+						}
+						return
+					}
+					if want := savedItemsLineMessage(line, tooLong); err == nil || err.Error() != want {
+						t.Fatalf("error = %v, want %q", err, want)
+					}
+					requireEmptyDir(t, tempDir)
+				})
+			}
+		}
+	}
+}
+
+// "%" and "~" are refused only in saved rows: a canonical manifest names the stored key and
+// version itself, and stages as before on every route.
+func TestStageKeepsCanonicalManifestsWithPercentAndTilde(t *testing.T) {
+	const header = "bucket,key,size,version_id\n"
+	rows := "b,r%41/k,10,\nb,s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,10,\nb,a~x/k,10,v~1\nb,50%,10,\n"
+	want := header + "b,50%,10,\nb,a~x/k,10,v~1\nb,r%41/k,10,\nb,s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,10,\n"
+	stageThroughEveryRoute(t, header+rows, func(t *testing.T, _, manifest string, err error) {
+		if err != nil {
+			t.Fatalf("error = %v, want the manifest accepted", err)
+		}
+		staged, readErr := os.ReadFile(manifest)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(staged) != want {
+			t.Fatalf("staged bytes = %q, want %q", staged, want)
+		}
+	})
+}
+
+// A saved file that gives one object two sizes is refused with both line numbers, not the object.
+func TestStageDeleteOfSavedItemsNamesTheLinesOfConflictingSizes(t *testing.T) {
+	content := "/b/s0/qq7,2a0f,10,0/0\n/b/s0/other,2a10,10,0/0\n/b/s0/qq7,2a0f,10,1/1\n/b/s0/qq7,2a0f,20,0/0\n"
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	_, err := StageDeleteInputManifest(writeStagerSource(t, content), 447, 0, "")
+	want := "items file lines 1 and 4 give the same object two sizes"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	requireEmptyDir(t, tempDir)
+
+	// A canonical manifest keeps its message.
+	_, err = StageDeleteInputManifest(writeStagerSource(t,
+		"bucket,key,size,version_id\nb,s0/qq7,10,\nb,s0/qq7,20,\n"), 447, 0, "")
+	if err == nil || !strings.Contains(err.Error(), `canonicalize staged input: manifest identity "b\x00s0/qq7\x00" has conflicting sizes`) {
+		t.Fatalf("canonical error = %v, want the identity message", err)
 	}
 }
 
@@ -238,7 +345,7 @@ func TestStageDeleteOfSavedItemsAppliesTheBucketAssertionToEveryRow(t *testing.T
 	tempDir := t.TempDir()
 	t.Setenv("TMPDIR", tempDir)
 	_, err := StageDeleteInputManifest(writeStagerSource(t, content), 444, 1, "asserted")
-	want := `items file line 3 bucket "other" does not match --bucket "asserted"`
+	want := `items file line 3 has a bucket (the first segment of its object name) that does not match --bucket "asserted"`
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
 	}

@@ -13,6 +13,16 @@ func savedItemsLineMessage(line int, reason string) string {
 		fmt.Sprintf("line %d %s", line, reason)
 }
 
+// The reasons for a "~" or a "%" in a saved row, spelled out so that the tests pin the text.
+const (
+	tildeReason = `has a "~" in its key, as a versioned write names a version (key~versionId, and ` +
+		`the version ID can hold "/"); a saved items file deletes current keys only, so convert such ` +
+		"a file by hand to a canonical bucket,key,size,version_id manifest of the stored keys and versions"
+	percentReason = `has a "%" in its object name, and a write can store a percent escape decoded, so ` +
+		"the row may not name the stored key; convert such a file by hand to a canonical " +
+		"bucket,key,size,version_id manifest of the stored keys"
+)
+
 func notAnObjectPath(line int) string {
 	return savedItemsLineMessage(line, `has an object name that does not start with "/" (not an S3 object path)`)
 }
@@ -38,7 +48,6 @@ func TestParseSavedItemLineConvertsToACurrentKeyRecord(t *testing.T) {
 		{"upper-case digits", "/b/k,FF,10,A/0B", "b", "k", 10},
 		{"empty mask", "/b/k,ff,10,0/", "b", "k", 10},
 		{"zero size", "/b/k,ff,0,0/0", "b", "k", 0},
-		{"tilde before the last segment", "/b/a~x/k,ff,10,0/0", "b", "a~x/k", 10},
 		{"spaces and symbols in the key", "/b/ k#1 ,ff,10,0/0", "b", " k#1 ", 10},
 		// An absolute fs path can't be told from an S3 path either: the docs say the file must
 		// come from an S3 write, and --bucket checks it.
@@ -81,9 +90,16 @@ func TestParseSavedItemLineRefusesRowsThatNameNoSingleObject(t *testing.T) {
 		{"bucket only", "/b,ff,10,0/0", "has no object key after the bucket"},
 		{"bucket and slash only", "/b/,ff,10,0/0", "has no object key after the bucket"},
 		{"key starting with a slash", "/b//k,ff,10,0/0", `has an object key that starts with "/"`},
-		{"version suffix", "/b/s0/k~66984584-e910-4588-9d70-2fa1fbce3908,ff,10,0/0",
-			`has a "~" in the last segment of its key, as a versioned write names a version (key~versionId); ` +
-				"a saved items file deletes current keys only, and exact versions need a canonical manifest"},
+		{"version suffix", "/b/s0/k~66984584-e910-4588-9d70-2fa1fbce3908,ff,10,0/0", tildeReason},
+		// A version ID can hold "/", so the suffix can sit before the last segment; and a "~"
+		// there can be part of the key: neither is guessed.
+		{"version ID with a slash", "/b/s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,ff,10,0/0", tildeReason},
+		{"tilde before the last segment", "/b/a~x/k,ff,10,0/0", tildeReason},
+		{"tilde in the first key segment", "/b/~k,ff,10,0/0", tildeReason},
+		// A write can send a %XX as a URI escape and store the decoded key.
+		{"percent escape in the key", "/b/r%41/k,ff,10,0/0", percentReason},
+		{"bare percent in the key", "/b/s0/50%,ff,10,0/0", percentReason},
+		{"percent in the bucket", "/b%41/k,ff,10,0/0", percentReason},
 		{"bad hex offset", "/b/k,zz,10,0/0", "has an offset that is not a hexadecimal 64-bit integer"},
 		{"empty offset", "/b/k,,10,0/0", "has an offset that is not a hexadecimal 64-bit integer"},
 		{"offset too large", "/b/k,ffffffffffffffffff,10,0/0", "has an offset that is not a hexadecimal 64-bit integer"},
