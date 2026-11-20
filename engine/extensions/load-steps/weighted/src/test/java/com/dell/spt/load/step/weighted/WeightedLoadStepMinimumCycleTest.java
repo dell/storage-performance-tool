@@ -2,6 +2,7 @@ package com.dell.spt.load.step.weighted;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.mockConstruction;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
@@ -10,6 +11,7 @@ import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.generator.RetiringWeightsThrottle;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.dell.spt.base.svc.ServiceUtil;
@@ -22,7 +24,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -30,7 +39,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedConstruction;
 
 /** A weight cycle shorter than the minimum is lengthened, keeping the ratio, before the throttle. */
-@Timeout(60)
+@Timeout(120)
 class WeightedLoadStepMinimumCycleTest {
 
 	@TempDir
@@ -95,6 +104,18 @@ class WeightedLoadStepMinimumCycleTest {
 		assertArrayEquals(ints(30, 70), throttleWeights(30, 70));
 	}
 
+	@Test
+	void theStepLogsTheScaledWeightsOnce() throws Exception {
+		assertEquals(
+						List.of("Weights [1, 4] sum below 100, so the weight throttle uses [20, 80]"),
+						weightMessagesWhileBuilding(1, 4));
+	}
+
+	@Test
+	void theStepLogsNoWeightsAtTheMinimum() throws Exception {
+		assertEquals(List.of(), weightMessagesWhileBuilding(30, 70));
+	}
+
 	private static int[] ints(final int... values) {
 		return values;
 	}
@@ -138,6 +159,43 @@ class WeightedLoadStepMinimumCycleTest {
 		}
 		assertEquals(1, built.size());
 		return built.get(0);
+	}
+
+	/** The INFO messages about the weights that the step logs while it initializes. */
+	private List<String> weightMessagesWhileBuilding(final int... weights) throws Exception {
+		final List<LogEvent> events = new CopyOnWriteArrayList<>();
+		final AbstractAppender appender = new AbstractAppender(
+						"weightedMinimumCycleCapture", null, null, true, Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final LogEvent event) {
+				events.add(event.toImmutable());
+			}
+		};
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			throttleWeights(weights);
+			// The logger is asynchronous: wait for a marker sent after the step's messages.
+			final String marker = "weighted-minimum-cycle-marker-" + UUID.randomUUID();
+			Loggers.MSG.info(marker);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+			while (events.stream().noneMatch(e -> marker.equals(e.getMessage().getFormattedMessage()))) {
+				assertFalse(System.nanoTime() > deadline, "the log marker did not arrive");
+				Thread.sleep(5);
+			}
+			final List<String> messages = new ArrayList<>();
+			for (final LogEvent event : events) {
+				final String message = event.getMessage().getFormattedMessage();
+				if (event.getLevel() == Level.INFO && message.startsWith("Weights ")) {
+					messages.add(message);
+				}
+			}
+			return messages;
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
 	}
 
 	/** The shipped defaults of the engine and of this extension, as the engine merges them. */

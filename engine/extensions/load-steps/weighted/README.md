@@ -50,10 +50,17 @@ achieved mix then follows those limits and not the weights.
 The configuration option `load-op-weight` (`load.op.weight` in a
 scenario) sets the relative operations weight for the given sub-step.
 The weight divided by the weights sum is the sub-step's share of the
-operations offered, not of the operations sent. Weights summing below
-100, including the default of 1, are multiplied at step start by the
-smallest integer that brings the sum to at least 100, so they keep their
-ratio and do not limit throughput.
+operations offered, not of the operations sent.
+
+A generator refused by the weight throttle waits before it asks again,
+so a short cycle limits throughput. When the positive weights sum to
+between 1 and 99, including the default of 1, the step therefore
+multiplies them at its start by the smallest integer that brings the
+sum to at least 100, keeping their ratio, and logs the weights it uses.
+The step then runs as if those weights were written. They are not
+scaled again when a sub-load finishes (see below), and a context beside
+one whose input queue has filled still waits for that context to use
+its scaled share before each new cycle.
 
 ```javascript
 var weightedWriteConfig = {
@@ -93,8 +100,10 @@ cycle starts when those shares are used up. A sub-load finishes scheduling when
 it reaches its count limit or, if it does not recycle its operations, when its
 item input runs out. It then leaves the cycle: the other sub-loads carry on to
 their own limits and share the cycle by their weights, so the configured ratio
-no longer applies to the finished sub-load. A retry of one of its operations
-still runs, outside the cycle.
+no longer applies to the finished sub-load. The weights are not scaled again, so
+survivors whose weights sum below 100 run with the short cycle that the scaling
+at step start avoided. A retry of one of its operations still runs, outside the
+cycle.
 
 A sub-load that recycles, which includes every path listing (`list` with
 `item.type=path`), finishes only at its count limit. If it has nothing left to

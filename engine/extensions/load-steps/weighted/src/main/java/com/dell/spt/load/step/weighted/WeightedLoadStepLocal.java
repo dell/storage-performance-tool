@@ -112,7 +112,15 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 			weights[originIndex] = weight;
 		}
 
-		final IndexThrottle weightThrottle = new RetiringWeightsThrottle(withMinimumCycle(weights));
+		final int[] cycle = withMinimumCycle(weights);
+		if (cycle != weights) {
+			Loggers.MSG.info(
+							"Weights {} sum below {}, so the weight throttle uses {}",
+							Arrays.toString(weights),
+							MIN_WEIGHT_CYCLE,
+							Arrays.toString(cycle));
+		}
+		final IndexThrottle weightThrottle = new RetiringWeightsThrottle(cycle);
 
 		// 2nd pass: initialize the sub steps
 		for (int originIndex = 0; originIndex < subStepCount; originIndex++) {
