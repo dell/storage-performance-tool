@@ -81,6 +81,11 @@ class RemoteStepSliceReleaseIntegrationTest {
 	private static final long HEAP_GROWTH_LIMIT_BYTES = 16L << 20;
 	private static final String ENTRY_SILENCE_PROPERTY = "spt.step.entrySilenceTimeoutMillis";
 	private static final long ENTRY_SILENCE_MILLIS = 2_000;
+	/**
+	 * The limit for the slice polled every 100 ms: a stall of the polling thread on a loaded runner
+	 * must not reach it, so it is 50 polls long, and the test still runs past it and the start.
+	 */
+	private static final long POLLED_ENTRY_SILENCE_MILLIS = 5_000;
 
 	private final List<WeakReference<List<DataOperationImpl<DataItemImpl>>>> ballasts = new ArrayList<>();
 	private final List<String> stepIds = new ArrayList<>();
@@ -178,13 +183,13 @@ class RemoteStepSliceReleaseIntegrationTest {
 
 	@Test
 	void aSliceWhoseEntryKeepsCallingOrHasNotCalledYetStaysOpen() throws Exception {
-		withEntrySilenceLimit(() -> withWorker((worker, manager, port) -> {
+		withEntrySilenceLimit(POLLED_ENTRY_SILENCE_MILLIS, () -> withWorker((worker, manager, port) -> {
 			final LoadStepService polled = newSlice(manager, port);
 			polled.start();
 			final LoadStepService notCalledYet = newSlice(manager, port);
 			notCalledYet.start();
 
-			final long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3 * ENTRY_SILENCE_MILLIS);
+			final long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2 * POLLED_ENTRY_SILENCE_MILLIS);
 			while (System.nanoTime() < end) {
 				polled.metricsSnapshots();
 				Thread.sleep(100);
@@ -229,8 +234,12 @@ class RemoteStepSliceReleaseIntegrationTest {
 
 	/** The limit is read as each step service is built. */
 	private static void withEntrySilenceLimit(final Callable0 test) throws Exception {
+		withEntrySilenceLimit(ENTRY_SILENCE_MILLIS, test);
+	}
+
+	private static void withEntrySilenceLimit(final long limitMillis, final Callable0 test) throws Exception {
 		final String original = System.getProperty(ENTRY_SILENCE_PROPERTY);
-		System.setProperty(ENTRY_SILENCE_PROPERTY, Long.toString(ENTRY_SILENCE_MILLIS));
+		System.setProperty(ENTRY_SILENCE_PROPERTY, Long.toString(limitMillis));
 		try {
 			test.run();
 		} finally {

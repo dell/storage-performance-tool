@@ -268,13 +268,13 @@ class AsyncRunnableBaseTest {
 	}
 
 	@Test
-	void afterClosedRunsOnceAfterTheStateIsClosedAndItsFailureLeavesItClosed() throws IOException {
+	void afterCloseTransitionRunsOnceAfterTheStateIsClosedAndItsFailureLeavesItClosed() throws IOException {
 		final var failure = new IOException("after close");
 		final var calls = new java.util.concurrent.atomic.AtomicInteger();
 		final var stateSeen = new java.util.concurrent.atomic.AtomicReference<State>();
 		final var r = new TestRunnable() {
 			@Override
-			protected void afterClosed() throws IOException {
+			protected void afterCloseTransition() throws IOException {
 				calls.incrementAndGet();
 				stateSeen.set(state());
 				throw failure;
@@ -291,7 +291,7 @@ class AsyncRunnableBaseTest {
 	}
 
 	@Test
-	void afterClosedIsNotCalledWhenTheCloseFails() {
+	void afterCloseTransitionIsNotCalledWhenTheCloseFails() {
 		final var calls = new java.util.concurrent.atomic.AtomicInteger();
 		final var r = new TestRunnable() {
 			@Override
@@ -300,7 +300,7 @@ class AsyncRunnableBaseTest {
 			}
 
 			@Override
-			protected void afterClosed() {
+			protected void afterCloseTransition() {
 				calls.incrementAndGet();
 			}
 		};

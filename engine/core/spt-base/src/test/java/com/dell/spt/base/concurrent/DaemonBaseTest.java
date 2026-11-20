@@ -148,7 +148,7 @@ class DaemonBaseTest {
 		final var failure = new IOException("after close");
 		final var d = new TestDaemon() {
 			@Override
-			protected void afterClosed() throws IOException {
+			protected void afterCloseTransition() throws IOException {
 				throw failure;
 			}
 		};

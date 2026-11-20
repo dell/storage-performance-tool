@@ -160,7 +160,7 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 			stateLock.unlock();
 		}
 		if (closedHere) {
-			afterClosed();
+			afterCloseTransition();
 		}
 	}
 
@@ -186,5 +186,5 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	 * Called once, by the close that closed this, after the state became closed and outside the
 	 * state lock. What it throws is that close's failure; this stays closed.
 	 */
-	protected void afterClosed() throws IOException {}
+	protected void afterCloseTransition() throws IOException {}
 }

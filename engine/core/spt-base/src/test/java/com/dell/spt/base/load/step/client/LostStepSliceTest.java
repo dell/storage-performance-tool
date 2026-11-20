@@ -27,13 +27,25 @@ import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.Serializable;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.rmi.ConnectException;
+import java.rmi.ConnectIOException;
 import java.rmi.NoSuchObjectException;
+import java.rmi.Remote;
 import java.rmi.RemoteException;
+import java.rmi.UnmarshalException;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.server.RMIClientSocketFactory;
+import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -56,10 +68,13 @@ import org.mockito.MockedStatic;
 /**
  * An entry that loses a remote step slice, whose await, stop or close fails in RMI, fails the step:
  * that worker's last operations are missing from the totals. The step's other slices still stop
- * and close, and the entry logs one error per lost slice, naming its node.
+ * and close, and the entry logs one error per lost slice, naming its node. A stop whose response
+ * comes after the RMI response timeout is a slow stop, not a loss, and keeps 5.17.0's warning.
  *
  * <p>The client step, the slices and their RMI over the loopback interface are the real ones; a
- * proxy around each remote slice's stub records its calls and injects the RMI failures.
+ * proxy around each remote slice's stub records its calls and injects the RMI failures. A slow call
+ * goes through a real RMI relay whose client sockets time out their reads, as the shipped
+ * {@code sun.rmi.transport.tcp.responseTimeout} makes them, and which answers late.
  */
 @Timeout(180)
 class LostStepSliceTest {
@@ -67,6 +82,12 @@ class LostStepSliceTest {
 	private static final String RMI_HOSTNAME = "java.rmi.server.hostname";
 	private static final String LOST = "lost the step slice on node ";
 	private static final long LOG_WAIT_MILLIS = 5_000;
+	/** The relay's read timeout, standing in for the shipped 10 s RMI response timeout. */
+	private static final int RESPONSE_TIMEOUT_MILLIS = 300;
+	/** When a slow call's relay answers, after the slice's call has run. */
+	private static final long LATE_ANSWER_MILLIS = 1_500;
+	private static final String STOP_WARNING = "failed to stop the step slice";
+	private static final String CLOSE_WARNING = "failed to close the step service";
 
 	private final Config config = TestConfigBuilder.config();
 	private final MetricsManagerImpl entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
@@ -75,6 +96,10 @@ class LostStepSliceTest {
 	private final Map<String, List<String>> calls = new ConcurrentHashMap<>();
 	/** The injected failure by node address and call. */
 	private final Map<String, Map<String, RemoteException>> faults = new ConcurrentHashMap<>();
+	/** The calls, by node address, that go through a relay answering after the response timeout. */
+	private final Map<String, Set<String>> slowCalls = new ConcurrentHashMap<>();
+	/** The calls, by node address, that fail as RMI fails a connect that nothing listens for. */
+	private final Map<String, Set<String>> refusedCalls = new ConcurrentHashMap<>();
 	private final List<String> addrs = new ArrayList<>();
 	private String stepId;
 	private String originalRmiHostname;
@@ -209,6 +234,127 @@ class LostStepSliceTest {
 		assertEquals(List.of(), lostNodes(), "the start failure is the step's failure");
 	}
 
+	@Test
+	void aSliceLostAtItsCloseOnlyFailsTheStep() throws Exception {
+		final String lost = addrs.get(1);
+		fault(lost, "close", new ConnectException("injected: worker unreachable"));
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 3);
+		assertTrue(calls(lost).contains("stop"), "its stop answered: " + calls(lost));
+		assertEquals(List.of(lost), lostNodes());
+		assertTrue(errors.messages().stream().anyMatch(message -> message.contains(" at its close (")),
+						errors.messages().toString());
+	}
+
+	@Test
+	void aStopAnsweringAfterTheResponseTimeoutWarnsAndTheStepEndsAsBefore() throws Exception {
+		final String slow = addrs.get(1);
+		slow(slow, "stop");
+		final LinearLoadStepClient client = newClient();
+
+		try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+			client.run();
+		}
+
+		assertNull(client.runFailure(), "a slow stop does not fail the step");
+		assertTrue(client.isClosed());
+		awaitWarning(STOP_WARNING);
+		assertEquals(List.of(), lostNodes(), "the slice is not lost");
+		final List<String> stopWarnings = errors.messages().stream()
+						.filter(message -> message.contains(STOP_WARNING))
+						.toList();
+		// The entry stops its slices from its await and again from its own stop, and the relay answers
+		// each late, so each gives this warning.
+		assertFalse(stopWarnings.isEmpty(), errors.messages().toString());
+		assertTrue(stopWarnings.stream().allMatch(message -> message.contains("recording slice @ " + slow)),
+						stopWarnings.toString());
+		assertTrue(calls(slow).contains("close"), "the slow slice is still closed: " + calls(slow));
+	}
+
+	@Test
+	void aCloseTimingOutAfterASlowStopOfTheSameSliceWarnsToo() throws Exception {
+		final String slow = addrs.get(0);
+		slow(slow, "stop");
+		slow(slow, "close");
+		final LinearLoadStepClient client = newClient();
+
+		try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+			client.run();
+		}
+
+		assertNull(client.runFailure(), "the close waits for the same slow stop on the worker");
+		awaitWarning(CLOSE_WARNING);
+		assertEquals(List.of(), lostNodes());
+	}
+
+	@Test
+	void aCloseTimingOutAfterAStopThatAnsweredLosesTheSlice() throws Exception {
+		final String lost = addrs.get(0);
+		slow(lost, "close");
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 2);
+		assertEquals(List.of(lost), lostNodes());
+		assertTrue(failure.getCause() instanceof UnmarshalException, String.valueOf(failure.getCause()));
+	}
+
+	@Test
+	void aStopRefusedByTheWorkerStillFailsTheStepAndNamesTheWorker() throws Exception {
+		final String lost = addrs.get(1);
+		refused(lost, "stop");
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 3);
+		assertTrue(failure.getCause() instanceof ConnectException, String.valueOf(failure.getCause()));
+		assertEquals(List.of(lost), lostNodes());
+	}
+
+	@Test
+	void aLostSliceIsReportedOnOneLineWithItsNodeAndTheTotals() throws Exception {
+		final String lost = addrs.get(0);
+		fault(lost, "stop", new UnmarshalException("injected: error unmarshaling return",
+						new EOFException("injected\nsecond line")));
+
+		runFailing();
+
+		final String line = errors.messages().stream()
+						.filter(message -> message.contains(LOST))
+						.findFirst()
+						.orElseThrow();
+		assertFalse(line.contains("\n") || line.contains("\r"), line);
+		assertTrue(line.contains(LOST + lost + " at its stop ("), line);
+		assertTrue(line.contains("injected second line"), line);
+		assertTrue(line.endsWith("are missing from the step's totals, so the step fails"), line);
+	}
+
+	@Test
+	void onlyAResponseReadTimeoutCountsAsASlowCall() {
+		final SocketTimeoutException readTimedOut = new SocketTimeoutException("Read timed out");
+		assertTrue(LoadStepClientBase.isResponseReadTimeout(
+						new UnmarshalException("Error unmarshaling return header", readTimedOut)));
+		assertTrue(LoadStepClientBase.isResponseReadTimeout(new UnmarshalException(
+						"Error unmarshaling return", new IOException("wrapped", readTimedOut))));
+
+		final java.net.ConnectException connectTimedOut = new java.net.ConnectException("Connect timed out");
+		connectTimedOut.initCause(new SocketTimeoutException("Connect timed out"));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(new ConnectException("connect", connectTimedOut)));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(
+						new ConnectIOException("handshake", new SocketTimeoutException("Read timed out"))));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(
+						new ConnectException("refused", new java.net.ConnectException("Connection refused"))));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(
+						new UnmarshalException("Error unmarshaling return header", new EOFException())));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(new UnmarshalException(
+						"Error unmarshaling return header", new SocketException("Connection reset"))));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(new UnmarshalException("no cause")));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(new NoSuchObjectException("no such object in table")));
+		assertFalse(LoadStepClientBase.isResponseReadTimeout(new RemoteException("other", readTimedOut)));
+	}
+
 	private RunTerminalException runFailing() throws Exception {
 		final LinearLoadStepClient client = newClient();
 		final RunTerminalException failure;
@@ -241,6 +387,25 @@ class LostStepSliceTest {
 
 	private void fault(final String addr, final String call, final RemoteException failure) {
 		faults.computeIfAbsent(addr, key -> new ConcurrentHashMap<>()).put(call, failure);
+	}
+
+	private void slow(final String addr, final String call) {
+		slowCalls.computeIfAbsent(addr, key -> ConcurrentHashMap.newKeySet()).add(call);
+	}
+
+	private void refused(final String addr, final String call) {
+		refusedCalls.computeIfAbsent(addr, key -> ConcurrentHashMap.newKeySet()).add(call);
+	}
+
+	private void awaitWarning(final String text) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LOG_WAIT_MILLIS);
+		while (errors.messages().stream().noneMatch(message -> message.contains(text))
+						&& System.nanoTime() < deadline) {
+			LogUtil.flushAll();
+			Thread.sleep(10);
+		}
+		// Room for a wrong lost-slice line to arrive.
+		Thread.sleep(200);
 	}
 
 	private List<String> calls(final String addr) {
@@ -282,6 +447,13 @@ class LostStepSliceTest {
 			if (fault != null) {
 				throw fault;
 			}
+			if (slowCalls.getOrDefault(addr, Set.of()).contains(name)) {
+				relay(stub, LATE_ANSWER_MILLIS).call(name);
+				return null;
+			}
+			if (refusedCalls.getOrDefault(addr, Set.of()).contains(name)) {
+				throw refusedConnect();
+			}
 			try {
 				return method.invoke(stub, args);
 			} catch (final InvocationTargetException e) {
@@ -291,6 +463,64 @@ class LostStepSliceTest {
 		return (LoadStepService) Proxy.newProxyInstance(
 						LoadStepService.class.getClassLoader(), new Class<?>[]{LoadStepService.class
 						}, handler);
+	}
+
+	/** A remote call to the slice, made by the relay's server side; see {@link #relay}. */
+	public interface Relay extends Remote {
+		void call(String method) throws RemoteException;
+	}
+
+	/**
+	 * Exports a relay to the slice on a listener of its own, and returns its stub. The relay runs the
+	 * named call on the slice, then answers after {@code answerAfterMillis}; its client sockets time
+	 * out a read after {@link #RESPONSE_TIMEOUT_MILLIS}, so the caller gets RMI's own failure.
+	 */
+	private Relay relay(final LoadStepService slice, final long answerAfterMillis) throws RemoteException {
+		final Relay impl = method -> {
+			try {
+				LoadStepService.class.getMethod(method).invoke(slice);
+				Thread.sleep(answerAfterMillis);
+			} catch (final InvocationTargetException e) {
+				if (e.getCause() instanceof RemoteException remote) {
+					throw remote;
+				}
+				throw new RemoteException("relayed " + method, e.getCause());
+			} catch (final ReflectiveOperationException | InterruptedException e) {
+				throw new RemoteException("relay " + method, e);
+			}
+		};
+		final Relay stub = (Relay) UnicastRemoteObject.exportObject(
+						impl, 0, new ReadTimeoutClientSockets(RESPONSE_TIMEOUT_MILLIS), null);
+		closeables.add(() -> UnicastRemoteObject.unexportObject(impl, true));
+		return stub;
+	}
+
+	/** Client sockets whose reads time out, as {@code sun.rmi.transport.tcp.responseTimeout} sets them. */
+	private record ReadTimeoutClientSockets(int readTimeoutMillis) implements RMIClientSocketFactory, Serializable {
+		@Override
+		public Socket createSocket(final String host, final int port) throws IOException {
+			final Socket socket = new Socket(host, port);
+			socket.setSoTimeout(readTimeoutMillis);
+			return socket;
+		}
+	}
+
+	/**
+	 * RMI's own failure for a worker that no longer listens: a call through a stub for a free
+	 * loopback port. A closed relay would not do: RMI serves a call by object id on any connection
+	 * it still holds, so a stub can reach an object whose listener has closed.
+	 */
+	private static RemoteException refusedConnect() throws IOException {
+		final int port;
+		try (ServerSocket socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+			port = socket.getLocalPort();
+		}
+		try {
+			LocateRegistry.getRegistry("127.0.0.1", port).list();
+		} catch (final ConnectException refused) {
+			return refused;
+		}
+		throw new IllegalStateException("something listens on the free port " + port);
 	}
 
 	private void startWorkers(final int count) throws Exception {

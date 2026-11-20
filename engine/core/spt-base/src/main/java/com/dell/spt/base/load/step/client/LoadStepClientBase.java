@@ -86,9 +86,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.io.InputStream;
+import java.net.SocketTimeoutException;
 import java.rmi.ConnectException;
 import java.rmi.NoSuchObjectException;
 import java.rmi.RemoteException;
+import java.rmi.UnmarshalException;
 import java.rmi.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -151,6 +153,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private Set<LoadStep> lostSlices;
 	/** The step's failure for its lost slices, one suppressed failure per slice after the first. Guarded by lostSliceLock. */
 	private RunTerminalException lostSliceFailure;
+	/** The slices whose stop got no response within the RMI response timeout. Guarded by lostSliceLock. */
+	private Set<LoadStep> slowStopSlices;
 	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
@@ -1411,7 +1415,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							loadStepId(),
 							stepSliceNodeAddrs.get(index),
 							call,
-							cause.toString());
+							oneLine(cause));
 			// The message is public, so it counts the engine and leaves the node's address to the log.
 			final var failure = new RunTerminalException(
 							IntegrityTerminalException.Category.EXECUTION,
@@ -1426,6 +1430,77 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * A failed stop of a slice, other than a {@linkplain #isResponseReadTimeout response timeout},
+	 * loses the slice (see {@link #recordLostSlice}). A stop whose response timed out is the worker
+	 * still draining its operations in flight, for up to {@code load.op.wait.limit}, past the RMI
+	 * response timeout: it keeps 5.17.0's warning and does not fail the step, although that worker's
+	 * operations that end after the timeout are missing from the totals.
+	 *
+	 * @return whether the slice is a lost one, so the caller logs nothing more
+	 */
+	private boolean recordLostSliceAtStop(final LoadStep slice, final RemoteException cause) {
+		if (isResponseReadTimeout(cause)) {
+			synchronized (lostSliceLock) {
+				if (slowStopSlices == null) {
+					slowStopSlices = Collections.newSetFromMap(new IdentityHashMap<>());
+				}
+				slowStopSlices.add(slice);
+			}
+			// A slice already lost, at its await, keeps its one error line.
+			return isLostSlice(slice);
+		}
+		return recordLostSlice(slice, "stop", cause);
+	}
+
+	/**
+	 * A failed close of a slice loses it, like a failed stop. The one exception is a response timeout
+	 * at the close of a slice whose stop timed out the same way: the worker's close waits for that
+	 * stop, which is still draining, so it is the same slow stop and keeps the same warning. A close
+	 * that times out after a stop that answered loses the slice.
+	 *
+	 * @return whether the slice is a lost one, so the caller logs nothing more
+	 */
+	private boolean recordLostSliceAtClose(final LoadStep slice, final RemoteException cause) {
+		if (isResponseReadTimeout(cause)) {
+			synchronized (lostSliceLock) {
+				if (slowStopSlices != null && slowStopSlices.contains(slice)) {
+					return false;
+				}
+			}
+		}
+		return recordLostSlice(slice, "close", cause);
+	}
+
+	/**
+	 * Whether a remote call failed only because the worker's response did not arrive within the RMI
+	 * response timeout ({@code sun.rmi.transport.tcp.responseTimeout}, 10 s in the shipped engine).
+	 * RMI reports a read of the response that timed out as an {@link UnmarshalException} with a
+	 * {@link SocketTimeoutException} in its cause chain. A connect that timed out is a
+	 * {@link java.rmi.ConnectException} or {@link java.rmi.ConnectIOException}, also when its cause is
+	 * a {@code SocketTimeoutException}; a refused connect, a reset connection, a worker that died
+	 * during the call and a released slice ({@link NoSuchObjectException}) fail in other ways. None of
+	 * those is a response timeout.
+	 */
+	static boolean isResponseReadTimeout(final RemoteException failure) {
+		if (!(failure instanceof UnmarshalException)) {
+			return false;
+		}
+		Throwable cause = failure.getCause();
+		for (var depth = 0; cause != null && depth < 16; depth++) {
+			if (cause instanceof SocketTimeoutException) {
+				return true;
+			}
+			cause = cause.getCause();
+		}
+		return false;
+	}
+
+	/** The failure's text on one line, as RMI exceptions put their nested exception on a new one. */
+	private static String oneLine(final Throwable failure) {
+		return failure.toString().replaceAll("\\s*\\R\\s*", " ").strip();
 	}
 
 	private boolean isLostSlice(final LoadStep slice) {
@@ -2978,7 +3053,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					stepSlice.stop();
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
-					if (!(e instanceof RemoteException remote && recordLostSlice(stepSlice, "stop", remote))) {
+					if (!(e instanceof RemoteException remote && recordLostSliceAtStop(stepSlice, remote))) {
 						LogUtil.trace(Loggers.ERR, Level.WARN, e, "{}: failed to stop the step slice \"{}\"", loadStepId(),
 										stepSlice);
 					}
@@ -3080,7 +3155,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * missing that worker's last operations.
 	 */
 	@Override
-	protected final void afterClosed() {
+	protected final void afterCloseTransition() {
 		final var lost = takeLostSliceFailure();
 		if (lost != null) {
 			throw lost;
@@ -3253,7 +3328,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
 					} catch (final Exception e) {
 						throwUncheckedIfInterrupted(e);
-						if (e instanceof RemoteException remote && recordLostSlice(stepSlice, "close", remote)) {
+						if (e instanceof RemoteException remote && recordLostSliceAtClose(stepSlice, remote)) {
 							// The step's failure for its lost slices names this one.
 							continue;
 						}
