@@ -289,8 +289,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 											+ "Build a new step from a prototype with config() and run that.",
 							null);
 		}
-		startedSliceCount = 0;
-		startStopped = false;
 		try {
 			super.doStart();
 		} catch (final Throwable cause) {
@@ -305,6 +303,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
+		// Reset where a start really begins: a restart the base class refuses (at JVM exit) keeps the
+		// count of the start before it, so its close still publishes that start's slices.
+		startedSliceCount = 0;
+		startStopped = false;
 		resetDurationLifecycleForStart();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			// need to set the once generated step id

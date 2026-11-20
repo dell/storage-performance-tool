@@ -15,6 +15,8 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.concurrent.JvmExit;
+import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
@@ -168,6 +170,29 @@ class StoppedStartSliceArtifactsTest {
 	}
 
 	@Test
+	void aRestartRefusedAtJvmExitKeepsTheSlicesOfTheStartBeforeIt() throws Exception {
+		final LoadStep entry = sliceWritingItsLifecycleRowAtClose("entry-worker");
+		final AtomicBoolean workerWrote = new AtomicBoolean();
+		final TestLoadStepClient client = twoSliceClientStartingNormally(entry, workerWrote);
+		try {
+			client.start();
+			// The other node's slice ran and wrote its file, as a started slice does.
+			workerWrote.set(true);
+			client.stop();
+			JvmExit.markBegun();
+			// A script that starts the stopped step again while the JVM exits: the base class refuses
+			// it as a stop, and the close must still publish the slices that did start.
+			assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, client::start));
+			Thread.interrupted();
+
+			assertDoesNotThrow(client::close);
+			assertEquals(List.of("entry-worker", "cut-worker"), workerIds(canonical));
+		} finally {
+			JvmExitTestSupport.reset();
+		}
+	}
+
+	@Test
 	void aStartThatFailsStillNeedsTheEntrySlicesFile() throws Exception {
 		final LoadStep entry = mock(LoadStep.class);
 		doAnswer(call -> {
@@ -199,6 +224,26 @@ class StoppedStartSliceArtifactsTest {
 			starter.interrupt();
 			throw new IllegalStateException("the node is going away");
 		}).when(worker).start();
+		final int port;
+		try (ServerSocket socket = new ServerSocket(0)) {
+			socket.setReuseAddress(true);
+			port = socket.getLocalPort();
+		}
+		final String nodeAddr = "127.0.0.1:" + port;
+		final Config config = config();
+		config.val("load-step-node-addrs", List.of(nodeAddr));
+		originalRmiHostname = System.getProperty(RMI_HOSTNAME);
+		System.setProperty(RMI_HOSTNAME, "127.0.0.1");
+		final TestLoadStepClient client = client(config, entry, worker);
+		node = new LoadStepManagerServiceImpl(port, List.of(factory), metricsMgr);
+		node.start();
+		return client.withNodeFileManagers(Map.of(nodeAddr, workerFiles(workerWrote)));
+	}
+
+	/** As {@link #twoSliceClient}, but the other node's slice starts normally; its file is there once {@code workerWrote}. */
+	private TestLoadStepClient twoSliceClientStartingNormally(final LoadStep entry, final AtomicBoolean workerWrote)
+					throws Exception {
+		final LoadStep worker = mock(LoadStep.class);
 		final int port;
 		try (ServerSocket socket = new ServerSocket(0)) {
 			socket.setReuseAddress(true);
