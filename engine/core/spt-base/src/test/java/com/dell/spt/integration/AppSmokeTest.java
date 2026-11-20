@@ -4,7 +4,9 @@ import static com.dell.spt.base.Constants.DIR_EXT;
 import static com.dell.spt.base.Constants.MIB;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.dell.spt.base.Main;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
@@ -16,8 +18,10 @@ import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.control.logs.LogServlet;
 import com.dell.spt.base.control.run.RunImpl;
 import com.dell.spt.base.control.run.RunServlet;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.CoreResourcesToInstall;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
@@ -52,6 +56,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import com.dell.spt.testing.tags.IntegrationTest;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Level;
@@ -112,6 +117,62 @@ public class AppSmokeTest {
 		assertEquals(OpType.CREATE, step.opType);
 		assertEquals(opCount, step.successCount);
 		assertEquals(0, step.failedCount);
+	}
+
+	/* A second run of one step object ends the scenario with the refusal, after one real run */
+	@Test
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	public void rerunOfAStepObjectFailsTheScenarioTest(@TempDir final Path scenarioDir) throws Exception {
+		final var failure = refusedScenario(scenarioDir, "Load.run();\nLoad.run();\n");
+
+		assertEquals(
+						"this step object has already run; a step object runs once. "
+										+ "Build a step with config() for each run and call run() on a step that has not run.",
+						failure.getMessage());
+		assertEquals(1, ranStepIds().size(), "only the first run ran a step");
+	}
+
+	/* A start after a stop ends the scenario with the refusal; the scenario can still close the step */
+	@Test
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	public void startOfAStoppedStepFailsTheScenarioTest(@TempDir final Path scenarioDir) throws Exception {
+		final var failure = refusedScenario(
+						scenarioDir,
+						"var step = Load.config({});\n"
+										+ "step.start();\n"
+										+ "step.stop();\n"
+										+ "try {\n"
+										+ "\tstep.start();\n"
+										+ "} finally {\n"
+										+ "\tstep.close();\n"
+										+ "}\n");
+
+		assertEquals(
+						"this step object has been stopped and cannot be started again; a step object runs once. "
+										+ "Build a new step from a prototype with config() and run that.",
+						failure.getMessage());
+	}
+
+	private RunTerminalException refusedScenario(final Path scenarioDir, final String scenario) throws Exception {
+		config.val("load-op-limit-count", 10L);
+		final var scenarioFile = scenarioDir.resolve("scenario.js");
+		Files.writeString(scenarioFile, scenario);
+		config.val("run-scenario", scenarioFile.toString());
+
+		final var failure = assertThrows(
+						RunTerminalException.class,
+						() -> runScenario(config, extensions, extClsLoader, metricsMgr, appHomePath));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertNotNull(failure.stepId());
+		return failure;
+	}
+
+	private List<String> ranStepIds() {
+		return metricsMgr.getTerminalSteps().stream()
+						.map(entry -> entry.stepId)
+						.distinct()
+						.collect(Collectors.toList());
 	}
 
 	/* Initialize the API server and close, ensure no errors occur */

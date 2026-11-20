@@ -66,6 +66,10 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 	private final AtomicReference<Throwable> asynchronousFailure = new AtomicReference<>();
 	private final Thread writerThread;
 	private boolean finished;
+	// The staging files are recovery evidence once a finish was attempted or a terminal was written;
+	// close() then keeps them. Written by the writer thread, read by close() after it has joined it.
+	private boolean finishAttempted;
+	private boolean terminalWritten;
 
 	public DeleteArtifactRecorder(
 					final String stepId, final Path selectionManifest, final long selectedCount) {
@@ -179,6 +183,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		if (finished) {
 			return;
 		}
+		finishAttempted = true;
 		closing.set(true);
 		requireCompleteWriterTermination();
 		Path finalRequests = null;
@@ -239,6 +244,7 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 				}
 				writeHook.beforeWrite(operation);
 				writeTerminal(operation, requests, objects);
+				terminalWritten = true;
 			}
 		} catch (final Throwable failure) {
 			asynchronousFailure.compareAndSet(null, failure);
@@ -658,10 +664,14 @@ public final class DeleteArtifactRecorder implements AutoCloseable {
 		return value;
 	}
 
+	/**
+	 * Stops the writer. Deletes the private staging files only when nothing was recorded: a finish that
+	 * passed has deleted them, and after a failed finish, or a close with no finish, they are kept.
+	 */
 	@Override
 	public synchronized void close() {
 		closing.set(true);
-		if (!finished && awaitWriter()) {
+		if (!finished && awaitWriter() && !finishAttempted && !terminalWritten) {
 			deletePrivateStaging();
 		}
 	}

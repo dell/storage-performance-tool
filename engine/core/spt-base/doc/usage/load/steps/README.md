@@ -18,7 +18,10 @@ See also the [output reference](../../output#111-load-step-id)
 ### 2.2. Weighted
 
 *Weighted* load step type is additional and requires the [WeightedLoad](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted) extention. 
-Weighted load extension, allowing to generate 20% write and 80% read operations, for example.
+It runs several sub-steps, such as writes and reads, with a relative weight for each. The
+achieved mix follows the weights only in some cases; see the
+[weighted load step](../../../../../../extensions/load-steps/weighted/README.md#when-the-mix-follows-the-weights).
+Ids set in the step's appended contexts decide where its results go: see [Step ids](../../../../../../extensions/load-steps/weighted/README.md#step-ids).
 
 
 ### 2.3. Pipeline

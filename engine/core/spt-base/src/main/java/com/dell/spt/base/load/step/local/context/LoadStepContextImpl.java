@@ -20,6 +20,7 @@ import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicSetResources;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
+import com.dell.spt.base.concurrent.RetryDelayScheduler;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -192,6 +193,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
 	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
 	private final DeleteArtifactRecorder deleteArtifactRecorder;
+	// A standalone DELETE outside duration mode shuts down and stops once: the shutdown and stop that
+	// close() repeats after a failed one return, so the close reaches doClose. The failure was thrown
+	// by the first attempt and is the slice's to keep. Duration mode retries its stop until the slice
+	// gives up (releaseAfterFailedStop); other workloads retry as before. Read and written under the
+	// lifecycle lock.
+	private boolean shutdownAttempted;
+	private boolean shutdownFailed;
+	private boolean stopAttempted;
+	private volatile boolean stopRetriesAbandoned;
 	private final Path deleteSelectionManifest;
 	private final DeleteOperationalOutcomeLedger deleteTargetOutcomes;
 	private final AtomicReference<DeleteVerificationReport> deletePreValidationReport = new AtomicReference<>();
@@ -205,10 +215,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
 	 * own body} or {@code LoadStepContextImpl#cancelPendingRetries()} ever resolves a
 	 * given retry - never both, and never neither. This is needed because {@link
-	 * CompletableFuture#cancel} does not reliably mean "the task body never ran": for a
-	 * future produced by {@code runAsync()}, a successful {@code cancel(false)} can still
-	 * race with a task that has already started running on its own executor thread
-	 * (cancelling the future does not interrupt or otherwise stop that thread), so
+	 * Future#cancel} does not reliably mean "the task body never ran": a {@code
+	 * cancel(false)} can still race with a task that has already started running on its
+	 * executor thread (cancelling the future does not interrupt or otherwise stop that
+	 * thread), so
 	 * treating a successful {@code cancel()} as proof the task body will never execute -
 	 * and therefore that it's safe to terminal-fail the operation ourselves - is not safe
 	 * on its own.
@@ -251,7 +261,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			task.run();
 			return CompletableFuture.completedFuture(null);
 		}
-		return CompletableFuture.runAsync(task, CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS));
+		return RetryDelayScheduler.schedule(delayMillis, task);
 	};
 
 	/** Test-only seam: replace the real delayed scheduler with e.g. a synchronous one. */
@@ -574,7 +584,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
-	public boolean isDone() {
+	public void checkTerminalFailure() {
 		if (rangeRuntime != null && rangeRuntime.failure() != null)
 			throw rangeRuntime.failure();
 		final var generatorFailure = generator.terminalFailure();
@@ -585,6 +595,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driverFailure != null) {
 			throw driverFailure;
 		}
+	}
+
+	@Override
+	public boolean isDone() {
+		checkTerminalFailure();
 		if (!STARTED.equals(state()) && !SHUTDOWN.equals(state())) {
 			Loggers.MSG.debug("{}: done due to {} state", id, state());
 			return true;
@@ -2588,45 +2603,108 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	/** Whether a shutdown or stop that already ran returns when repeated (see shutdownAttempted). */
+	private boolean runsOnce() {
+		return stopRetriesAbandoned || (standaloneDeleteEnabled && !standaloneDeleteDurationMode);
+	}
+
 	@Override
 	protected final void doShutdown() {
-		// Close both admission gates before retry settlement or recovery. Only operations
-		// already past actual driver dispatch remain drain-eligible.
-		prepareOperationDrain();
-		drainDispatchedOperations();
-		verifyDeleteInventoryForDirectLifecycle();
-		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
-						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			driver.shutdown();
-			Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
-		} catch (final RemoteException e) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+		if (shutdownAttempted && runsOnce()) {
+			return;
 		}
+		if (stopRetriesAbandoned) {
+			// Given up before any shutdown: the close releases the context without draining it.
+			shutdownAttempted = true;
+			shutdownFailed = true;
+			return;
+		}
+		// Set before the attempt, cleared once the drain and verification pass: a failure there leaves
+		// it set, so the stop only
+		// releases. A retry that passes, where the shutdown is retried, clears it, and that stop runs
+		// in full.
+		// An interrupt leaves shutdownAttempted unset, so the shutdown runs again when repeated.
+		shutdownFailed = true;
+		try {
+			// Close both admission gates before retry settlement or recovery. Only operations
+			// already past actual driver dispatch remain drain-eligible.
+			prepareOperationDrain();
+			drainDispatchedOperations();
+			// The driver stays up for a failed verification: a duration-mode retry verifies with it,
+			// and the stop that follows a failure stops it.
+			verifyDeleteInventoryForDirectLifecycle();
+			// The drain and verification are complete: a driver shutdown that throws leaves the
+			// evidence for the stop to finish.
+			shutdownFailed = false;
+			try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
+							.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				driver.shutdown();
+				Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
+			} catch (final RemoteException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+			}
+		} catch (final RuntimeException e) {
+			shutdownAttempted = true;
+			throw e;
+		}
+		shutdownAttempted = true;
 	}
 
 	@Override
 	protected final void doStop() throws IllegalStateException {
-		// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
-		prepareOperationDrain();
-		drainDispatchedOperations();
-		verifyDeleteInventoryForDirectLifecycle();
-		finalizeDeleteVerificationSummary();
-
-		RuntimeException artifactFailure = null;
-		if (deleteArtifactRecorder != null) {
+		if (stopAttempted && runsOnce()) {
+			return;
+		}
+		if (shutdownFailed || stopRetriesAbandoned) {
+			// The drain or verification did not complete, or the slice gave up: no evidence to
+			// finish and no results to output. Release what the stop owns; the close does the rest.
+			// Fix the summary first: later reads of the context take it, not the closed storage.
+			RuntimeException failure = null;
+			if (standaloneDeleteEnabled) {
+				try {
+					finalizeDeleteVerificationSummary();
+				} catch (final RuntimeException e) {
+					failure = e;
+				}
+			}
+			failure = appendRecoveryFailure(failure, closeDeleteVerificationStorage());
 			try {
+				driver.stop();
+			} catch (final RuntimeException e) {
+				failure = appendRecoveryFailure(failure, e);
+			}
+			stopAttempted = true;
+			if (failure != null) {
+				throw failure;
+			}
+			return;
+		}
+		RuntimeException artifactFailure = null;
+		try {
+			// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
+			prepareOperationDrain();
+			drainDispatchedOperations();
+			verifyDeleteInventoryForDirectLifecycle();
+			finalizeDeleteVerificationSummary();
+			if (deleteArtifactRecorder != null) {
 				deleteArtifactRecorder.finish(
 								operationLifecycle.snapshot(),
 								deleteMetricsSnapshot(),
 								deletePreValidationReport.get(),
 								deletePostVerificationReport.get());
-			} catch (final RuntimeException failure) {
-				artifactFailure = failure;
 			}
+		} catch (final RuntimeException failure) {
+			artifactFailure = failure;
 		}
 		artifactFailure = appendRecoveryFailure(artifactFailure, closeDeleteVerificationStorage());
 
-		driver.stop();
+		try {
+			driver.stop();
+		} catch (final RuntimeException e) {
+			artifactFailure = appendRecoveryFailure(artifactFailure, e);
+		}
+		// Only now: a stop cut short by an interrupt runs again when repeated.
+		stopAttempted = true;
 		if (artifactFailure != null) {
 			throw artifactFailure;
 		}
@@ -2997,6 +3075,22 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			i++;
 		}
 		return a.substring(0, i);
+	}
+
+	@Override
+	public final void releaseAfterFailedStop() throws IOException {
+		stopRetriesAbandoned = true;
+		RuntimeException stopFailure = null;
+		try {
+			// Runs once now: the stop that close() repeats returns, whatever this one throws.
+			stop();
+		} catch (final RuntimeException e) {
+			stopFailure = e;
+		}
+		close();
+		if (stopFailure != null) {
+			throw stopFailure;
+		}
 	}
 
 	@Override

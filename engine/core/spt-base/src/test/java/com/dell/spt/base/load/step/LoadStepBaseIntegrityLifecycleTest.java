@@ -34,6 +34,76 @@ class LoadStepBaseIntegrityLifecycleTest {
 		assertEquals(60, limit.get(), "nothing ran, so nothing counts against the limit");
 	}
 
+	private static final String RERUN_REFUSAL = "this step object has already run; a step object runs once. "
+					+ "Build a step with config() for each run and call run() on a step that has not run.";
+
+	private static void assertSecondRunRefused(final TestStep step) {
+		step.closeCalled = false;
+
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertFalse(failure instanceof IntegrityTerminalException, "the refusal is no integrity failure");
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("integrity-step", failure.stepId());
+		assertEquals(RERUN_REFUSAL, failure.getMessage());
+		assertNull(failure.getCause());
+		assertEquals(1, step.startCount, "the refused run starts nothing");
+		assertFalse(step.closeCalled, "the step closed with its run");
+	}
+
+	@Test
+	void aSecondRunOfAnOrdinaryStepIsRefused() {
+		final Config config = metadataConfig();
+		config.val("storage-integrity-mode", "none");
+		final var step = new TestStep(config, null, false);
+		step.run();
+		assertTrue(step.isClosed());
+
+		assertSecondRunRefused(step);
+
+		assertNull(step.runFailure(), "the first run succeeded, and the refusal does not change that");
+	}
+
+	@Test
+	void aSecondRunOfAMetadataStepGetsTheSameRefusal() {
+		final var step = new TestStep(metadataConfig(), null, false);
+		step.run();
+		assertTrue(step.isClosed());
+
+		assertSecondRunRefused(step);
+
+		assertNull(step.runFailure());
+	}
+
+	@Test
+	void aRefusedRunKeepsTheFailureOfTheRunThatHappened() {
+		final Config config = metadataConfig();
+		config.val("storage-integrity-mode", "none");
+		final var step = new TestStep(config, new IllegalStateException("start failed"), false);
+		assertThrows(RunTerminalException.class, step::run);
+		final var first = step.runFailure();
+		assertEquals("start failed", first.getMessage());
+
+		assertSecondRunRefused(step);
+
+		assertSame(first, step.runFailure());
+	}
+
+	@Test
+	void aStartedStepStillRunsAndCloses() throws Exception {
+		final Config config = metadataConfig();
+		config.val("storage-integrity-mode", "none");
+		final var step = new TestStep(config, null, false);
+		step.start();
+
+		step.run();
+
+		assertNull(step.runFailure());
+		assertEquals(1, step.startCount, "run() on a started step does not start it again");
+		assertTrue(step.isClosed());
+		assertTrue(step.closeCalled);
+	}
+
 	@Test
 	void metadataStartFailureCleansUpThenEscapesWithStepIdentity() {
 		final var step = new TestStep(metadataConfig(), new IllegalStateException("start failed"), false);
@@ -254,6 +324,7 @@ class LoadStepBaseIntegrityLifecycleTest {
 		private final boolean awaitResult;
 		private final RuntimeException closeFailure;
 		private boolean closeCalled;
+		private int startCount;
 
 		private TestStep(
 						final Config config,
@@ -285,6 +356,7 @@ class LoadStepBaseIntegrityLifecycleTest {
 
 		@Override
 		protected void doStartWrapped() {
+			startCount++;
 			if (startFailure != null) {
 				throw startFailure;
 			}

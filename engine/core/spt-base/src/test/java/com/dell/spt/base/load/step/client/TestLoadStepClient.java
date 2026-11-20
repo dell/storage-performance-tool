@@ -20,6 +20,7 @@ import java.util.Map;
 public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 
 	private boolean initCalled = false;
+	private int initCallCount = 0;
 	private boolean copyInstanceCalled = false;
 	private int copyInstanceCallCount = 0;
 	private Map<String, FileManager> nodeFileManagers = null;
@@ -57,6 +58,7 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 	@Override
 	protected void init() throws IllegalStateException {
 		initCalled = true;
+		initCallCount++;
 		// Minimal initialization for testing - no actual initialization needed
 	}
 
@@ -69,6 +71,10 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 
 	public boolean wasInitCalled() {
 		return initCalled;
+	}
+
+	public int getInitCallCount() {
+		return initCallCount;
 	}
 
 	public boolean wasCopyInstanceCalled() {
