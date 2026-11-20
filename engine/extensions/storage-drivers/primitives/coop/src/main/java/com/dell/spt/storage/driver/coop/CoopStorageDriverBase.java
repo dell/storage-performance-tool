@@ -15,6 +15,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
@@ -1189,14 +1190,17 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * Under the composite's monitor: {@code childOp}, a range of the composite READ that is not sent,
 	 * ends as a failure out of retries, so {@link #shouldEnqueueFinalization} lets the read finish
 	 * without it. {@link PartialOperation} implementations that do not count retries never run out
-	 * of them, as in {@link #handleCompleted}; the only implementation counts them.
+	 * of them, as in {@link #handleCompleted}; the engine's own, {@link PartialDataOperationImpl},
+	 * counts them and is also marked as having recorded its failure.
 	 */
 	private static void settleRangeAsExhausted(final CompositeOperation<?> compositeOp, final Operation<?> childOp) {
 		if (childOp instanceof PartialOperation<?> range && range.parent() == compositeOp) {
 			for (var retries = range.retryCount(); retries < MAX_PART_RETRIES; retries++) {
 				range.incrementRetryCount();
 			}
-			range.markFailureRecorded();
+			if (range instanceof PartialDataOperationImpl<?> part) {
+				PartialDataOperationImpl.markFailureRecorded(part);
+			}
 			// The range never reaches finishResponse(), which settles a sent range.
 			compositeOp.markSubTaskCompleted();
 		}
@@ -1331,7 +1335,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						}
 						// Only now may the parent end: a sibling's completion that finds this part
 						// settled but unmarked waits for this one, which records the final status.
-						subOp.markFailureRecorded();
+						if (subOp instanceof PartialDataOperationImpl<?> part) {
+							PartialDataOperationImpl.markFailureRecorded(part);
+						}
 						if (rangeRead) {
 							// Range reads are stateless, so there is nothing to abort: the other
 							// ranges finish, and finalization reports this failure.
@@ -1419,14 +1425,24 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		// A part settles before its completion takes the parent's lock, so a count of zero can include a
 		// failed part whose completion has not run yet: one about to retry, or one out of retries whose
 		// failure is not recorded yet. Only a failed part whose completion recorded its failure lets the
-		// operation end, so the operation ends with the failure recorded last, which then stays.
+		// operation end, so the operation ends with the failure recorded last, which then stays. Another
+		// PartialOperation type, an extension's own, is judged as through 5.17.0: once a part has
+		// recorded a failure, a failed part out of retries lets the operation end.
 		for (final var rawSubOp : parentOp.subOperations()) {
 			final var subOp = (PartialOperation) rawSubOp;
-			if (subOp.status() != Operation.Status.SUCC && !subOp.failureRecorded()) {
+			if (subOp.status() != Operation.Status.SUCC && !failureSettled(parentOp, subOp)) {
 				return false;
 			}
 		}
 		return markFinalizationEnqueued(parentOp);
+	}
+
+	/** Under {@code parentOp}'s monitor: whether {@code subOp}, a failed part, no longer holds it. */
+	private static boolean failureSettled(final CompositeOperation<?> parentOp, final PartialOperation<?> subOp) {
+		if (subOp instanceof PartialDataOperationImpl<?> part) {
+			return PartialDataOperationImpl.failureRecorded(part);
+		}
+		return parentOp.get("mpuFailure") != null && subOp.retryCount() >= MAX_PART_RETRIES;
 	}
 
 	private static boolean markFinalizationEnqueued(final CompositeOperation parentOp) {

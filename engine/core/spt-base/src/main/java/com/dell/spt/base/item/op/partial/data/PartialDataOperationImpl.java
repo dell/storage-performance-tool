@@ -38,7 +38,6 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 		this.partNumber = other.partNumber;
 		this.parent = other.parent;
 		this.retryCount = other.retryCount;
-		this.failureRecorded = other.failureRecorded;
 	}
 
 	@Override
@@ -67,14 +66,19 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 		retryCount++;
 	}
 
-	@Override
-	public final void markFailureRecorded() {
-		failureRecorded = true;
+	/**
+	 * Marks {@code part} as out of retries with its failure recorded on its parent, which may then end.
+	 * A driver calls it, and reads {@link #failureRecorded}, holding the parent's monitor. These are
+	 * static, so they neither override nor collide with a subclass's own methods. The mark is not
+	 * cleared, and {@link #result()} does not copy it: a retried or recycled composite makes new parts.
+	 */
+	public static void markFailureRecorded(final PartialDataOperationImpl<?> part) {
+		part.failureRecorded = true;
 	}
 
-	@Override
-	public final boolean failureRecorded() {
-		return failureRecorded;
+	/** Whether {@link #markFailureRecorded} was called for {@code part}. */
+	public static boolean failureRecorded(final PartialDataOperationImpl<?> part) {
+		return part.failureRecorded;
 	}
 
 	@Override
