@@ -43,6 +43,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 	private static final boolean PATH_STYLE = true;
 	private static final Set<String> REGION_CONFLICT_WARNINGS = ConcurrentHashMap.newKeySet();
 	private final S3AwsStandaloneDeleteResources.Factory standaloneDeleteResourcesFactory;
+	private final CrtShutdownRef.Counter crtShutdownRefs;
 
 	/** Creates the ServiceLoader-compatible AWS S3 driver factory. */
 	public S3AwsStorageDriverFactory() {
@@ -51,8 +52,15 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 
 	S3AwsStorageDriverFactory(
 					final S3AwsStandaloneDeleteResources.Factory standaloneDeleteResourcesFactory) {
+		this(standaloneDeleteResourcesFactory, CrtShutdownRef.CRT_COUNTER);
+	}
+
+	S3AwsStorageDriverFactory(
+					final S3AwsStandaloneDeleteResources.Factory standaloneDeleteResourcesFactory,
+					final CrtShutdownRef.Counter crtShutdownRefs) {
 		this.standaloneDeleteResourcesFactory = Objects.requireNonNull(
 						standaloneDeleteResourcesFactory);
+		this.crtShutdownRefs = Objects.requireNonNull(crtShutdownRefs);
 	}
 
 	@Override
@@ -175,6 +183,10 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 
 		final var constructionResources = new ConstructionResources();
 		try {
+			// Held until the driver has closed its clients, so that a JVM shutdown does not stop the
+			// CRT serving their requests; released after the clients if the driver is not built.
+			final CrtShutdownRef crtShutdownRef = CrtShutdownRef.acquire(crtShutdownRefs);
+			constructionResources.own(crtShutdownRef::release);
 			final S3AsyncClient s3AsyncClient = constructionResources.own(crtBuilder.build());
 			final String exactClientRegion = region;
 			final int exactClientMaxConcurrency = maxConcurrency;
@@ -208,7 +220,8 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 							() -> standaloneDeleteResourcesFactory.create(
 											standaloneDeleteConfiguration),
 							smallObjectThresholdBytes,
-							partSizeBytes);
+							partSizeBytes,
+							crtShutdownRef);
 			constructionResources.release();
 			return driver;
 		} catch (final RuntimeException | Error failure) {

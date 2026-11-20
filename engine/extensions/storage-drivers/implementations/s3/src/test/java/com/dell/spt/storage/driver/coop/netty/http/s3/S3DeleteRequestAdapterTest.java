@@ -20,6 +20,7 @@ import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequest;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
@@ -106,6 +107,40 @@ final class S3DeleteRequestAdapterTest {
 							request.headers().get(HttpHeaderNames.CONTENT_MD5));
 			assertTrue(request.headers().get(HttpHeaderNames.AUTHORIZATION)
 							.startsWith(S3Api.AUTH_V4_PREFIX));
+		}
+	}
+
+	private static DeleteTarget targetIn(final String bucket, final String key) {
+		return new DeleteTarget(new IntegrityManifestDataItem(bucket, key, 0, null));
+	}
+
+	private static DeleteRequestOperation operationIn(final String bucket, final DeleteTarget... targets) {
+		return new DeleteRequestOperationImpl(0, new DeleteRequest(bucket, CREDENTIAL, List.of(targets)));
+	}
+
+	@Test
+	void oneTargetInABucketEndingInASlashIsAddressedWithOneSlash() throws Exception {
+		try (final var driver = new DeleteDriver(config(false))) {
+			assertEquals("/r2ts/k1", driver.build(operationIn("r2ts/", targetIn("r2ts/", "k1"))).uri());
+			assertEquals("/r2ts/k1", driver.build(operationIn("r2ts", targetIn("r2ts", "k1"))).uri());
+		}
+	}
+
+	@Test
+	void multipleTargetsInABucketEndingInASlashPostToTheBucket() throws Exception {
+		try (final var driver = new DeleteDriver(config(false))) {
+			final FullHttpRequest request = (FullHttpRequest) driver.build(operationIn(
+							"r2ts/", targetIn("r2ts/", "k1"), targetIn("r2ts/", "k2")));
+			final FullHttpRequest plain = (FullHttpRequest) driver.build(operationIn(
+							"r2ts", targetIn("r2ts", "k1"), targetIn("r2ts", "k2")));
+
+			assertEquals(HttpMethod.POST, request.method());
+			assertEquals("/r2ts?delete", request.uri());
+			assertEquals("/r2ts?delete", plain.uri());
+			assertEquals(
+							plain.content().toString(StandardCharsets.UTF_8),
+							request.content().toString(StandardCharsets.UTF_8));
+			assertTrue(request.content().toString(StandardCharsets.UTF_8).contains("<Key>k1</Key>"));
 		}
 	}
 
