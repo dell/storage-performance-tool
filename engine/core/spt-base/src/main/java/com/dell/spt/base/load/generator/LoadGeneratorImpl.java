@@ -350,9 +350,14 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							}
 						}
 						if (n > 0) {
-							recycleQueueSize.addAndGet(-n);
-							pendingOpCount += n;
+							// Order matters: raise the generated count before the queue size falls.
+							// Between the poll above and these lines this thread can hold every
+							// circulating operation while the queue is empty. The step context's
+							// dry check ("no load operations to recycle") requires a zero size, and
+							// the size only reaches zero once the held operations count as generated.
 							recycledOpCounter.add(n);
+							pendingOpCount += n;
+							recycleQueueSize.addAndGet(-n);
 						} else {
 							// Back off briefly so in-flight operations can complete and return
 							// through recycleQueue instead of spinning against an empty queue.
@@ -1340,7 +1345,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final boolean isNothingToRecycle() {
-		return recycleQueue.isEmpty();
+		// The size stays above zero while the generator holds polled operations it has not yet
+		// counted as generated (see the recycle branch of doWork). recycle() adds to the queue just
+		// before it raises the size, so the size can briefly lag a non-empty queue; the queue test
+		// covers that moment.
+		return recycleQueue.isEmpty() && recycleQueueSize.get() == 0;
 	}
 
 	@Override

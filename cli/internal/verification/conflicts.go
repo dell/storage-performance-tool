@@ -15,6 +15,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/terminal"
 )
 
 // VerificationConflictInfo represents information about port conflicts on a verification host.
@@ -408,7 +409,7 @@ func NewVerificationConflictResolver(cmdExecutor command.CommandExecutor, forceM
 	return &VerificationConflictResolver{
 		cmdExecutor:     cmdExecutor,
 		forceMode:       forceMode,
-		interactiveMode: isInteractiveMode(),
+		interactiveMode: terminal.StdinIsTerminal(),
 	}
 }
 
@@ -811,11 +812,4 @@ func (vcr *VerificationConflictResolver) readUserInput() (string, error) {
 	var input string
 	_, err := fmt.Scanln(&input)
 	return input, err
-}
-
-// isInteractiveMode detects if we're in interactive mode (TTY available)
-// Mirroring the implementation from portcheck/resolver.go
-func isInteractiveMode() bool {
-	// For now, assume interactive. In production, would check os.Stdin.Stat()
-	return true
 }

@@ -251,7 +251,7 @@ func TestRunCmdSizesRdmaPoolsWithAPullableProbeUnderTheSkipOnEveryRoute(t *testi
 				order = append(order, "connect")
 				return reached
 			}
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			startLocalHeadlessRunFunc = func(string, string, scenario.Params, headless.HeadlessOptions) error {

@@ -103,7 +103,7 @@ func stubRunNetworkModeRoutes(t *testing.T) *runNetworkModeRouteCalls {
 		startLocalHeadlessRunFunc = previousLocal
 		startMultiHostHeadlessRunFunc = previousRemote
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		calls.port++
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
@@ -284,7 +284,7 @@ func stubReplayNetworkModeRoutes(t *testing.T) *replayNetworkModeCalls {
 		newReplaySingleHostOrchestrator = previousSingle
 		connectReplayOrchestrator = previousConnect
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		calls.port++
 		return nil, errReplayNetworkModeConnect
 	}
@@ -411,7 +411,7 @@ func TestReplayCommandPassesTheNormalisedNetworkModeToTheLocalLaunch(t *testing.
 		t.Run(fmt.Sprintf("%q", accepted.value), func(t *testing.T) {
 			server, _ := newNetworkModeReplayArchive(t)
 			t.Cleanup(installReplayEngineInfoSeams(t))
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			shouldReplayRunHeadless = func(*cobra.Command) bool { return true }

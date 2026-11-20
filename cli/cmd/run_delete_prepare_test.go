@@ -489,7 +489,7 @@ func requireDeleteManifestStopsBeforeOrchestration(t *testing.T, content, wantDe
 		startAutoResultsFunc = previousAutoResults
 	})
 	var portCalls, connectCalls, localCalls, multiCalls, autoResultsCalls int
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		portCalls++
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}

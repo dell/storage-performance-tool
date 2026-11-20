@@ -26,6 +26,12 @@ type fakeDockerAPI struct {
 	listOpts   []containertypes.ListOptions
 	stopped    []string
 	removed    []string
+	inspects   map[string]containertypes.InspectResponse
+	onRemove   func(containerID string)
+	// onStop, when set, runs at each stop; a non-nil error fails the stop.
+	onStop func(containerID string) error
+	// daemonHost is the daemon's address; empty means the default local socket.
+	daemonHost string
 }
 
 func (f *fakeDockerAPI) ContainerList(_ context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error) {
@@ -37,8 +43,12 @@ func (f *fakeDockerAPI) ContainerList(_ context.Context, options containertypes.
 
 func (f *fakeDockerAPI) ContainerStop(_ context.Context, containerID string, _ containertypes.StopOptions) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stopped = append(f.stopped, containerID)
+	onStop := f.onStop
+	f.mu.Unlock()
+	if onStop != nil {
+		return onStop(containerID)
+	}
 	return nil
 }
 
@@ -46,11 +56,23 @@ func (f *fakeDockerAPI) ContainerRemove(_ context.Context, containerID string, _
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, containerID)
+	if f.onRemove != nil {
+		f.onRemove(containerID)
+	}
 	return nil
 }
 
-func (f *fakeDockerAPI) ContainerInspect(_ context.Context, _ string) (containertypes.InspectResponse, error) {
-	return containertypes.InspectResponse{}, nil
+func (f *fakeDockerAPI) ContainerInspect(_ context.Context, containerID string) (containertypes.InspectResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inspects[containerID], nil
+}
+
+func (f *fakeDockerAPI) DaemonHost() string {
+	if f.daemonHost == "" {
+		return "unix:///var/run/docker.sock"
+	}
+	return f.daemonHost
 }
 
 func (f *fakeDockerAPI) Close() error { return nil }
@@ -205,7 +227,7 @@ func TestForce_ExposedOnlySptContainerIsNotTouched(t *testing.T) {
 	if result.Success {
 		t.Errorf("CheckAndResolveConflicts() Success = true, want false")
 	}
-	if !strings.Contains(result.Message, "No containers found using port "+portStr) {
+	if !strings.Contains(result.Message, "No container publishes 127.0.0.1:"+portStr) {
 		t.Errorf("CheckAndResolveConflicts() Message = %q, want the no-containers message", result.Message)
 	}
 
