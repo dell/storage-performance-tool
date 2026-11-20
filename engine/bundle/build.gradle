@@ -132,6 +132,13 @@ def launcherOmittedJavaOption = '-XX:+UseCompactObjectHeaders'
 // Where DEFAULT_JAVA_OPTS places the x86-only options. The image passes them on x86_64, and the
 // launchers when the java they run accepts them.
 def imageX86JavaOptsReference = '${X86_JAVA_OPTS}'
+// The RMI timeouts every launcher must pass, so that a worker that stops answering ends a
+// distributed run instead of holding it: one bounds the reply to a call, the other the
+// handshake of each new connection.
+def launcherRequiredJavaOptions = [
+	'-Dsun.rmi.transport.tcp.responseTimeout=10000',
+	'-Dsun.rmi.transport.tcp.handshakeTimeout=10000',
+]
 
 def readImageJavaOptions = {
 	def entrypoint = imageEntrypoint.asFile
@@ -225,6 +232,9 @@ task createRunScript {
 #   waits for a reply to a distributed-coordination RMI call. Defaults to 0 (wait forever)
 #   in the JDK; without this, a transient network stall on the RMI connection hangs the
 #   whole run indefinitely instead of failing fast into the existing retry path.
+# - sun.rmi.transport.tcp.handshakeTimeout: bounds how long the entry node waits for the RMI
+#   handshake on each new connection to a node. Defaults to 60s in the JDK; after a node stops
+#   answering, each later call opens a new connection and waits the whole handshake timeout.
 #
 # SPT_JAVA_OPTS adds options after the defaults, and when an option is given twice the JVM uses
 # the later one. For example, SPT_JAVA_OPTS="-Xmx8g" ./run.sh ... runs with an 8 GiB heap and
@@ -952,6 +962,12 @@ exit "${STUB_JAVA_EXIT:-0}"
 		stubUname.setExecutable(true)
 
 		def problems = []
+		def requireOptions = { String name, List<String> got ->
+			def missing = launcherRequiredJavaOptions.findAll { got != null && !got.contains(it) }
+			if (missing) {
+				problems << "${name}: java starts without ${missing}: ${got}"
+			}
+		}
 		def caseNumber = 0
 		def start = { String name, List<String> command, Map<String, String> env, File pathFirst = stubDir ->
 			def out = new File(workRoot, "${++caseNumber}-${name}")
@@ -1016,6 +1032,7 @@ exit "${STUB_JAVA_EXIT:-0}"
 			def result = run("entrypoint-${machine}", ['sh', imageEntrypoint.asFile.absolutePath, '--version'],
 				[STUB_UNAME_M: machine])
 			def got = options(result, imageTail)
+			requireOptions("entrypoint-${machine}", got)
 			if (got != null && got != imageJavaOptions(image, x86)) {
 				problems << "the entrypoint on ${machine} passes ${got}, not the options build.gradle reads from it, " +
 					"${imageJavaOptions(image, x86)}; keep every default option in its DEFAULT_JAVA_OPTS or X86_JAVA_OPTS line"
@@ -1033,6 +1050,7 @@ exit "${STUB_JAVA_EXIT:-0}"
 		def checkRunScript = { String name, Map<String, String> env, List<String> expected, String expectedTunables ->
 			def result = run(name, [runScript.absolutePath, '--version'], env)
 			def got = options(result, runScriptTail)
+			requireOptions(name, got)
 			if (got != null && got != expected) {
 				problems << "${name}: run.sh passes ${got}; expected ${expected}"
 			}
@@ -1144,6 +1162,7 @@ exit "${STUB_JAVA_EXIT:-0}"
 		def batchDefaults = defaultsLines.size() == 1 && defaultsLines[0].endsWith('"')
 			? defaultsLines[0].substring(defaultsPrefix.length(), defaultsLines[0].length() - 1).split(/\s+/) as List
 			: null
+		requireOptions('run.bat', batchDefaults)
 		def expectedBatchDefaults = launcherJavaOptions(image, '%SPT_X86_JAVA_OPTS%')
 		if (batchDefaults != expectedBatchDefaults) {
 			problems << "run.bat's defaults ${defaultsLines} are not ${expectedBatchDefaults}"
