@@ -1342,7 +1342,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final boolean isNothingToRecycle() {
 		// The size stays above zero while the generator holds polled operations it has not yet
-		// counted as generated (see the recycle branch of doWork).
+		// counted as generated (see the recycle branch of doWork). recycle() adds to the queue just
+		// before it raises the size, so the size can briefly lag a non-empty queue; the queue test
+		// covers that moment.
 		return recycleQueue.isEmpty() && recycleQueueSize.get() == 0;
 	}
 
