@@ -165,6 +165,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Object watchdogLock = new Object();
 	private volatile Thread requestWatchdog;
 	private volatile boolean closed;
+	/** Keeps the CRT serving this driver's clients at a JVM shutdown until {@link #doClose} has closed them. */
+	private final CrtShutdownRef crtShutdownRef;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -193,7 +195,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						exactVersionS3Client, null, null, null, null,
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
 	}
 
 	S3AwsStorageDriver(
@@ -209,7 +211,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null, null,
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
 	}
 
 	S3AwsStorageDriver(
@@ -230,7 +232,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						Objects.requireNonNull(standaloneDeleteS3Client),
 						Objects.requireNonNull(standaloneDeleteHttpClient),
 						null,
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
 	}
 
 	S3AwsStorageDriver(
@@ -246,10 +248,32 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						exactVersionS3ClientSupplier, standaloneDeleteResourcesSupplier,
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
+	}
+
+	/**
+	 * The driver the factory builds. It takes over the CRT shutdown reference taken for its
+	 * clients and releases it once they are closed; if construction fails, the factory releases it.
+	 */
+	S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final Supplier<S3AwsStandaloneDeleteResources> standaloneDeleteResourcesSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes,
+					final CrtShutdownRef crtShutdownRef)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null,
 						new S3AwsStandaloneDeleteResources.Lazy(
 										Objects.requireNonNull(standaloneDeleteResourcesSupplier)),
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, Objects.requireNonNull(crtShutdownRef));
 	}
 
 	private S3AwsStorageDriver(
@@ -265,11 +289,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final SdkAsyncHttpClient standaloneDeleteHttpClient,
 					final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources,
 					final long smallObjectThresholdBytes,
-					final long partSizeBytes)
+					final long partSizeBytes,
+					final CrtShutdownRef crtShutdownRef)
 					throws IllegalConfigurationException {
 		// Every request blocks its worker, so a worker per permit keeps the configured number of
 		// requests in flight; see NioStorageDriverBase.
 		super(stepId, dataInput, config, verifyFlag, batchSize, true);
+		this.crtShutdownRef = crtShutdownRef;
 		this.timeouts = S3AwsClientTimeouts.forDriver(config);
 		this.requestTimeoutNanos = timeouts.requestTimeout().toNanos();
 		if (verifyFlag) {
@@ -2341,6 +2367,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	@Override
 	protected void doClose()
+					throws IOException {
+		try {
+			closeResources();
+		} finally {
+			// Only now, with the clients closed, may the CRT stop serving Java at a JVM shutdown. A
+			// close that throws or is interrupted releases it too, and a repeated close does nothing.
+			if (crtShutdownRef != null) {
+				crtShutdownRef.release();
+			}
+		}
+	}
+
+	private void closeResources()
 					throws IOException {
 		closed = true;
 		if (watchdogLock != null) {
