@@ -67,6 +67,8 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
@@ -98,6 +100,11 @@ class LostStepSliceTest {
 	private static final long LOG_WAIT_MILLIS = 5_000;
 	/** The relay's read timeout, standing in for the shipped 10 s RMI response timeout. */
 	private static final int RESPONSE_TIMEOUT_MILLIS = 300;
+	/**
+	 * How long a locked await poll waits on its lock's condition, so that a poll of that slice is in
+	 * flight when its stop comes; see awaitsWaitForStop.
+	 */
+	private static final long AWAIT_WAIT_MILLIS = 50;
 	/** When a slow call's relay answers, after the slice's call has run. */
 	private static final long LATE_ANSWER_MILLIS = 1_500;
 	private static final String STOP_WARNING = "failed to stop the step slice";
@@ -154,6 +161,11 @@ class LostStepSliceTest {
 	private volatile LoadStep localSlice;
 	/** How long each node's stop takes to answer after the slice has stopped, as a worker's drain; by node address. */
 	private final Map<String, Long> slowStopReplies = new ConcurrentHashMap<>();
+	/**
+	 * The nodes whose slice's await waits while its stop is in flight, as a worker's await waits on
+	 * the slice's state lock that its stop holds for the drain; the slow stop reply is part of that stop.
+	 */
+	private final Set<String> awaitsWaitForStop = ConcurrentHashMap.newKeySet();
 	/** How many stops each node's slice got, by node address. */
 	private final Map<String, Integer> stops = new ConcurrentHashMap<>();
 	/** The worker services by node address, so that a test can take a worker down. */
@@ -758,6 +770,97 @@ class LostStepSliceTest {
 		assertEquals(1, stopCalls(draining), "the draining worker is stopped once");
 	}
 
+	@Test
+	void aSliceLostWhileAnotherWorkersAwaitWaitsForItsStopStopsTheEntrysOwnSliceAtOnce() throws Exception {
+		unlimited();
+		config.val("load-op-limit-rate", 90.0);
+		final String lost = addrs.get(0);
+		final String draining = addrs.get(1);
+		// The other worker's stop drains for 5 s, and its await waits for that stop, as a worker's await
+		// waits on the slice's state lock that its stop holds for the drain: the entry's poll of that
+		// worker does not answer until the stop has.
+		slowStopReplies.put(draining, 5_000L);
+		awaitsWaitForStop.add(draining);
+		recordLocal = true;
+		final LinearLoadStepClient client = newClient();
+		final long[] killedNanos = new long[1];
+		final Thread killer = takeDownAfterItsAwait(lost, killedNanos);
+		final List<long[]> localSuccesses = Collections.synchronizedList(new ArrayList<>());
+		final AtomicBoolean sampling = new AtomicBoolean(true);
+		final Thread sampler = Thread.ofPlatform().daemon(true).start(() -> sampleSuccesses(localSuccesses, sampling));
+
+		final Throwable failure;
+		try {
+			failure = runBounded(client);
+		} finally {
+			sampling.set(false);
+			sampler.join();
+		}
+		killer.join();
+		awaitLostNodes();
+
+		assertLostSliceFailure(assertInstanceOf(RunTerminalException.class, failure), 2);
+		assertEquals(List.of(lost), lostNodes());
+		final long drainingStopNanos = firstCallNanos.get(draining + "#stop");
+		final long localStopNanos = firstCallNanos.get(ENTRY + "#stop");
+		final long localStopAfterLossMillis = TimeUnit.NANOSECONDS.toMillis(localStopNanos - killedNanos[0]);
+		final long localSuccessesAfterLoss = successesAfter(localSuccesses, killedNanos[0]);
+		System.out.printf(
+						"lost-slice locked-await measurement: the other worker's stop %d ms after the loss, the entry's own stop %d ms after it, the entry's successes after the loss %d%n",
+						TimeUnit.NANOSECONDS.toMillis(drainingStopNanos - killedNanos[0]), localStopAfterLossMillis,
+						localSuccessesAfterLoss);
+		assertTrue(localStopAfterLossMillis < 2_000,
+						"the entry's own slice stops at once, not after the other worker's await answers: " + localStopAfterLossMillis
+										+ " ms");
+		// The entry runs a third of 90 op/s: 2 s of its load is 60 operations, and the 5 s drain about 150.
+		assertTrue(localSuccessesAfterLoss < 60,
+						"the entry's own slice stops generating at the loss: " + localSuccessesAfterLoss + " successes after it");
+		assertEquals(1, stopCalls(draining), "the draining worker is stopped once");
+		assertEquals(1, stopCalls(ENTRY), "the entry's own slice is stopped once");
+		assertEquals(List.of(), errors.messages().stream().filter(m -> m.contains(AWAIT_WARNING)).toList(),
+						"no await warning for the draining worker");
+	}
+
+	@Test
+	void aLiveWorkerLostAtItsMetricsFetchIsStoppedAtOnceWhileAnotherWorkersStopDrains() throws Exception {
+		unlimited();
+		final String lost = addrs.get(0);
+		final String draining = addrs.get(1);
+		// The lost worker stays up and generating: only its metrics fetch fails, as on a reset connection.
+		faults.computeIfAbsent(lost, key -> new ConcurrentHashMap<>());
+		// The other worker's stop drains for 5 s, and its await waits for that stop.
+		slowStopReplies.put(draining, 5_000L);
+		awaitsWaitForStop.add(draining);
+		final LinearLoadStepClient client = newClient();
+		final long[] lostNanos = new long[1];
+		final Thread injector = Thread.ofPlatform().daemon(true).start(() -> {
+			try {
+				while (!calls(lost).contains("await")) {
+					Thread.sleep(10);
+				}
+				Thread.sleep(500);
+				lostNanos[0] = System.nanoTime();
+				fault(lost, METRICS_FETCH, new ConnectException("injected: connection reset"));
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+
+		final Throwable failure = runBounded(client);
+		injector.join();
+		awaitLostNodes();
+
+		assertLostSliceFailure(assertInstanceOf(RunTerminalException.class, failure), 2);
+		assertEquals(List.of(lost), lostNodes());
+		final long lostStopAfterLossMillis = TimeUnit.NANOSECONDS.toMillis(firstCallNanos.get(lost + "#stop") - lostNanos[0]);
+		System.out.printf("lost-slice live-lost measurement: the lost worker's stop %d ms after its fetch failed%n",
+						lostStopAfterLossMillis);
+		assertTrue(lostStopAfterLossMillis < 2_000,
+						"the live lost worker is stopped at once, not after the other worker's drain: " + lostStopAfterLossMillis + " ms");
+		assertEquals(1, stopCalls(lost), "the lost worker is stopped once");
+		assertEquals(1, stopCalls(draining), "the draining worker is stopped once");
+	}
+
 	private int stopCalls(final String addr) {
 		return stops.getOrDefault(addr, 0);
 	}
@@ -933,6 +1036,9 @@ class LostStepSliceTest {
 									};
 								}
 								firstCallNanos.putIfAbsent(ENTRY + "#" + method.getName(), System.nanoTime());
+								if ("stop".equals(method.getName())) {
+									stops.merge(ENTRY, 1, Integer::sum);
+								}
 								if ("await".equals(method.getName()) && localDrainMillis > 0 && localDrainNanos[0] == 0) {
 									localDrainNanos[0] = System.nanoTime();
 									Thread.sleep(localDrainMillis);
@@ -1009,6 +1115,8 @@ class LostStepSliceTest {
 	private LoadStepService recording(final String addr, final LoadStepService stub) {
 		final List<String> sliceCalls = calls.get(addr);
 		final Map<String, RemoteException> sliceFaults = faults.getOrDefault(addr, Map.of());
+		final ReentrantLock stateLock = new ReentrantLock();
+		final Condition stateChanged = stateLock.newCondition();
 		final InvocationHandler handler = (proxy, method, args) -> {
 			final String name = method.getName();
 			if (method.getDeclaringClass() == Object.class) {
@@ -1056,15 +1164,33 @@ class LostStepSliceTest {
 			if (refusedCalls.getOrDefault(addr, Set.of()).contains(name)) {
 				throw refusedConnect();
 			}
+			final boolean locked = awaitsWaitForStop.contains(addr) && ("await".equals(name) || "stop".equals(name));
+			if (locked) {
+				stateLock.lock();
+				if ("await".equals(name)) {
+					// As the worker's await: a timed wait that gives the lock up and takes it back at its
+					// end, so it waits there while a stop holds the lock.
+					var remainingNanos = TimeUnit.MILLISECONDS.toNanos(AWAIT_WAIT_MILLIS);
+					while (remainingNanos > 0) {
+						remainingNanos = stateChanged.awaitNanos(remainingNanos);
+					}
+				}
+			}
 			final Object result;
 			try {
-				result = method.invoke(stub, args);
-			} catch (final InvocationTargetException e) {
-				throw e.getCause();
-			}
-			final Long stopReplyMillis = slowStopReplies.get(addr);
-			if ("stop".equals(name) && stopReplyMillis != null) {
-				Thread.sleep(stopReplyMillis);
+				try {
+					result = method.invoke(stub, args);
+				} catch (final InvocationTargetException e) {
+					throw e.getCause();
+				}
+				final Long stopReplyMillis = slowStopReplies.get(addr);
+				if ("stop".equals(name) && stopReplyMillis != null) {
+					Thread.sleep(stopReplyMillis);
+				}
+			} finally {
+				if (locked) {
+					stateLock.unlock();
+				}
 			}
 			if (METRICS_FETCH.equals(name) && result instanceof List<?> list && !list.isEmpty()
 							&& list.getFirst() instanceof AllMetricsSnapshot snapshot) {
