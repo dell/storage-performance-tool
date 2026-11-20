@@ -16,7 +16,30 @@ sent while copying the objects so these requests may be significantly faster tha
 
 ## 1. Limitations
 
-1. Works only if the input path is different from the output one
+1. Works only if the input path is different from the output one. A copy names an object's destination by its
+   listed name whenever that name already lies under the output path, so an overlapping output path can make a
+   destination equal to its source. The engine checks a constant output path against a listed `--item-input-path`
+   when the step starts; it can't check an output path expression, an items file (`--item-input-file`), or a
+   pipeline sub-step after the first, which copies the results of the sub-step before it. A mixed step is not
+   checked: its listed input is only its GET and STAT pool, and its PUTs name new objects, never a listed one.
+   Target-bucket setup runs before the check, as it always did, so a refused S3 step still sends one `HEAD` for the
+   output bucket and creates it if it is missing, and a weighted or pipeline step lists the input path of each
+   configuration before the one refused (its base, and in a weighted step every earlier context); no object is
+   written.
+   * Storage drivers other than `fs` compare the two paths without their leading and trailing slashes (`/src`,
+     `src` and `/src/` are the same path).
+     * An output path equal to the input path copies every object onto itself, so the step fails at start (exit 1).
+     * An output path under the input path, such as `/src` to `/src/dir`, works on a first run into an empty prefix.
+       But the listing also returns the keys already under the output path, such as an earlier run's copies, and
+       those are copied onto themselves and counted as successes. The step logs one warning at start and runs.
+   * On `fs` a listed name is the file's absolute path. An output path equal to the listed directory, or one of
+     its parent directories, such as `/data/src` to `/data` or `/data/src/`, used to open each listed source file as
+     its own destination, empty it, and never finish. The engine now refuses it at start (exit 1). The input path is
+     taken as the listing names its files: doubled and trailing slashes are dropped and a relative input path is made
+     absolute against the working directory. The output path is compared as written, as the driver compares it
+     with each name, and `.` and `..` segments are compared as written on both sides. A relative output path never
+     holds an absolute name, so it copies elsewhere and is not refused. An output path under the input path is fine
+     on `fs`, because a listing does not descend into subdirectories.
 2. Copying the containers (Swift) is not supported
 3. Copying the buckets (S3) is not supported
 4. Copying the objects (Atmos) while using /rest/object interface is not supported yet
@@ -42,9 +65,10 @@ A listed item, or an item from an items file written by an `fs` step, is named b
 so it lands under the output path with that full path, as for `s3`: `/src/dir/f0` is copied to
 `/dst/src/dir/f0`. Missing directories under the output path are created.
 
-A listed path covers one directory level: its subdirectories are not copied. A subdirectory entry fails and leaves
-an empty file in its place under the output path, so a later copy of that subdirectory to the same output path
-fails. Copy nested directories deepest first, or to separate output paths.
+A listed path covers the regular files of one directory level. Its subdirectories, and other entries that are not
+regular files, are skipped, and the log notes how many; an entry whose attributes cannot be read is skipped with a
+warning. A symbolic link to a regular file is copied with the target's content. Nested directories are copied with
+one step each.
 
 ### 2.3. HTTP Storage Case
 

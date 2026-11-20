@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
@@ -197,6 +198,93 @@ public class LoadStepServiceImplTest {
 	}
 
 	@Test
+	@DisplayName("A slice runs from its start until its stop, also a stop that fails")
+	void aSliceRunsFromItsStartUntilItsStop() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-running");
+		final int port = freePort();
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			assertFalse(service.isRunning(), "created, not started");
+			service.start();
+			assertTrue(service.isRunning());
+			service.shutdown();
+			assertTrue(service.isRunning(), "a shut down slice still finishes its operations");
+			service.stop();
+			assertFalse(service.isRunning());
+			service.start();
+			assertTrue(service.isRunning(), "a slice can start again");
+			doThrow(new IllegalStateException("publish failed")).doReturn(local).when(local).stop();
+			assertThrows(IllegalStateException.class, service::stop);
+			assertFalse(service.isRunning(), "its contexts had their stop");
+			service.close();
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
+	@DisplayName("A failed start leaves the slice not running")
+	void aFailedStartLeavesTheSliceNotRunning() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-failed-start");
+		when(local.start()).thenThrow(new IllegalStateException("no context started"));
+		final int port = freePort();
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			assertThrows(IllegalStateException.class, service::start);
+			assertFalse(service.isRunning());
+			service.close();
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
+	@DisplayName("The release is reported once, after the service left the registry, and not while a retry is due")
+	void theReleaseIsReportedOnceAfterTheServiceLeftTheRegistry() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-release-hook");
+		doThrow(new IOException("transient local cleanup failure")).doNothing().when(local).close();
+		final int port = freePort();
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final List<Boolean> boundAtRelease = new java.util.ArrayList<>();
+			final Config baseConfig = TestConfigBuilder.config();
+			baseConfig.val("load-step-id", "svc-release-hook");
+			@SuppressWarnings("unchecked")
+			final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+			when(factory.id()).thenReturn(STEP_TYPE);
+			when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(local);
+			final LoadStepServiceImpl service = new LoadStepServiceImpl(
+							port, List.of(factory), STEP_TYPE, baseConfig, Collections.emptyList(), mock(MetricsManager.class),
+							released -> {
+								try {
+									boundAtRelease.add(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(released.name()));
+								} catch (final RemoteException e) {
+									throw new AssertionError(e);
+								}
+							});
+
+			assertThrows(IOException.class, service::close);
+			assertEquals(List.of(), boundAtRelease, "the close of this kind of step is retried");
+			service.close();
+			service.close();
+			assertEquals(List.of(false), boundAtRelease);
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
 	@DisplayName("A failed local close leaves the real RMI endpoint available for retry")
 	void failedLocalCloseKeepsRealRmiEndpointAvailableForRetry() throws Exception {
 		final LoadStep local = mock(LoadStep.class);
@@ -311,6 +399,49 @@ public class LoadStepServiceImplTest {
 							() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()),
 							times(1));
 			// Released: closing again releases nothing and throws nothing.
+			assertDoesNotThrow(service::close);
+			assertDoesNotThrow(local::close);
+			assertTrue(service.isClosed());
+			assertTrue(local.isClosed());
+			verify(context, times(1)).close();
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
+	@DisplayName("A slice whose context shutdown keeps failing ends closed and unexported")
+	void sliceWhoseContextShutdownKeepsFailingIsClosedAndUnexported() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		final IntegrityTerminalException shutdownFailure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE post-verification could not complete its full inventory pass");
+		when(context.shutdown()).thenThrow(shutdownFailure);
+		final Config config = sliceConfig("delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-step-limit-time", "0s");
+		final FailingSlice local = new FailingSlice(config, context);
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final int port = freePort();
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			service.start();
+			assertEquals(local.loadStepId(), remote.loadStepId());
+
+			assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, service::stop));
+			assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, service::close));
+
+			assertThrows(RemoteException.class, remote::loadStepId);
+			assertFalse(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(service.name()));
+			verify(context, times(1)).shutdown();
+			verify(context).stop();
+			verify(context).close();
+			// The worker's shutdown and the JVM exit close it again: nothing is released twice.
 			assertDoesNotThrow(service::close);
 			assertDoesNotThrow(local::close);
 			assertTrue(service.isClosed());

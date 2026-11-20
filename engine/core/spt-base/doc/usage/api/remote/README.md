@@ -106,7 +106,7 @@ Partial configurations may omit `run` or provide only `run.id`. `run.version` is
 after the submitted configuration is merged with local defaults. A submitted `run.version` is ignored with a warning and cannot
 redefine the executing engine build.
 
-If successful, the response will contain the ETag header with the run id, a decimal number:
+If successful, the response will contain the ETag header with the run id, a decimal number (the run's start time in Unix epoch milliseconds):
 ```bash
 ...
 < HTTP/1.1 202 Accepted
@@ -153,6 +153,29 @@ curl -v -X DELETE -H "If-Match: 1543257350274" http://localhost:9999/run
 
 `DELETE` answers 200 when the stop was requested, 204 when no run is active, and 404 when the active run has another id.
 Without a valid `If-Match` value it answers 400.
+
+A busy node answers `POST /run` with `409 Conflict`, and the request changes nothing: not the run in progress, its
+configuration or `/status`. A node is busy while a run is in progress or finishing its cleanup, or while a worker slice
+on it is busy (see below). A node with a busy worker slice answers `409` without reading the request. On any other node, defaults that
+name an unknown setting or give a value of the wrong type still answer `400`, and defaults that cannot be parsed answer
+`500`.
+
+A stopped run stays the active run until its cleanup returns: `HEAD /run` answers `200` with its run id, and `GET` and
+`DELETE` with that id answer `200`. After `DELETE /run`, wait for `HEAD /run` to answer `204`, or for a terminal `/status`,
+before posting again. A scenario that never returns after its stop keeps the node at `409` until `/shutdown` or a restart.
+
+A node that serves as a worker holds a **step slice** for each step an entry runs on it. A slice is busy from the end of its
+start until it is stopped or closed; one that was created and not started, or that was stopped and not yet closed, is not busy.
+A run posted to a worker while an entry is starting a slice there is therefore accepted, and the two then share the node.
+
+- `HEAD /run` answers `200` with the run id of the newest busy slice, and `204` once no slice is busy and no run is in progress.
+- `GET /run` with `If-Match` answers `200` for the id of the run in progress or of any busy slice, and `204` otherwise.
+- `POST /run` answers `409` while a slice is busy and is accepted once none is, also on a node that has served as a worker.
+- `DELETE /run` whose `If-Match` is the run id of a slice the node still holds stops that run's slices on this node and answers
+  `200`; an id that matches nothing the node holds answers `404` while it holds any slice. It stops **only this node's share**
+  and logs a warning naming the run and step. The slice stays open so that a live entry can collect its results, and the run
+  goes on elsewhere: to stop a run, use `DELETE /run` on its entry. The entry of a run stopped this way on a worker can end
+  normally with fewer operations.
 
 #### 4.2.2.2. Distributed mode
 To start Spt in distributed mode via REST you need to have 2 Spt nodes in `--run-node` mode. Let's say you have started them via docker. One using the default ports: 
@@ -283,6 +306,7 @@ Additionally, JSON-formatted endpoints are available for clients that prefer str
 
 - `GET /metrics/json` (always present) returns per-node metrics. Each array element includes:
   - Metadata: `metrics_schema` (currently `5`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, `cluster_id` for configured active runs, and `sample_ts` (RFC3339 timestamp). The public CLI supplies one nonempty cluster identity to every participant from the preallocated run ID.
+  - Role: a live or terminal row is `entry` when this node runs the row's run as its entry (the node accepted that run through `POST /run`), and `worker` for every row of a slice an entry started on it. A row keeps its role from its first appearance until it expires (the node remembers the 16 latest runs it accepted; a row outlived by 16 later runs reads `worker`), and a node that holds its own step and another entry's slice gives each row its own role. The idle sample is `entry` while a distributed context is live or a distributed terminal entry is retained on the node, otherwise `worker`.
   - Step data: `step_id`, `op_type`, `timestamp`, `elapsed_time_seconds`, `test_state`.
   - Metric groups: `operations{success_count,failed_count,success_rate_last,failed_rate_last}`, `bandwidth{bytes_total,bytes_rate_last}`, `timing`, `concurrency{current,mean}`.
   - Timing: schema 4 retains the schema 2/3 compatibility fields `timing.latency_mean_us` and `timing.duration_mean_us`, and the nested `timing.latency` and `timing.duration` objects with `count`, `mean_us`, `min_us`, `p50_us`, `p90_us`, `p99_us`, `p999_us`, `max_us`, and `overflow_count`.
@@ -397,7 +421,7 @@ Diagnostics:
 
 ### 4.2.5 Shutdown
 
-Gracefully stop a node via the REST API. This closes internal services and then stops the HTTP server. The `/status` endpoint remains available for a short linger window (see `api.linger.sec`) before the server exits.
+Gracefully stop a node via the REST API. This closes internal services, including every step slice the node holds as a worker, started or not, and then stops the HTTP server. The `/status` endpoint remains available for a short linger window (see `api.linger.sec`) before the server exits.
 
 Endpoint:
 - `POST /shutdown` → 202 Accepted with a small JSON body `{ "accepted": true }`.
@@ -411,6 +435,7 @@ Notes:
 - The request returns immediately; shutdown proceeds asynchronously.
 - During the linger period the server may still respond to `/status` with a terminal state (e.g., `STOPPED`).
 - If you need to stop only the current run (but keep the node up), use `DELETE /run` with the `If-Match: <run_id>` header.
+- A worker's slice runs until its entry stops it. Only a count limit ends its load on the worker: if the entry has gone, a slice with a time limit, a size limit or no limit generates load until `POST /shutdown`, the end of the process, or `DELETE /run` with its run id.
 
 ### 4.2.6 Status
 
@@ -429,6 +454,7 @@ Fields:
 - `state`: one of `IDLE`, `RUNNING`, `COMPLETED`, `STOPPED`, `FAILED`.
 - `since`: ISO‑8601 instant indicating when the state was entered.
 - `run_id` and `step_id`: included when known.
+- `/status` reports only runs posted to this node. A step slice does not change it; the slice shows on `/metrics/json` and `HEAD /run`.
 - `category` and `message`: included only when `state` is `FAILED`.
   - `category` is one of `configuration`, `input`, `execution`, `aggregation`, `publication` or `cleanup`. A typed terminal failure of a step sets its own category. A scenario that fails otherwise reads `configuration` for a syntax error in the posted scenario text or a setting that `Load.config(...)` or `.append(...)` refuses, and `execution` for any other failure.
   - `message` is a short description of the cause, at most 1024 characters. For a scenario failure the engine writes it without quoting the scenario: it names a refused setting only by the part of its path the engine defines, never by a value or a key the scenario wrote. A typed terminal failure's message is its own and may name a setting, such as the items file's name. The node's log has the details.
@@ -557,7 +583,7 @@ Response:
 ```
 
 Notes:
-- `role` is `entry` on the entry node (when distributed contexts are present), otherwise `worker`.
+- `role` is `entry` on the entry node while a distributed context is present, otherwise `worker`. An idle node, including an entry between runs (and at the start of each step, before its distributed context registers), reports `worker`. `/metrics/json` labels its rows by a different rule ([§4.2.4](#424-metrics)).
 - `node_id` defaults to `<hostname[:port]>` if not configured.
 
 ### 4.2.8 Readiness

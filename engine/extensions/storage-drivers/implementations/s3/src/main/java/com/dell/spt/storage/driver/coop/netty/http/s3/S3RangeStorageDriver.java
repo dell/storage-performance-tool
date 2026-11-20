@@ -167,7 +167,7 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 	/** Build a fresh signed request from the retained span without modifying item size/name/version. */
 	FullHttpRequest rangeRequest(RangeReadOperation<DataItem> op, RangeReadAttempt attempt, String host)
 					throws URISyntaxException {
-		final String uri = dataUriPath(op.item(), op.srcPath(), op.dstPath(), OpType.READ);
+		final String uri = requestPath(dataUriPath(op.item(), op.srcPath(), op.dstPath(), OpType.READ));
 		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri);
 		try {
 			final var headers = request.headers();

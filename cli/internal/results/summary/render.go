@@ -423,12 +423,12 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	fmt.Fprintf(b, "Workload Configuration\n")
 	r.writeBullet(b, "Workload", titleize(work.Type))
 	isList := strings.EqualFold(work.Type, workloadTypeList)
-	isReadVerify := strings.EqualFold(work.Type, workloadTypeReadVerify)
+	discoversSize := strings.EqualFold(work.Type, workloadTypeReadVerify) || strings.EqualFold(work.Type, workloadTypeRead)
 	if work.ObjectSizeHuman != "" && !isList {
 		r.writeBullet(b, "Object size", formatObjectSizeBullet(work))
 	} else if isList {
 		r.writeBullet(b, "Object size", "not applicable")
-	} else if isReadVerify {
+	} else if discoversSize {
 		r.writeBullet(b, "Object size", objectSizeDiscovered)
 	}
 	if work.Threads > 0 {

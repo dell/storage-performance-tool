@@ -3363,8 +3363,8 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 	} else if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete &&
 		params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeReadVerify &&
-		params.WorkloadType != WorkloadTypeTables {
-		params.ObjectSize = "1MB"
+		params.WorkloadType != WorkloadTypeTables && !readsFromItemsFile(params) {
+		params.ObjectSize = scenario.DefaultObjectSize
 	}
 
 	// Mixed workload distribution and seed file parameters
@@ -3631,6 +3631,13 @@ func resolvePrefixShardCount(cmd *cobra.Command, params scenario.Params) (int, e
 	return params.Threads * hostCount, nil
 }
 
+// readsFromItemsFile reports whether params select a read of the objects an items file lists. The
+// engine takes each object's size from the file, so such a run has no object size of its own
+// unless --object-size gives one.
+func readsFromItemsFile(params scenario.Params) bool {
+	return params.WorkloadType == WorkloadTypeRead && params.ItemsFile != ""
+}
+
 // formatScenarioParams formats scenario parameters for display
 func formatScenarioParams(params scenario.Params) string {
 	var lines []string
@@ -3655,6 +3662,8 @@ func formatScenarioParams(params scenario.Params) string {
 		(strings.TrimSpace(params.ItemsFile) != "" || params.DeleteExisting)) ||
 		params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
+	} else if params.ObjectSize == "" && readsFromItemsFile(params) {
+		lines = append(lines, "Object Size: (from items file)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
 	}
