@@ -1,0 +1,73 @@
+package com.dell.spt.base.load.step.client;
+
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.load.step.service.file.FileManagerService;
+import java.io.EOFException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.rmi.RemoteException;
+import java.util.function.BooleanSupplier;
+
+/**
+ * A worker's file manager as the entry's file collectors see it: each call goes to the worker until
+ * the entry loses that worker's step slice, and from then on none does. The entry then collects
+ * none of that node's files: a read finds the end of the file at once, a size is 0, a delete does
+ * nothing, and any other call fails at once without reaching the worker. The step fails for its
+ * lost slice anyway, and a call to a frozen worker would wait for its connection's handshake.
+ * The proxy is a {@link FileManagerService} when the file manager it wraps is one, so that a
+ * collector still tells a worker's file manager from the entry's own one.
+ */
+final class LostNodeFileManager implements InvocationHandler {
+
+	private final FileManager worker;
+	private final BooleanSupplier lost;
+
+	private LostNodeFileManager(final FileManager worker, final BooleanSupplier lost) {
+		this.worker = worker;
+		this.lost = lost;
+	}
+
+	/**
+	 * Guards a worker's file manager.
+	 *
+	 * @param worker a worker's file manager
+	 * @param lost whether the entry has lost that worker's step slice
+	 * @return the file manager that stops calling the worker once its slice is lost
+	 */
+	static FileManager guard(final FileManager worker, final BooleanSupplier lost) {
+		final Class<?>[] interfaces = worker instanceof FileManagerService
+						? new Class<?>[]{FileManagerService.class
+						}
+						: new Class<?>[]{FileManager.class
+						};
+		return (FileManager) Proxy.newProxyInstance(
+						LostNodeFileManager.class.getClassLoader(), interfaces, new LostNodeFileManager(worker, lost));
+	}
+
+	@Override
+	public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
+		if (method.getDeclaringClass() == Object.class) {
+			return switch (method.getName()) {
+			case "equals" -> proxy == args[0];
+			case "hashCode" -> System.identityHashCode(proxy);
+			default -> worker.toString();
+			};
+		}
+		if (lost.getAsBoolean()) {
+			return switch (method.getName()) {
+			case "readFromFile" -> throw new EOFException("not collected: the entry lost this node's step slice");
+			case "fileSize" -> 0L;
+			case "deleteFile" -> null;
+			default -> throw new RemoteException(
+							"not called: the entry lost this node's step slice (" + method.getName() + ")");
+			};
+		}
+		try {
+			return method.invoke(worker, args);
+		} catch (final InvocationTargetException e) {
+			throw e.getCause();
+		}
+	}
+}

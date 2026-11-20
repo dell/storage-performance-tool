@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.TestConfigBuilder;
@@ -46,6 +47,7 @@ import org.junit.jupiter.api.Test;
 class LostSliceStopAtOnceTest {
 
 	private static final String STOP_AT_ONCE_THREAD = "spt-lost-slice-stop-";
+	private static final String LOST_CLOSE_THREAD = "spt-lost-slice-close-";
 	private static final Duration BOUND = Duration.ofSeconds(30);
 
 	/** The name of each thread that stopped each slice, by slice index. */
@@ -53,6 +55,13 @@ class LostSliceStopAtOnceTest {
 					Collections.synchronizedList(new ArrayList<>()),
 					Collections.synchronizedList(new ArrayList<>()),
 					Collections.synchronizedList(new ArrayList<>()));
+	/** The name of each thread that closed each slice, by slice index. */
+	private final List<List<String>> closedBy = List.of(
+					Collections.synchronizedList(new ArrayList<>()),
+					Collections.synchronizedList(new ArrayList<>()),
+					Collections.synchronizedList(new ArrayList<>()));
+	/** The slices, by index. */
+	private final List<LoadStep> slices = new ArrayList<>();
 	/** When each slice's stop began, by slice index. */
 	private final long[] stopNanos = new long[3];
 	private volatile long lostNanos;
@@ -62,22 +71,49 @@ class LostSliceStopAtOnceTest {
 	private volatile long failedLoadStepIdEndNanos;
 
 	@Test
-	void everySliceGetsOneStopAtOnceOnlyTheLostOneIncluded() throws Exception {
+	void everySliceButTheLostOneGetsOneStopAtOnceAndTheLostOneItsOneClose() throws Exception {
 		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
 
 		final RunTerminalException failure = awaitFailing(client);
 
 		assertTrue(failure.getMessage().startsWith("engine 2 of 3: the entry lost this node's step slice"), failure.getMessage());
 		assertEquals(List.of(STOP_AT_ONCE_THREAD), threadPrefixes(2), "the reachable worker is stopped at once: " + stoppedBy.get(2));
-		// A lost worker can still be alive and generating, as one lost at a failed metrics fetch.
-		assertEquals(List.of(STOP_AT_ONCE_THREAD), threadPrefixes(1), "the lost slice is stopped at once too: " + stoppedBy.get(1));
 		assertEquals(List.of(STOP_AT_ONCE_THREAD), threadPrefixes(0), "the entry's own slice is stopped at once: " + stoppedBy.get(0));
+		// A lost worker can still be alive and generating, as one lost at a failed metrics fetch: its one
+		// close, from a thread of its own, stops it first.
+		awaitClose(1);
+		assertEquals(List.of(), stoppedBy.get(1), "the lost slice gets no stop");
+		assertEquals(1, closedBy.get(1).size(), "the lost slice gets one close: " + closedBy.get(1));
+		assertTrue(closedBy.get(1).getFirst().startsWith(LOST_CLOSE_THREAD), closedBy.get(1).toString());
 
 		// The close's stop runs the step's stop again: a slice stopped at once still gets no second stop.
 		client.doStop();
 		assertEquals(1, stoppedBy.get(2).size(), "one stop of the slice stopped at once: " + stoppedBy.get(2));
 		assertEquals(1, stoppedBy.get(0).size(), "one stop of the entry's own slice: " + stoppedBy.get(0));
-		assertEquals(1, stoppedBy.get(1).size(), "one stop of the lost slice: " + stoppedBy.get(1));
+		assertEquals(List.of(), stoppedBy.get(1), "still no stop of the lost slice");
+	}
+
+	@Test
+	void aLostSliceGetsItsOneCloseAndNoOtherCallAfterItsLoss() throws Exception {
+		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
+
+		awaitFailing(client);
+		awaitClose(1);
+		client.doStop();
+		client.doShutdown();
+
+		// Every call to the lost slice after the await that lost it: only its one close, and no remote
+		// loadStepId for a log context.
+		final List<String> afterLoss = new ArrayList<>();
+		var lostSeen = false;
+		for (final var invocation : mockingDetails(slices.get(1)).getInvocations()) {
+			final String name = invocation.getMethod().getName();
+			if (lostSeen && !"toString".equals(name)) {
+				afterLoss.add(name);
+			}
+			lostSeen |= "await".equals(name);
+		}
+		assertEquals(List.of("close"), afterLoss, "the calls after the loss");
 	}
 
 	@Test
@@ -96,21 +132,6 @@ class LostSliceStopAtOnceTest {
 		// The close's stop runs the step's stop again: no further stop.
 		client.doStop();
 		assertEquals(1, stoppedBy.get(2).size(), "still one stop: " + stoppedBy.get(2));
-	}
-
-	@Test
-	void aLostSliceWhoseStopAtOnceFailedBeforeItWasSentGetsNoSecondStop() throws Exception {
-		// The lost worker's loadStepId times out on its stop at once's thread, so that stop is never sent:
-		// the step's stop sends a second stop only to a slice that is not lost, as a lost one's would fail.
-		failLoadStepIdAtOnceSlice = 1;
-		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
-
-		awaitFailing(client);
-		client.doStop();
-
-		assertEquals(List.of(), stoppedBy.get(1), "the lost slice gets no stop after its unsent stop at once");
-		assertEquals(1, stoppedBy.get(2).size(), "the reachable worker still gets one stop: " + stoppedBy.get(2));
-		assertEquals(1, stoppedBy.get(0).size(), "the entry's own slice still gets one stop: " + stoppedBy.get(0));
 	}
 
 	@Test
@@ -204,6 +225,15 @@ class LostSliceStopAtOnceTest {
 		});
 	}
 
+	private void awaitClose(final int slice) throws InterruptedException {
+		final long deadline = System.nanoTime() + BOUND.toNanos();
+		while (closedBy.get(slice).isEmpty() && System.nanoTime() < deadline) {
+			Thread.sleep(5);
+		}
+		// Room for a second, wrong, close to arrive.
+		Thread.sleep(100);
+	}
+
 	private List<String> threadPrefixes(final int slice) {
 		synchronized (stoppedBy.get(slice)) {
 			return stoppedBy.get(slice).stream()
@@ -220,7 +250,6 @@ class LostSliceStopAtOnceTest {
 	private TestLoadStepClient client(final Config config, final long slowStopMillis, final boolean timingOut)
 					throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), mock(MetricsManager.class));
-		final List<LoadStep> slices = new ArrayList<>();
 		final CountDownLatch slice2StopBegun = new CountDownLatch(1);
 		final CountDownLatch slice2StopEnded = new CountDownLatch(1);
 		for (var i = 0; i < 3; i++) {
@@ -285,6 +314,10 @@ class LostSliceStopAtOnceTest {
 				}
 				return slice;
 			}).when(slice).stop();
+			doAnswer(invocation -> {
+				closedBy.get(index).add(Thread.currentThread().getName());
+				return null;
+			}).when(slice).close();
 			slices.add(slice);
 		}
 		set(client, "stepSlices", slices);

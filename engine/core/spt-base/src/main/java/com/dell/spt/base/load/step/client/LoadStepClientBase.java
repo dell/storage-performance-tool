@@ -117,6 +117,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -173,6 +174,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private IdentityHashMap<LoadStep, Thread> stopsAtOnce;
 	/** The slices whose stop at once ended without the stop being sent. Guarded by lostSliceLock. */
 	private Set<LoadStep> unsentStopsAtOnce;
+	/**
+	 * The one close each lost slice gets, by slice, sent from a thread of its own as the slice is
+	 * lost; see {@link #closeLostSliceOnce}. Guarded by lostSliceLock.
+	 */
+	private IdentityHashMap<LoadStep, LostSliceClose> lostSliceCloses;
+	/**
+	 * The slice index of each lost slice, which its node's file manager reads to stop calling the
+	 * worker; kept until the step's next start, as the step's close collects files after it has let
+	 * go of its slices.
+	 */
+	private final Set<Integer> lostNodeIndexes = ConcurrentHashMap.newKeySet();
 	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
@@ -719,6 +731,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void initFileManagers(final List<String> nodeAddrs, final List<FileManager> fileMgrsDst) {
+		lostNodeIndexes.clear();
 		// local file manager
 		fileMgrsDst.add(FileManager.INSTANCE);
 		// remote file managers
@@ -733,7 +746,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								"Failed to resolve the file manager service @ " + nodeAddr
 												+ ". Ensure the remote node is running with --run-node");
 			}
-			fileMgrsDst.add(fileMgr);
+			// A lost slice's node gets no further file call: its files are not collected.
+			final int sliceIndex = fileMgrsDst.size();
+			fileMgrsDst.add(LostNodeFileManager.guard(fileMgr, () -> lostNodeIndexes.contains(sliceIndex)));
 		}
 	}
 
@@ -1425,9 +1440,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * the await of an ordinary distributed step the first loss stops the whole step at once: every
 	 * started slice, the entry's own and the lost ones included, is stopped there and then, each from a
 	 * thread of its own, since a worker's await answers only once its stop has drained, and the
-	 * entry's own slice may be draining inside its await. A lost worker may still be alive and
-	 * generating, and a stop to a dead one fails at once. The await's stop then waits for those stops
+	 * entry's own slice may be draining inside its await. The await's stop then waits for those stops
 	 * and fails. A slice whose contact comes back stays lost. Each slice is recorded and logged once.
+	 * <p>Once a slice is lost the entry stops calling it, as a frozen worker would hold each call for
+	 * its connection's handshake: the slice gets no stop, shutdown, await poll, metrics fetch or file
+	 * call, and no remote {@code loadStepId()} for a log context. It gets one close instead, at once,
+	 * since a lost worker may still be alive and generating, and its worker stops on that close; see
+	 * {@link #closeLostSliceOnce}. A slice lost at its close gets no other one. A standalone DELETE
+	 * keeps its own coordination of its slices' stops and closes, and its slices get them as before.
 	 *
 	 * @return whether the slice is a lost one, now or before; false for a slice that never started,
 	 *     whose failure to start already ends the step, and for the entry's own slice
@@ -1445,6 +1465,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				return true;
 			}
 			sliceLost = true;
+			lostNodeIndexes.add(index);
 			final var sliceCount = stepSlices.size();
 			Loggers.ERR.error(
 							"{}: lost the step slice on node {} at its {} ({}); the step's totals can leave out all of that node's operations, so the step fails",
@@ -1464,6 +1485,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} else {
 				lostSliceFailure.addSuppressed(failure);
 			}
+			if (!"close".equals(call) && !standaloneDeleteEnabled()) {
+				closeLostSliceOnce(slice, index);
+			}
 			if (lostSliceStopsAtOnce && stopsAtOnce == null) {
 				stopsAtOnce = stopStartedSlicesAtOnce();
 			}
@@ -1472,12 +1496,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
-	 * Stops every started slice, the entry's own and the lost ones included, each from a thread of
+	 * Stops every started slice that is not lost, the entry's own included, each from a thread of
 	 * its own, so that no engine goes on generating load while another one's stop drains: a worker's
 	 * await, which the entry's poll of it is in, waits for that worker's stop, and the entry's own
-	 * slice may drain inside its await. A lost worker can still be alive, as one lost at a failed
-	 * metrics fetch; the stop of a dead one fails at once and logs nothing more. Called holding
-	 * lostSliceLock, at the first loss in the await, so the entry's own slice has started.
+	 * slice may drain inside its await. A lost slice has its close instead, which stops it first.
+	 * Called holding lostSliceLock, at the first loss in the await, so the entry's own slice has
+	 * started.
 	 *
 	 * @return the thread of each slice's stop, by slice
 	 */
@@ -1486,8 +1510,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		var remoteStops = 0;
 		for (var i = 0; i < startedSliceCount && i < stepSlices.size(); i++) {
 			final var slice = stepSlices.get(i);
-			if (slice != null) {
-				if (i > 0 && !lostSlices.contains(slice)) {
+			if (slice != null && !lostSlices.contains(slice)) {
+				if (i > 0) {
 					remoteStops++;
 				}
 				stops.put(slice, Thread.ofPlatform()
@@ -1505,6 +1529,85 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		stops.values().forEach(Thread::start);
 		return stops;
+	}
+
+	/** A lost slice's one close: its thread, and when the step's close stops waiting for it. */
+	private record LostSliceClose(Thread thread, long deadlineNanos) {}
+
+	/**
+	 * Sends a lost slice its one close, at once, from a virtual thread of its own: a worker that is
+	 * still alive stops and closes its slice on it, and an interrupt ends the call where the worker
+	 * does not answer. The step's close waits for it until {@link #lostSliceCloseBoundNanos} after
+	 * it began, and then interrupts it. The close is best effort: its failure is no new loss and
+	 * logs at DEBUG. A worker that never gets it, as one frozen until then, stops and closes the
+	 * slice itself 120 s after the entry's last call. Called holding lostSliceLock.
+	 */
+	private void closeLostSliceOnce(final LoadStep slice, final int index) {
+		if (lostSliceCloses == null) {
+			lostSliceCloses = new IdentityHashMap<>();
+		}
+		final long deadlineNanos = System.nanoTime() + lostSliceCloseBoundNanos();
+		final var stepId = loadStepId();
+		final var node = stepSliceNodeAddrs.get(index);
+		final Thread close = Thread.ofVirtual()
+						.name("spt-lost-slice-close-" + stepId + "-" + index)
+						.unstarted(() -> {
+							try (final var logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+								slice.close();
+								Loggers.MSG.debug("{}: closed the lost step slice on node {}", stepId, node);
+							} catch (final Exception e) {
+								LogUtil.trace(Loggers.ERR, Level.DEBUG, e, "{}: the close of the lost step slice on node {} failed",
+												stepId, node);
+							}
+						});
+		lostSliceCloses.put(slice, new LostSliceClose(close, deadlineNanos));
+		close.start();
+	}
+
+	/**
+	 * How long a lost slice's one close may take: the RMI response timeout when it is set above 0,
+	 * otherwise 10 s, the shipped one.
+	 */
+	static long lostSliceCloseBoundNanos() {
+		final long responseTimeoutMillis = Long.getLong("sun.rmi.transport.tcp.responseTimeout", 0);
+		return TimeUnit.MILLISECONDS.toNanos(responseTimeoutMillis > 0 ? responseTimeoutMillis : 10_000);
+	}
+
+	/**
+	 * Waits for a lost slice's one close until its deadline, then interrupts it, so that the step's
+	 * close goes on: the worker, if it ever gets the close, or else its own 120 s watchdog, closes
+	 * the slice.
+	 */
+	private void awaitLostSliceClose(final LoadStep slice) {
+		final LostSliceClose close;
+		synchronized (lostSliceLock) {
+			close = lostSliceCloses == null ? null : lostSliceCloses.remove(slice);
+		}
+		if (close == null) {
+			return;
+		}
+		final long remainingNanos = close.deadlineNanos() - System.nanoTime();
+		try {
+			if (remainingNanos > 0) {
+				close.thread().join(Duration.ofNanos(remainingNanos));
+			}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		if (close.thread().isAlive()) {
+			close.thread().interrupt();
+			Loggers.MSG.info(
+							"{}: the lost step slice \"{}\" did not answer its close in time; its worker stops and closes it itself 120 s after the entry's last call",
+							loadStepId(), slice);
+		}
+	}
+
+	/**
+	 * Whether the entry makes no further call to the slice: it is lost, and the step is not a
+	 * standalone DELETE, which coordinates its slices' stops and closes itself.
+	 */
+	private boolean callsNoMore(final LoadStep slice) {
+		return !standaloneDeleteEnabled() && isLostSlice(slice);
 	}
 
 	/** Stops the slice at once, and records a stop that ended before it was sent. */
@@ -1593,7 +1696,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * the worker still working inside the call, as a pipeline stage that drains its operations in
 	 * flight when it ends does, for up to {@code load.op.wait.limit}: as in 5.17.0 the entry stops
 	 * awaiting that slice and goes on to its normal stop and close of it, where a worker that has
-	 * died or hung is still lost. Unlike 5.17.0, it logs a warning, except for a slice the step has
+	 * died or hung is still lost, unless a {@linkplain #recordLostSliceAtMetricsFetch metrics fetch}
+	 * has lost it first. Unlike 5.17.0, it logs a warning, except for a slice the step has
 	 * already stopped at once: its await waits for that stop, whose own warning names a slow drain.
 	 */
 	private void recordLostSliceAtAwait(final LoadStep slice, final RemoteException cause) {
@@ -1621,17 +1725,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
-	 * A metrics fetch from a slice that failed in RMI loses it under the await's rule: every failure
-	 * but a {@linkplain #isResponseReadTimeout response timeout}. The entry's metrics fetch each
-	 * aggregation period reaches every slice, so this also finds a lost slice whose await already
-	 * answered done, as a worker that stops its own slice at its exit does, and a slice that no await
-	 * poller has reached. Only until the step stops: a fetch still in flight when its slice closes
-	 * at the normal end fails, and is no loss.
+	 * A metrics fetch from a slice that failed in RMI loses it, whatever the failure, a
+	 * {@linkplain #isResponseReadTimeout response timeout} included, unlike the await: a healthy
+	 * worker answers the fetch also while its slice drains, inside its stop or inside its await, so
+	 * a fetch that gets no answer is a worker that has stopped answering, as a frozen one. The
+	 * entry's metrics fetch each aggregation period reaches every slice, so this also finds a lost
+	 * slice whose await already answered done, as a worker that stops its own slice at its exit
+	 * does, a slice that no await poller has reached, and a frozen worker whose await read timed
+	 * out. Only until the step stops: a fetch still in flight when its slice closes at the normal
+	 * end fails, and is no loss.
 	 *
 	 * @return whether the slice is a lost one, so it gets no further fetch
 	 */
 	private boolean recordLostSliceAtMetricsFetch(final LoadStep slice, final RemoteException cause) {
-		if (!metricsFetchLosesSlices || isResponseReadTimeout(cause)) {
+		if (!metricsFetchLosesSlices) {
 			return false;
 		}
 		return recordLostSlice(slice, "metrics fetch", cause);
@@ -2200,6 +2307,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					if (slice == null) {
 						throw new IllegalStateException("this node's step slice never started");
 					}
+					if (isLostSlice(slice)) {
+						throw new IllegalStateException("the entry lost this node's step slice");
+					}
 					return slice.bucketMetrics(BucketMetricsRange.ALL);
 				});
 			}
@@ -2294,7 +2404,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			coordinateDurationStop();
 			return;
 		}
-		stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
+		// A lost slice has had its one close.
+		stepSlices.stream().filter(s -> s != null && !isLostSlice(s)).parallel().forEach(stepSlice -> {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
 			} catch (final RemoteException e) {
@@ -3351,8 +3462,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		super.doStop();
 	}
 
-	/** @return whether the stop was sent, whatever its outcome */
+	/**
+	 * Stops a slice, unless it is lost: a lost slice has its one close instead, which stops it, and
+	 * gets no remote {@code loadStepId()} for the log context either.
+	 *
+	 * @return whether the stop was sent, whatever its outcome; true for a lost slice, which needs none
+	 */
 	private boolean stopSlice(final LoadStep stepSlice) {
+		if (callsNoMore(stepSlice)) {
+			return true;
+		}
 		var stopSent = false;
 		try (
 						final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
@@ -3596,6 +3715,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} else if (!durationMode) {
 				for (final var stepSlice : stepSlices) {
 					if (stepSlice == null) {
+						continue;
+					}
+					if (callsNoMore(stepSlice)) {
+						// Its one close was sent as it was lost.
+						awaitLostSliceClose(stepSlice);
 						continue;
 					}
 					try {
