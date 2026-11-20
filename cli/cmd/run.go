@@ -42,6 +42,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
+	"github.com/dell/storage-performance-tool/cli/internal/terminal"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
@@ -91,6 +92,10 @@ const (
 // resolvePortConflictFunc is a test seam for port conflict resolution.
 // In production it points to portcheck.ResolvePortConflict; tests can override.
 var resolvePortConflictFunc = portcheck.ResolvePortConflict
+
+// portConflictStdinIsTerminal is a test seam: whether an operator can answer
+// the port-conflict prompt on stdin.
+var portConflictStdinIsTerminal = terminal.StdinIsTerminal
 
 // validateRunWorkloadTypeFunc keeps command-path tests behind the same workload gate as
 // production while allowing prerelease workload slices to exercise later safety seams.
@@ -2186,10 +2191,14 @@ func validateDistinctEnginePorts(apiPort, registryPort int) error {
 		flagAPIPort, flagRMIRegistryPort, apiPort)
 }
 
-// checkPortConflicts checks for and resolves port conflicts before launching Spt
-func checkPortConflicts(cmd *cobra.Command) error {
+// checkPortConflicts checks for and resolves port conflicts before launching
+// Spt. headless is the command's effective headless mode: with it, or without
+// a terminal on stdin, nobody is asked, and a conflict is left alone unless
+// --force is set.
+func checkPortConflicts(cmd *cobra.Command, headless bool) error {
 	// Get force mode setting
 	forceMode, _ := cmd.Flags().GetBool("force")
+	interactive := !headless && portConflictStdinIsTerminal()
 
 	// Get API port
 	sptPort := getAPIPort(cmd)
@@ -2197,11 +2206,13 @@ func checkPortConflicts(cmd *cobra.Command) error {
 	logger := logging.GetLogger()
 	logger.Debug("Checking for port conflicts before launching Spt",
 		"port", sptPort,
-		"force_mode", forceMode)
+		"force_mode", forceMode,
+		"interactive", interactive)
 
 	// The resolver bounds each phase itself, so time at its prompt uses no budget.
 	// The command context lets Ctrl-C end a wait for an engine to shut down.
-	result, err := resolvePortConflictFunc(commandContext(cmd), sptPort, forceMode)
+	result, err := resolvePortConflictFunc(commandContext(cmd), sptPort,
+		portcheck.ResolveOptions{Force: forceMode, Interactive: interactive})
 	// Ctrl-C during detection or at the prompt is reported as an interruption.
 	if err != nil && result != nil && result.Message != "" &&
 		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
@@ -2455,11 +2466,15 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			"attach_existing", attachExisting)
 		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
 
+		// The port check asks an operator only outside headless mode, so the
+		// mode is settled before it.
+		headlessMode := shouldRunHeadlessForRun(cmd)
+
 		// The local single-host runner owns Docker on the controller, so it
 		// needs the controller port check. Remote and multi-host runs perform
 		// port preflight on each configured Docker host instead.
 		if !useMultiHostOrchestrator {
-			if err := checkPortConflicts(cmd); err != nil {
+			if err := checkPortConflicts(cmd, headlessMode); err != nil {
 				return err
 			}
 		}
@@ -2535,8 +2550,6 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 				}, nil
 			}
 		}
-
-		headlessMode := shouldRunHeadlessForRun(cmd)
 
 		var summaryWriter *summaryMessageWriter
 		var setSummarySink func(func(string))
