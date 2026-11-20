@@ -28,9 +28,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.Appender;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.config.Configurator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -157,6 +159,8 @@ class LoadStepContextSizeLimitWarningTest {
 			}
 			return null;
 		}).when(appender).append(any());
+		final Level previousLevel = logger.getLevel();
+		Configurator.setLevel(logger.getName(), Level.WARN);
 		logger.addAppender(appender);
 		try {
 			final var context = new LoadStepContextImpl<>(
@@ -167,6 +171,7 @@ class LoadStepContextSizeLimitWarningTest {
 			assertTrue(fence.await(5, TimeUnit.SECONDS), "log fence not seen");
 		} finally {
 			logger.removeAppender(appender);
+			Configurator.setLevel(logger.getName(), previousLevel);
 		}
 		synchronized (warnings) {
 			return List.copyOf(warnings);
