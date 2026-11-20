@@ -54,7 +54,7 @@ public class ItemTimingMetricsFileOutput<I extends Item, O extends Operation> im
 			ioResult = ioResults.get(i);
 			if (ioResult == null) { // poison. Basically a flag that indicates finish of ingest.
 				try {
-					return itemInfoOutput.put(itemsInfo, 0, i);
+					return itemInfoOutput.put(itemsInfo, 0, itemsInfo.size());
 				} finally {
 					try {
 						close();

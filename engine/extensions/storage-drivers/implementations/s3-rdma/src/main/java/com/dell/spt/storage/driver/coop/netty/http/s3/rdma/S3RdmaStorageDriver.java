@@ -392,6 +392,28 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	/** The constructor's own {@code finally} has closed the transport if its setup failed. */
+	@Override
+	protected void releaseAfterFailedConstruction() {
+		try {
+			if (rdmaReaper != null) {
+				rdmaReaper.shutdownNow();
+				if (!awaitReaper()) {
+					Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
+				}
+			}
+			if (payloadCopier != null && !payloadCopier.shutdown()) {
+				Loggers.MSG.warn("{}: RDMA payload copy did not stop within {} ms", stepId,
+								RdmaPayloadCopier.CLOSE_WAIT_MILLIS);
+			}
+			if (bufferPool != null) {
+				bufferPool.close();
+			}
+		} finally {
+			super.releaseAfterFailedConstruction();
+		}
+	}
+
 	private ScheduledExecutorService startReaper() {
 		final ScheduledExecutorService reaper = Executors.newSingleThreadScheduledExecutor(r -> {
 			final Thread t = new Thread(r, stepId + "-rdma-reaper");
@@ -657,6 +679,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
+				// The copy starts at the item's current position: see the comment at route.sendRdma below.
 				payloadStart = ((DataItem) item).position();
 				try {
 					nic.copier.copy((DataItem) item, buf, size);
@@ -695,6 +718,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
+			// A PUT refused here after its copy (a refused default-route submit, a cancelled NIC lane) is
+			// not rewound: its item keeps the advanced position until the operation's reset() or a new
+			// item offset sets it to 0. A route that could prepare it again must reset the position first
+			// (none found so far).
 			return route.sendRdma(op, ctx);
 
 		} catch (final RdmaPayloadCopier.StoppedException e) {

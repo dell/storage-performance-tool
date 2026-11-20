@@ -391,6 +391,9 @@ public interface FileIoHelper {
 									countBytesDone);
 				}
 				dstChannel.position(rangeOffset(currRangeIdx) + countBytesDone);
+				// A current-layer range slice is rebuilt at position 0 on each call, and a write stops at the
+				// end of the data ring, so go on from where the last call stopped in this range.
+				updatingRange.position(countBytesDone);
 				countBytesDone += updatingRange.writeToFileChannel(dstChannel, updatingRangeSize - countBytesDone);
 				if (Loggers.MSG.isTraceEnabled()) {
 					Loggers.MSG.trace("{}: {} bytes written totally", fileItem.name(), countBytesDone);

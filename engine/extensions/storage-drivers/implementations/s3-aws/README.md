@@ -20,17 +20,17 @@ The driver uses `S3AsyncClient.crtBuilder()` with aws-crt-java bindings, which p
 
 The CRT client is configured with the following performance parameters:
 
-- `targetThroughputInGbps: 20.0` - Target network throughput (adjust based on network capacity)
-- `minimumPartSizeInBytes: 8 MB` - Minimum part size for multipart uploads
+- `storage.crt.targetThroughputGbps: 20.0` - Target network throughput (adjust based on network capacity)
+- `storage.crt.minimumPartSizeBytes: 16777216` (16 MiB) - Minimum part size for multipart uploads
 
-These parameters can be adjusted in `S3AwsStorageDriverFactory.java` to match your network infrastructure.
+Both are configuration settings and can be set like any other to match your network infrastructure.
 
 ## Integration
 
 ### AWS SDK Version
 
-- **Version:** 2.42.28
-- **CRT Version:** 0.44.0
+- **Version:** 2.57.11
+- **CRT Version:** 0.50.0
 - **Compatibility:** Compatible with Amazon S3 and S3-compatible services (MinIO, SeaweedFS, Ceph, etc.)
 
 ### Dependencies
@@ -69,7 +69,7 @@ Standalone targets with a version ID use exact-version deletion; targets without
 ordinary current-key semantics, including delete-marker behavior on versioned buckets. The SDK
 response is reconciled by key and version before the logical request completes, so partial and
 malformed batch responses cannot be reported as full success. SDK-managed retries remain inside
-the single logical request future and timing sample.
+the single logical request future and timing sample (see [Client Retries](#client-retries)).
 
 The standalone DELETE timing client records native CRT HTTP-stream `send-start` and `receive-start`
 timestamps for both header-only `DeleteObject` and body-bearing `DeleteObjects`. The SDK wrapper
@@ -91,6 +91,35 @@ that succeeded still count toward the byte total, of a read that fails, of a rea
 whole, and of a read left `unresolved` because a time limit stopped it with a part unsent. A split
 read ignores a requested version ID, as on `s3`: each part reads the current
 object. Through 5.17.0 the driver failed such a read without a request.
+
+### Requests the Client Adds
+
+The AWS CRT client sends requests and bytes that SPT does not report, so the target sees more from
+`s3-aws` than SPT counts, and more than it sees from the Netty `s3` driver for the same workload:
+
+- **A HEAD before each whole-object GET.** The client validates response checksums by default. A
+  READ of a whole object is a HEAD with `x-amz-checksum-mode: enabled`, then a ranged GET
+  (`Range: bytes=0-<size - 1>`, answered 206) with `x-amz-checksum-mode` and `If-Match` set to the
+  HEAD's ETag. A GET that already carries a range has no HEAD, so each part of a
+  [split read](#reads-split-by-the-part-size) is one request. A READ of an exact version ID goes
+  through the ordinary SDK client and has no HEAD.
+- **A HEAD before each copy.** The client looks up the copy source with a HEAD before it sends the
+  copy. No client option removes it.
+- **A CRC trailer on each PUT.** The client sends a PUT body with `aws-chunked` framing and a
+  checksum trailer, even with `checksumEnabled` off (the default): 45 bytes more per one-part object.
+
+Neither HEAD counts as an SPT operation, but the HEAD before a GET is part of that GET's reported
+latency. Compare `s3-aws` GET latency with `s3` with the extra round trip in mind.
+
+Measured on SPT 5.17.0 (AWS SDK 2.57.11, CRT 0.50.0) against a loopback fake S3 target, not a real
+one:
+
+- 20 READs reached the target as 20 HEADs and 20 ranged GETs on `s3-aws`, and as 20 plain GETs on
+  `s3`. 20 copies reached it as 20 HEADs and 20 copies.
+- With the fake delaying each HEAD by 20 ms, 200 READs of 64 KiB objects at concurrency 1: the
+  `s3-aws` READ p50 latency went from 3.0 ms to 26.4 ms; the `s3` READ p50 went from about 0.4 ms to
+  0.5 ms.
+- PUTs carried 45 bytes more per one-part object.
 
 ### UPDATE
 
@@ -234,7 +263,32 @@ All methods throw `IOException` with detailed error messages. Common error scena
 - Network connectivity issues
 - Bucket/object not found
 - Permission denied
-- Service throttling
+- Service throttling (see [Client Retries](#client-retries))
+
+### Client Retries
+
+The AWS clients retry a 5xx answer themselves, before SPT sees the result. The driver builds its CRT
+transfer client with no retry configuration, so the SDK's default retries apply to every request
+type it sends: PUT, multipart part, GET, HEAD, DELETE and copy. The ordinary SDK client, which
+sends standalone DELETE requests and requests for an exact version ID, retries too.
+
+Measured with AWS SDK 2.57.11 and CRT 0.50.0, the versions SPT 5.17.0 ships, against a loopback
+fake S3 target:
+
+- A CRT client request answered 500, 503 or 504 every time reached the target up to 6 times before
+  SPT saw one failure.
+- That holds while the client's retry budget lasts, about 100 retries per client. Of 60 concurrent
+  PUTs answered 503 on one client, the earliest reached the target up to 6 times each; once the
+  budget ran out, the last 38 reached it once each.
+- An ordinary SDK client call answered with a 5xx every time reached the target 4 times.
+- A transient 5xx shows as a slower success. A PUT answered 503 once and then 200 was a success on
+  `s3-aws`, after 2 requests at the target and 545 ms; on `s3` it was one failure after 1 request.
+- A 502 answer was not measured.
+
+SPT's own retries (`load.op.retry`, off by default) multiply these: each retry SPT sends goes
+through the client's retries again. The target therefore receives more requests than SPT reports,
+and on a throttling target `s3-aws` reports fewer failures than `s3` and counts the client's
+back-off as latency. Compare `s3-aws` with `s3` only on a target that does not throttle.
 
 ## Testing
 

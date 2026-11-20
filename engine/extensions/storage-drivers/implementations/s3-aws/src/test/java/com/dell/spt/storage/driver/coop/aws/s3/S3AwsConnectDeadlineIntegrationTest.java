@@ -3,18 +3,13 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.data.DataInput;
-import com.dell.spt.base.item.IntegrityManifestDataItem;
-import com.dell.spt.base.item.Item;
-import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
-import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
-import com.github.akurilov.commons.system.SizeInBytes;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse.Kind;
 import com.github.akurilov.confuse.Config;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -130,33 +125,29 @@ final class S3AwsConnectDeadlineIntegrationTest {
 		}
 	}
 
+	/**
+	 * The first request an s3-aws run makes is the target-bucket check, which runs before any load
+	 * step slice starts, through the control client the factory opens. It is an ordinary SDK client,
+	 * so it has the SDK budget: without the connection timeout the check would take about eight
+	 * seconds, and the driver's own wait for it ends only after the request timeout of minutes.
+	 */
 	@Test
-	void theDriverEndsItsFirstRequestToAnUnreachableServerAsAFailure(@TempDir final Path home) throws Exception {
+	void theFirstRequestOfARunToAnUnreachableServerEndsAsATimeout(@TempDir final Path home) throws Exception {
 		server.refuseNewConnections();
-		final var op = new DataOperationImpl<IntegrityManifestDataItem>(
-						0, OpType.STAT, new IntegrityManifestDataItem("bucket", "key", 0, null), null, "/bucket", CREDENTIAL, null, 0);
-
-		try (final S3AwsStorageDriver<IntegrityManifestDataItem, DataOperationImpl<IntegrityManifestDataItem>> driver = driver(home)) {
-			driver.start();
-			final long start = System.nanoTime();
-			final var failed = assertThrows(RuntimeException.class, () -> driver.put(op));
-			final Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
-
-			assertTrue(S3AwsClientTimeouts.isSocketTimeout(failed), failed.toString());
-			assertTrue(elapsed.compareTo(TRANSFER_BUDGET) < 0, "took " + elapsed);
-		}
-	}
-
-	@SuppressWarnings("unchecked")
-	private <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(final Path home) throws Exception {
 		final Config storage = S3AwsMergedConfig.create(
 						home, server.port(), Map.of("storage-crt-connectionTimeoutMs", CONNECTION_TIMEOUT_MS)).configVal("storage");
-		return (S3AwsStorageDriver<I, O>) new S3AwsStorageDriverFactory<I, O>().create(
-						"connect-deadline",
-						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
-						storage,
-						false,
-						16);
+
+		try (final TargetBucketControl control = new S3AwsStorageDriverFactory<>().openTargetBucketControl("connect-deadline", storage)) {
+			final long start = System.nanoTime();
+			final TargetBucketResponse checked = control.check("bucket", CREDENTIAL);
+			final Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
+
+			assertEquals(Kind.FAILED, checked.kind(), checked.toString());
+			// "timed out" is the client's own timeout; the driver's wait would end "timed out after ... ms".
+			assertEquals("timed out", checked.detail(), checked.toString());
+			assertTrue(elapsed.compareTo(SDK_BUDGET) < 0, "took " + elapsed + ", budget " + SDK_BUDGET);
+			assertEquals(0, server.connections(), "no connection may have been accepted");
+		}
 	}
 
 	/** The failure a request ends with, and how long it took. */

@@ -2199,12 +2199,14 @@ func checkPortConflicts(cmd *cobra.Command) error {
 		"port", sptPort,
 		"force_mode", forceMode)
 
-	// Create context with reasonable timeout for port checking
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Perform port conflict resolution
-	result, err := resolvePortConflictFunc(ctx, sptPort, forceMode)
+	// The resolver bounds each phase itself, so time at its prompt uses no budget.
+	// The command context lets Ctrl-C end a wait for an engine to shut down.
+	result, err := resolvePortConflictFunc(commandContext(cmd), sptPort, forceMode)
+	// Ctrl-C during detection or at the prompt is reported as an interruption.
+	if err != nil && result != nil && result.Message != "" &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return errors.New(result.Message)
+	}
 	if err != nil {
 		logger.Error("Port conflict resolution failed", "error", err.Error())
 		return fmt.Errorf("failed to resolve port conflict on %s: %w", sptPort, err)
@@ -2214,11 +2216,19 @@ func checkPortConflicts(cmd *cobra.Command) error {
 	if !result.Success {
 		switch result.Strategy {
 		case portcheck.StrategyAbort:
+			if errors.Is(result.Error, portcheck.ErrPortConflictUnattended) {
+				logger.Info("Port conflict left unresolved without an operator decision", "port", sptPort)
+				return errors.New(result.Message)
+			}
 			logger.Info("User chose to abort due to port conflict")
 			fmt.Printf("\n❌ Operation cancelled - port %s conflict not resolved\n", sptPort)
 			return fmt.Errorf("operation cancelled by user")
 
 		case portcheck.StrategyRetry:
+			// An interrupted recheck shows nothing about the port.
+			if errors.Is(result.Error, context.Canceled) || errors.Is(result.Error, context.DeadlineExceeded) {
+				return errors.New(result.Message)
+			}
 			// For retry failures, show retry information
 			if result.RetryAfter > 0 {
 				fmt.Printf("\n⏳ Port %s still in use - you may retry after resolving the conflict\n", sptPort)
@@ -3353,8 +3363,8 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 	} else if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete &&
 		params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeReadVerify &&
-		params.WorkloadType != WorkloadTypeTables {
-		params.ObjectSize = "1MB"
+		params.WorkloadType != WorkloadTypeTables && !readsFromItemsFile(params) {
+		params.ObjectSize = scenario.DefaultObjectSize
 	}
 
 	// Mixed workload distribution and seed file parameters
@@ -3621,6 +3631,13 @@ func resolvePrefixShardCount(cmd *cobra.Command, params scenario.Params) (int, e
 	return params.Threads * hostCount, nil
 }
 
+// readsFromItemsFile reports whether params select a read of the objects an items file lists. The
+// engine takes each object's size from the file, so such a run has no object size of its own
+// unless --object-size gives one.
+func readsFromItemsFile(params scenario.Params) bool {
+	return params.WorkloadType == WorkloadTypeRead && params.ItemsFile != ""
+}
+
 // formatScenarioParams formats scenario parameters for display
 func formatScenarioParams(params scenario.Params) string {
 	var lines []string
@@ -3645,6 +3662,8 @@ func formatScenarioParams(params scenario.Params) string {
 		(strings.TrimSpace(params.ItemsFile) != "" || params.DeleteExisting)) ||
 		params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
+	} else if params.ObjectSize == "" && readsFromItemsFile(params) {
+		lines = append(lines, "Object Size: (from items file)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
 	}
