@@ -1462,8 +1462,8 @@ class MixedLoadGeneratorTest {
 		final Operation read = held.stream().filter(op -> op.type() == OpType.READ).findFirst().orElseThrow();
 		final int count = gen.inFlightCount(OpType.READ);
 
-		// As before the step counted operations held unsent out at the stop: the step keeps that
-		// accounting on such a driver, whose every result retires an operation.
+		// As before, an operation held unsent is not counted out at the stop: an undeclared driver
+		// keeps the earlier accounting, in which every result retires an operation.
 		assertTrue(lifecycle.unattempted(read));
 		assertEquals(count, gen.inFlightCount(OpType.READ), "an unsent READ stays counted, as before");
 	}
