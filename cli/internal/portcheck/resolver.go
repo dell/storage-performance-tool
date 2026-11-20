@@ -429,7 +429,14 @@ func (r *ConflictResolver) executeForceResolution(ctx context.Context, info *Ser
 // engine's run could not be identified: nothing is removed.
 func (r *ConflictResolver) identityRefusalResult(graceful *ResolutionResult, info *ServiceInfo) *ResolutionResult {
 	advice := "stop the run yourself, then run the command again"
-	if info.Container != nil {
+	switch {
+	case isRedirectRefusal(graceful.Error) && info.Container != nil:
+		// A redirect is not the engine's answer: don't call the service an engine.
+		advice = fmt.Sprintf("if the container should go, remove it by name (docker rm -f %s), "+
+			"or use --api-port with --rmi-registry-port to run alongside it", info.Container.Name)
+	case isRedirectRefusal(graceful.Error):
+		advice = "use --api-port with --rmi-registry-port to run alongside the service on the port"
+	case info.Container != nil:
 		advice = fmt.Sprintf("stop the run yourself, or remove the engine's container by name (docker rm -f %s), "+
 			"then run the command again", info.Container.Name)
 	}
