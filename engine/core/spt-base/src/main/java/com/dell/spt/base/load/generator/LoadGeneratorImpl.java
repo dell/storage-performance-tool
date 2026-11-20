@@ -326,7 +326,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					} else { // recycle the tasks if any
 						n = 0;
 						O recycledOp;
-						final var limit = batchSize - pendingOpCount;
+						// A count limit caps the pull: everything pulled here is sent. Without one,
+						// read no counters.
+						final var limit = countLimit == Long.MAX_VALUE
+										? batchSize - pendingOpCount
+										: (int) Math.max(0, Math.min(batchSize - pendingOpCount, countLimit - generatedOpCount()));
 						// Spin-poll: try the lock-free queue, then spin-wait (PAUSE
 						// instruction, ~10ns) for up to ~1μs before falling back to
 						// parkNanos. This avoids the full futex/context-switch cost
@@ -625,6 +629,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	 * Leaves the weight cycle, so that the share left unused no longer holds back the other
 	 * generators, and runs the listener once, at the first of exhausted input and a reached count
 	 * limit.
+	 *
+	 * <p>Call this only once the generator can ask for no new operation: the cycle grants a retired
+	 * origin every permit it requests, on the understanding that only retries still ask.
 	 */
 	private void notifySchedulingEnd() {
 		if (weightCycle != null) {

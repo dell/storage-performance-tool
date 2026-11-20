@@ -205,6 +205,8 @@ Unless `GLIBC_TUNABLES` is set, even to empty, `run.sh` sets it to `glibc.malloc
 
 `run.sh` replaces itself with the JVM, so a signal sent to the `run.sh` process reaches the engine: after `./run.sh --run-node &`, `kill $!` stops the engine. The process then shows as `java ... spt.jar`; to find it, match `spt.jar`, not `run.sh`. `run.bat` runs `java` as its last command, so its exit code is the engine's.
 
+The engine writes its logs under `log/` in its working directory, unless `SPT_LOG_DIR` or `-Dspt.log.dir` names another directory. To run a node and an Entry Node on one host, start each from its own directory or give each its own `SPT_LOG_DIR`: two engines that share a log directory break each other's steps. See [One log directory per engine](core/spt-base/doc/deployment/README.md#one-log-directory-per-engine).
+
 ### IDE Integration
 
 For development in VS Code:
@@ -296,7 +298,7 @@ docker run --rm \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SPT_HOME` | (ephemeral temp dir) | Override the engine's app-home directory. Set this to a persistent path if you need to preserve extracted config/resources across runs. |
+| `SPT_HOME` | (ephemeral temp dir) | Override the engine's app-home directory, where the engine installs its defaults files and example scenarios. The engine replaces each installed file that differs from its own at every start, so edits there are not kept. The directory must be writable by the engine's user, unless it already holds this build's files: an engine that cannot replace a file from another build stops with exit 1 and names the file. |
 | `SPT_JAVA_OPTS` | (unset) | JVM options added after the image's defaults and `JAVA_OPTS`. When an option is given twice, the JVM uses the later one. |
 | `JAVA_OPTS` | (unset) | JVM options added after the image's defaults (see `entrypoint.sh`: ZGC, a 4 GiB heap, NUMA and NFS compatibility options), and before `SPT_JAVA_OPTS`. It doesn't replace the defaults: to pick another garbage collector, turn ZGC off first, `-XX:-UseZGC -XX:+UseG1GC`. The bundle's `run.sh` and `run.bat` don't read it. |
 | `GLIBC_TUNABLES` | `glibc.malloc.hugetlb=1` | Set by the image, for every engine, HTTP included, and for other programs in the image. Where the host's transparent huge pages mode is `madvise`, malloc asks for huge pages on its large mappings; with `always` or `never` it changes nothing. Setting it on a container replaces the whole value, so keep `glibc.malloc.hugetlb=1` in any value of your own. `spt run` doesn't forward it from the CLI's environment. Another `BASE_IMAGE` needs its own check, as glibc tunables aren't a stable interface. |
