@@ -702,7 +702,8 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!enabled) {
 			return true;
 		}
-		if (!transition(op, lifecycle(op), OperationLifecycleState.UNATTEMPTED)) {
+		final var lifecycle = lifecycle(op);
+		if (!transition(op, lifecycle, OperationLifecycleState.UNATTEMPTED)) {
 			return false;
 		}
 		final boolean heldInCustody = outstanding.remove(identityKey(op));
@@ -712,16 +713,19 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		}
 		if (heldInCustody) {
 			final var observer = unattemptedObserver;
-			if (observer != null && !isDriverCreated(op)) {
+			if (observer != null && !isDriverCreated(op, lifecycle)) {
 				observer.accept(op);
 			}
 		}
 		return true;
 	}
 
-	/** Whether {@code op}'s current pass entered custody through {@link #driverCreatedQueued}. */
-	private boolean isDriverCreated(final O op) {
-		final var lifecycle = lifecycle(op);
+	/**
+	 * Whether {@code op}'s current pass entered custody through {@link #driverCreatedQueued}. The
+	 * caller passes the lifecycle its own transition used, so a concurrent requeue that swaps in a new
+	 * lifecycle can't change the answer.
+	 */
+	private boolean isDriverCreated(final O op, final OperationLifecycle lifecycle) {
 		if (lifecycle.isTracked()) {
 			synchronized (lifecycle) {
 				return lifecycle.isDriverCreated();
