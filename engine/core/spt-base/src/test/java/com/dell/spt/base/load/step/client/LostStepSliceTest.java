@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -49,11 +50,14 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.server.RMIClientSocketFactory;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
@@ -91,6 +95,9 @@ class LostStepSliceTest {
 	private static final String STOP_WARNING = "failed to stop the step slice";
 	private static final String CLOSE_WARNING = "failed to close the step service";
 	private static final String AWAIT_WARNING = "did not answer its await within the RMI response timeout";
+	private static final String METRICS_FETCH = "metricsSnapshots";
+	/** How soon a step whose slice is lost must end: the ticket's 10 s, less the test's own setup. */
+	private static final long LOST_STEP_END_MILLIS = 10_000;
 
 	private final Config config = TestConfigBuilder.config();
 	private final MetricsManagerImpl entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
@@ -105,6 +112,16 @@ class LostStepSliceTest {
 	private final Map<String, Set<String>> slowOnceCalls = new ConcurrentHashMap<>();
 	/** The calls, by node address, that fail as RMI fails a connect that nothing listens for. */
 	private final Map<String, Set<String>> refusedCalls = new ConcurrentHashMap<>();
+	/** The nodes whose slice's await answers done, as a worker's await does once its exit hook stopped it. */
+	private final Set<String> doneAwaits = ConcurrentHashMap.newKeySet();
+	/** The nodes whose await has answered done. */
+	private final Set<String> answeredDone = ConcurrentHashMap.newKeySet();
+	/** The nodes whose metrics fetch is refused once their await answered done, as after the worker exited. */
+	private final Set<String> refusedFetchesAfterDone = ConcurrentHashMap.newKeySet();
+	/** The nodes whose metrics fetch has been tried after their slice was lost. */
+	private final Map<String, Integer> fetches = new ConcurrentHashMap<>();
+	/** The worker services by node address, so that a test can take a worker down. */
+	private final Map<String, List<AutoCloseable>> workerServices = new ConcurrentHashMap<>();
 	private final List<String> addrs = new ArrayList<>();
 	private String stepId;
 	private String originalRmiHostname;
@@ -420,6 +437,219 @@ class LostStepSliceTest {
 	}
 
 	@Test
+	@Timeout(60)
+	void aSliceThatAnsweredDoneAndThenRefusesItsMetricsFetchStopsAStepWithNoLimit() throws Exception {
+		unlimited();
+		final String lost = addrs.get(1);
+		// A worker's exit hook stops its slice, whose await then answers done, and the worker exits.
+		doneAwaits.add(lost);
+		refusedFetchesAfterDone.add(lost);
+
+		final long began = System.nanoTime();
+		final RunTerminalException failure = runFailing();
+		final long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began);
+
+		assertTrue(answeredDone.contains(lost), "its await answered done");
+		assertLostSliceFailure(failure, 3);
+		assertTrue(failure.getCause() instanceof ConnectException, String.valueOf(failure.getCause()));
+		assertTrue(tookMillis < LOST_STEP_END_MILLIS, "the step stops at once: " + tookMillis + " ms");
+		assertEquals(List.of(lost), lostNodes());
+		assertTrue(errors.messages().stream().anyMatch(message -> message.contains(LOST + lost + " at its metrics fetch (")),
+						errors.messages().toString());
+		final String other = addrs.get(0);
+		assertTrue(calls(other).containsAll(List.of("stop", "close")), "the other slice stops and closes: " + calls(other));
+	}
+
+	@Test
+	@Timeout(60)
+	void aReleasedSliceAtItsMetricsFetchStopsAStepWithNoLimitAndGetsNoFurtherFetch() throws Exception {
+		unlimited();
+		final String lost = addrs.get(0);
+		fault(lost, METRICS_FETCH, new NoSuchObjectException("injected: no such object in table"));
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 2);
+		assertTrue(failure.getCause() instanceof NoSuchObjectException, String.valueOf(failure.getCause()));
+		assertEquals(List.of(lost), lostNodes());
+		final int fetchesAfterTheStep = fetches.getOrDefault(lost, 0);
+		Thread.sleep(500);
+		assertEquals(fetchesAfterTheStep, fetches.getOrDefault(lost, 0), "no fetch after the step ended");
+		// The step's own metrics output and the aggregator each made at most the one fetch that lost it.
+		assertTrue(fetchesAfterTheStep <= 2, "a lost slice gets no further fetch: " + fetchesAfterTheStep);
+	}
+
+	@Test
+	@Timeout(60)
+	void aWorkerThatDiesDuringAMetricsFetchStopsAStepWithNoLimit() throws Exception {
+		unlimited();
+		final String lost = addrs.get(1);
+		// What RMI gives the caller when the worker's process ends during the call.
+		fault(lost, METRICS_FETCH, new UnmarshalException("Error unmarshaling return header", new EOFException()));
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 3);
+		assertEquals(List.of(lost), lostNodes());
+	}
+
+	@Test
+	void aMetricsFetchAnsweringAfterTheResponseTimeoutDoesNotLoseTheSlice() throws Exception {
+		final String slow = addrs.get(1);
+		slow(slow, METRICS_FETCH);
+		final LinearLoadStepClient client = newClient();
+
+		try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+			client.run();
+		}
+
+		assertNull(client.runFailure(), "a slow metrics fetch does not fail the step");
+		LogUtil.flushAll();
+		Thread.sleep(200);
+		assertEquals(List.of(), lostNodes());
+	}
+
+	@Test
+	@Timeout(60)
+	void aWorkerTakenDownMidStepStopsAStepWithNoLimitAndItsLossIsTheStepsFailure() throws Exception {
+		unlimited();
+		// A CREATE aggregates every node's operation.lifecycle.csv at the close.
+		config.val("load-op-type", "create");
+		config.val("item-data-size", "1KiB");
+		config.val("item-output-path", "/l56-lost-slice");
+		final String lost = addrs.get(1);
+		final LinearLoadStepClient client = newClient();
+		final long[] killedNanos = new long[1];
+		killedNanos[0] = System.nanoTime();
+		final Thread killer = Thread.ofPlatform().daemon(true).start(() -> {
+			try {
+				// Mid-step: after the slice's start has returned and the step has run a while.
+				while (!calls(lost).contains("await")) {
+					Thread.sleep(10);
+				}
+				Thread.sleep(500);
+				killedNanos[0] = System.nanoTime();
+				for (final AutoCloseable service : workerServices.get(lost)) {
+					service.close();
+				}
+			} catch (final Exception e) {
+				throw new IllegalStateException(e);
+			}
+		});
+
+		final RunTerminalException failure;
+		try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+			failure = assertThrows(RunTerminalException.class, client::run);
+		}
+		final long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - killedNanos[0]);
+		killer.join();
+		awaitLostNodes();
+
+		// The worker's missing files fail the close too, which must not replace the step's failure.
+		assertLostSliceFailure(failure, 3);
+		assertTrue(tookMillis < LOST_STEP_END_MILLIS, "the step stops at once: " + tookMillis + " ms after the worker went");
+		assertEquals(List.of(lost), lostNodes());
+		assertSame(failure, client.runFailure());
+		assertTrue(Arrays.stream(failure.getSuppressed()).anyMatch(suppressed -> suppressed instanceof RunTerminalException
+						&& suppressed.getMessage().startsWith("failed to aggregate ")),
+						"the close's failure follows the step's: " + Arrays.toString(failure.getSuppressed()));
+	}
+
+	@Test
+	@Timeout(60)
+	void aSliceLostAtItsAwaitStopsAStepWithNoLimit() throws Exception {
+		unlimited();
+		final String lost = addrs.get(0);
+		fault(lost, "await", new ConnectException("injected: worker unreachable"));
+
+		final long began = System.nanoTime();
+		final RunTerminalException failure = runFailing();
+		final long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began);
+
+		assertLostSliceFailure(failure, 2);
+		assertTrue(tookMillis < LOST_STEP_END_MILLIS, "the step stops at once: " + tookMillis + " ms");
+		final String other = addrs.get(1);
+		assertTrue(calls(other).containsAll(List.of("stop", "close")), "the other slice stops and closes: " + calls(other));
+	}
+
+	@Test
+	@Timeout(60)
+	void aWorkerTakenDownInATimeLimitedStepFailsItWithItsLossBeforeTheLimit() throws Exception {
+		config.val("load-op-limit-count", 0L);
+		config.val("load-step-limit-time", "8s");
+		config.val("load-op-type", "create");
+		config.val("item-data-size", "1KiB");
+		config.val("item-output-path", "/l56-lost-slice");
+		final String lost = addrs.get(0);
+		final LinearLoadStepClient client = newClient();
+		final long[] killedNanos = new long[1];
+		final Thread killer = takeDownAfterItsAwait(lost, killedNanos);
+
+		final RunTerminalException failure;
+		try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+			failure = assertThrows(RunTerminalException.class, client::run);
+		}
+		final long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - killedNanos[0]);
+		killer.join();
+		awaitLostNodes();
+
+		// The worker's missing files fail the close too, which must not replace the step's failure.
+		assertLostSliceFailure(failure, 2);
+		assertEquals(List.of(lost), lostNodes());
+		assertTrue(tookMillis < 5_000, "the step stops before its 8 s limit: " + tookMillis + " ms after the worker went");
+	}
+
+	private Thread takeDownAfterItsAwait(final String addr, final long[] killedNanos) {
+		return Thread.ofPlatform().daemon(true).start(() -> {
+			try {
+				while (!calls(addr).contains("await")) {
+					Thread.sleep(10);
+				}
+				Thread.sleep(500);
+				killedNanos[0] = System.nanoTime();
+				for (final AutoCloseable service : workerServices.get(addr)) {
+					service.close();
+				}
+			} catch (final Exception e) {
+				throw new IllegalStateException(e);
+			}
+		});
+	}
+
+	@Test
+	@Timeout(60)
+	void aSliceLostWhileNoPollerReachesItStillStopsAStepWithNoLimit() throws Exception {
+		unlimited();
+		final String lost = addrs.get(1);
+		fault(lost, METRICS_FETCH, new ConnectException("injected: worker unreachable"));
+		final LinearLoadStepClient client = newClient();
+
+		// One poller: the await polls one slice, which with no limit never ends, and no other.
+		final ForkJoinPool onePoller = new ForkJoinPool(1);
+		final RunTerminalException failure;
+		try {
+			// The slices resolve on the step's thread, which is the pool's.
+			failure = assertThrows(RunTerminalException.class, () -> {
+				try {
+					onePoller.submit(() -> {
+						try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+							client.run();
+						}
+					}).get();
+				} catch (final ExecutionException e) {
+					throw e.getCause();
+				}
+			});
+		} finally {
+			onePoller.shutdownNow();
+		}
+		awaitLostNodes();
+
+		assertLostSliceFailure(failure, 3);
+		assertEquals(List.of(lost), lostNodes());
+	}
+
+	@Test
 	void onlyAResponseReadTimeoutCountsAsASlowCall() {
 		final SocketTimeoutException readTimedOut = new SocketTimeoutException("Read timed out");
 		assertTrue(LoadStepClientBase.isResponseReadTimeout(
@@ -441,6 +671,12 @@ class LostStepSliceTest {
 		assertFalse(LoadStepClientBase.isResponseReadTimeout(new UnmarshalException("no cause")));
 		assertFalse(LoadStepClientBase.isResponseReadTimeout(new NoSuchObjectException("no such object in table")));
 		assertFalse(LoadStepClientBase.isResponseReadTimeout(new RemoteException("other", readTimedOut)));
+	}
+
+	/** A step with neither a count nor a time limit, which only a stop or a failure ends. */
+	private void unlimited() {
+		config.val("load-op-limit-count", 0L);
+		config.val("load-step-limit-time", 0);
 	}
 
 	private RunTerminalException runFailing() throws Exception {
@@ -535,9 +771,19 @@ class LostStepSliceTest {
 					sliceCalls.add(name);
 				}
 			}
+			if (METRICS_FETCH.equals(name)) {
+				fetches.merge(addr, 1, Integer::sum);
+				if (refusedFetchesAfterDone.contains(addr) && answeredDone.contains(addr)) {
+					throw refusedConnect();
+				}
+			}
 			final RemoteException fault = sliceFaults.get(name);
 			if (fault != null) {
 				throw fault;
+			}
+			if ("await".equals(name) && doneAwaits.contains(addr)) {
+				answeredDone.add(addr);
+				return true;
 			}
 			if (slowCalls.getOrDefault(addr, Set.of()).contains(name)
 							|| slowOnceCalls.getOrDefault(addr, ConcurrentHashMap.newKeySet()).remove(name)) {
@@ -635,12 +881,18 @@ class LostStepSliceTest {
 			});
 			final LoadStepManagerServiceImpl steps = new LoadStepManagerServiceImpl(port, extensions(), metrics);
 			steps.start();
-			closeables.add(() -> {
+			final AutoCloseable stepsCloser = () -> {
 				if (!steps.isClosed()) {
 					steps.close();
 				}
-			});
+			};
+			closeables.add(stepsCloser);
 			final String addr = "127.0.0.1:" + port;
+			workerServices.put(addr, List.of(stepsCloser, () -> {
+				if (!files.isClosed()) {
+					files.close();
+				}
+			}));
 			addrs.add(addr);
 			calls.put(addr, Collections.synchronizedList(new ArrayList<>()));
 		}

@@ -7,9 +7,11 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.concurrent.AsyncRunnableBase;
+import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.BiPredicate;
 import java.util.stream.Collectors;
 
 import com.github.akurilov.confuse.Config;
@@ -21,10 +23,23 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 	private final int count;
 
 	public MetricsAggregatorImpl(final String loadStepId, final List<LoadStep> stepSlices, final Config metricsConfig) {
+		this(loadStepId, stepSlices, metricsConfig, null);
+	}
+
+	/**
+	 * @param lossRecorder told of each fetch from a slice that fails in RMI, and answers whether that
+	 *     lost the slice, which then gets no further fetch; null when no fetch failure loses a slice
+	 */
+	public MetricsAggregatorImpl(
+					final String loadStepId,
+					final List<LoadStep> stepSlices,
+					final Config metricsConfig,
+					final BiPredicate<LoadStep, RemoteException> lossRecorder) {
 		this.loadStepId = loadStepId;
 		snapshotSuppliers = stepSlices
 						.stream()
-						.map(slice -> new MetricsSnapshotsSupplierTaskImpl(slice, metricsConfig))
+						.map(slice -> new MetricsSnapshotsSupplierTaskImpl(
+										slice, metricsConfig, lossRecorder == null ? null : failure -> lossRecorder.test(slice, failure)))
 						.collect(Collectors.toList())
 						.toArray(new MetricsSnapshotsSupplierTask[]{});
 		count = snapshotSuppliers.length;

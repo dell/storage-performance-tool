@@ -155,6 +155,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private RunTerminalException lostSliceFailure;
 	/** The slices whose latest stop got no response within the RMI response timeout. Guarded by lostSliceLock. */
 	private Set<LoadStep> slowStopSlices;
+	/** Set at the first lost slice: the await's poll loops end, and the await stops and fails the step. */
+	private volatile boolean sliceLost;
+	/** Whether a failed metrics fetch can lose a slice: from the aggregator's start to the step's stop. */
+	private volatile boolean metricsFetchLosesSlices;
 	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
@@ -1052,7 +1056,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void initAndStartMetricsAggregator(Config config) {
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			metricsAggregator = new MetricsAggregatorImpl(loadStepId(), stepSlices, config);
+			// The standalone DELETE duration route has its own loss handling.
+			metricsFetchLosesSlices = !standaloneDeleteDurationMode();
+			metricsAggregator = new MetricsAggregatorImpl(
+							loadStepId(), stepSlices, config, this::recordLostSliceAtMetricsFetch);
 			metricsAggregator.start();
 		} catch (final Exception e) {
 			LogUtil.exception(Level.ERROR, e, "{}: failed to start the metrics aggregator", loadStepId());
@@ -1409,6 +1416,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (!lostSlices.add(slice)) {
 				return true;
 			}
+			sliceLost = true;
 			final var sliceCount = stepSlices.size();
 			Loggers.ERR.error(
 							"{}: lost the step slice on node {} at its {} ({}); that node's operations since its last metrics report are missing from the step's totals, so the step fails",
@@ -1452,6 +1460,23 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			return;
 		}
 		recordLostSlice(slice, "await", cause);
+	}
+
+	/**
+	 * A metrics fetch from a slice that failed in RMI loses it under the await's rule: every failure
+	 * but a {@linkplain #isResponseReadTimeout response timeout}. The entry's metrics fetch each
+	 * aggregation period reaches every slice, so this also finds a lost slice whose await already
+	 * answered done, as a worker that stops its own slice at its exit does, and a slice that no await
+	 * poller has reached. Only until the step stops: a fetch still in flight when its slice closes
+	 * at the normal end fails, and is no loss.
+	 *
+	 * @return whether the slice is a lost one, so it gets no further fetch
+	 */
+	private boolean recordLostSliceAtMetricsFetch(final LoadStep slice, final RemoteException cause) {
+		if (!metricsFetchLosesSlices || isResponseReadTimeout(cause)) {
+			return false;
+		}
+		return recordLostSlice(slice, "metrics fetch", cause);
 	}
 
 	/**
@@ -2387,46 +2412,84 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					stopFailureBudgetMonitor();
 				}
 			}
+			final boolean done;
 			try {
-				// One start time for all slices: a slice queued for a free poller must not restart the limit.
-				// Compared by subtraction, since toMillis saturates for a step without a time limit.
-				final var invokeTimeMillis = System.currentTimeMillis();
-				final var timeOutMillis = timeUnit.toMillis(timeout);
-				return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
-					try {
-						var awaitResult = false;
-						// A slice still queued at the limit gets one poll: only a poll reports its terminal failure.
-						var polled = timeOutMillis <= 0;
-						while (!polled || timeOutMillis > System.currentTimeMillis() - invokeTimeMillis) {
-							if (Thread.currentThread().isInterrupted()) {
-								throwUnchecked(new InterruptedException());
-							}
-							polled = true;
-							awaitResult = stepSlice.await(1, TimeUnit.MILLISECONDS);
-							if (awaitResult) { // awaitResult = (0 == countDown)
-								break;
-							}
-						}
-						return awaitResult;
-					} catch (final InterruptedException e) {
-						throwUnchecked(e);
-					} catch (final RemoteException e) {
-						recordLostSliceAtAwait(stepSlice, e);
-						return false;
-					}
-					return false;
-				}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
-			} finally {
-				stopFailureBudgetMonitor();
-				Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
-				// After pre-validation, post-verification is this client's to start, in its shutdown. A
-				// slice stopped before that has already closed its verification evidence.
-				if (standaloneDeletePreValidationEnabled() && standaloneDeletePostVerificationEnabled()) {
-					shutdown();
-				}
-				doStop();
+				done = awaitSlices(timeout, timeUnit);
+			} catch (final Throwable failure) {
+				// As before: a failure of this stop replaces the await's own.
+				stopAfterAwait(stepSliceCount);
+				throw failure;
 			}
+			// A slice lost mid-step stops the whole step at once: the failure is recorded, the stop runs,
+			// and then the failure ends the await, also when the stop itself fails.
+			if (!sliceLost) {
+				stopAfterAwait(stepSliceCount);
+				return done;
+			}
+			try {
+				stopAfterAwait(stepSliceCount);
+			} catch (final RuntimeException | Error stopFailure) {
+				throwUncheckedIfInterrupted(stopFailure);
+				final var lost = takeLostSliceFailure();
+				if (lost == null) {
+					throw stopFailure;
+				}
+				lost.addSuppressed(stopFailure);
+				throw lost;
+			}
+			final var lost = takeLostSliceFailure();
+			if (lost != null) {
+				throw lost;
+			}
+			return done;
 		}
+	}
+
+	/**
+	 * Polls each slice until it is done, the time limit passes or a slice is lost. A lost slice, at
+	 * its own await or found by the {@linkplain #recordLostSliceAtMetricsFetch metrics fetch}, ends
+	 * every poll loop at its next poll, and a slice still queued for a poller is not polled.
+	 */
+	private boolean awaitSlices(final long timeout, final TimeUnit timeUnit) {
+		// One start time for all slices: a slice queued for a free poller must not restart the limit.
+		// Compared by subtraction, since toMillis saturates for a step without a time limit.
+		final var invokeTimeMillis = System.currentTimeMillis();
+		final var timeOutMillis = timeUnit.toMillis(timeout);
+		return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
+			try {
+				var awaitResult = false;
+				// A slice still queued at the limit gets one poll: only a poll reports its terminal failure.
+				var polled = timeOutMillis <= 0;
+				while (!sliceLost && (!polled || timeOutMillis > System.currentTimeMillis() - invokeTimeMillis)) {
+					if (Thread.currentThread().isInterrupted()) {
+						throwUnchecked(new InterruptedException());
+					}
+					polled = true;
+					awaitResult = stepSlice.await(1, TimeUnit.MILLISECONDS);
+					if (awaitResult) { // awaitResult = (0 == countDown)
+						break;
+					}
+				}
+				return awaitResult;
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			} catch (final RemoteException e) {
+				recordLostSliceAtAwait(stepSlice, e);
+				return false;
+			}
+			return false;
+		}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
+	}
+
+	private void stopAfterAwait(final int stepSliceCount) {
+		stopFailureBudgetMonitor();
+		Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
+		// After pre-validation, post-verification is this client's to start, in its shutdown. A
+		// slice stopped before that has already closed its verification evidence.
+		if (standaloneDeletePreValidationEnabled() && standaloneDeletePostVerificationEnabled()) {
+			shutdown();
+		}
+		doStop();
 	}
 
 	private synchronized void startFailureBudgetMonitor() {
@@ -3056,6 +3119,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	@Override
 	protected final void doStop() {
+		metricsFetchLosesSlices = false;
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
@@ -3176,13 +3240,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (lost == null) {
 				throw e;
 			}
-			// A lost slice fails the step also when the close failed for an ordinary reason.
-			if (RunTerminalException.find(e) == null) {
-				lost.addSuppressed(e);
-				throw lost;
-			}
-			e.addSuppressed(lost);
-			throw e;
+			// The lost slice is the step's failure: a close failure, such as that node's missing files, follows from it.
+			lost.addSuppressed(e);
+			throw lost;
 		} finally {
 			closeRetainedDurationPhases();
 		}
@@ -3387,6 +3447,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				stepSlices.clear();
 				stepSliceNodeAddrs.clear();
 				startedSliceCount = 0;
+				sliceLost = false;
 			}
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
 			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
