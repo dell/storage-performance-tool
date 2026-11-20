@@ -12,6 +12,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.item.op.composite.data.SplitReadMarks;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
@@ -217,7 +218,7 @@ final class FsSplitReadTimingStepTest {
 				if (((DataOperation<?>) result).respDataTimeStart() > 0) {
 					parentsThatRead++;
 				}
-				if (parent instanceof CompositeDataOperationImpl<?> impl && CompositeDataOperationImpl.rangesSentAsRequests(impl)) {
+				if (parent instanceof CompositeDataOperationImpl<?> impl && SplitReadMarks.rangesSentAsRequests(impl)) {
 					markedRequestless++;
 				}
 			} else if (result instanceof PartialOperation) {

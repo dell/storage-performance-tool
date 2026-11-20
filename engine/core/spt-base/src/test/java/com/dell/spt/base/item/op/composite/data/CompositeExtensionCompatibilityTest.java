@@ -45,8 +45,12 @@ import org.junit.jupiter.api.io.TempDir;
  * The split-read mark adds nothing an extension built before it can collide with. Two such providers
  * had their own {@code requestless()}: one in a subclass of {@link CompositeDataOperationImpl}, one as
  * an interface default on its own {@link CompositeDataOperation}. A third subclass has its own
- * {@code boolean rangesSentAsRequests()}, which the engine's static mark does not consult. Each is
- * compiled here against {@link CompositeDataOperationImpl}'s shape before the mark (a stub with only
+ * {@code boolean rangesSentAsRequests()}, which the engine's mark does not consult. Two more subclasses
+ * implement an interface of their own with a default of the name and descriptor of one of
+ * {@link SplitReadMarks}' methods, and call it on the subclass, which {@code javac} links to the
+ * subclass; on {@link CompositeDataOperationImpl} itself such a method resolved to the engine's static
+ * one and failed with {@link IncompatibleClassChangeError}. Each provider calls its own method while it
+ * loads, and is compiled here against {@link CompositeDataOperationImpl}'s shape before the mark (a stub with only
  * its constructor, ahead of this build on the class path), packed as an extension jar, loaded the way
  * the engine loads extensions, and its finished, unmarked read is given to the load step, which keeps
  * its sample as in 5.17.0.
@@ -192,6 +196,69 @@ final class CompositeExtensionCompatibilityTest {
 					}
 					""";
 
+	/** A subclass that takes a getter of the name and descriptor of the engine's from its own interface. */
+	private static final String DEFAULT_GETTER = """
+					package legacy.composite;
+
+					import com.dell.spt.base.item.DataItem;
+					import com.dell.spt.base.item.op.OpType;
+					import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+
+					public class LegacyDefaultGetter<I extends DataItem> extends CompositeDataOperationImpl<I>
+									implements LegacyMarkQueries {
+
+						public LegacyDefaultGetter(final I item, final long threshold) {
+							super(0, OpType.READ, item, null, "/bucket", null, null, 0, threshold);
+						}
+					}
+					""";
+
+	private static final String MARK_QUERIES = """
+					package legacy.composite;
+
+					import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+
+					public interface LegacyMarkQueries {
+						/** The extension's own meaning, unrelated to the engine's mark. */
+						default boolean rangesSentAsRequests(final CompositeDataOperationImpl<?> op) {
+							return true;
+						}
+					}
+					""";
+
+	/** A subclass that takes a setter of the name and descriptor of the engine's from its own interface. */
+	private static final String DEFAULT_MARKER = """
+					package legacy.composite;
+
+					import com.dell.spt.base.item.DataItem;
+					import com.dell.spt.base.item.op.OpType;
+					import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+
+					public class LegacyDefaultMarker<I extends DataItem> extends CompositeDataOperationImpl<I>
+									implements LegacyMarkCommands {
+
+						public LegacyDefaultMarker(final I item, final long threshold) {
+							super(0, OpType.READ, item, null, "/bucket", null, null, 0, threshold);
+						}
+					}
+					""";
+
+	private static final String MARK_COMMANDS = """
+					package legacy.composite;
+
+					import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+					import java.util.concurrent.atomic.AtomicInteger;
+
+					public interface LegacyMarkCommands {
+						AtomicInteger CALLS = new AtomicInteger();
+
+						/** The extension's own meaning: it counts calls and leaves the engine's mark alone. */
+						default void markRangesSentAsRequests(final CompositeDataOperationImpl<?> op) {
+							CALLS.incrementAndGet();
+						}
+					}
+					""";
+
 	private static final String PROVIDER = """
 					package legacy.composite;
 
@@ -203,13 +270,20 @@ final class CompositeExtensionCompatibilityTest {
 					import com.github.akurilov.confuse.SchemaProvider;
 					import java.nio.file.Path;
 
-					/** Builds its composite when it is loaded, so that loading links the class. */
+					/** Builds its composite and calls its own method when it is loaded, so that loading links both. */
 					public class %1$sExtension implements Extension {
 
-						private final Class<?> type = new %1$s<DataItem>(new DataItemImpl("/bucket/probe", 0, 4096), 1024).getClass();
+						private final Object probe = ownAnswer(composite(new DataItemImpl("/bucket/probe", 0, 4096), 1024));
 
 						public Operation<DataItem> composite(final DataItem item, final long threshold) {
 							return new %1$s<>(item, threshold);
+						}
+
+						/** Calls the composite's own method through the composite's own type. */
+						@SuppressWarnings("unchecked")
+						public Object ownAnswer(final Operation<DataItem> op) {
+							final %1$s<DataItem> c = (%1$s<DataItem>) op;
+							%2$s
 						}
 
 						@Override
@@ -247,46 +321,99 @@ final class CompositeExtensionCompatibilityTest {
 	}
 
 	/**
-	 * The mark is reached through static methods only, which take the operation: no subclass method
-	 * overrides them, and none an extension already has, of any name, is called in their place.
+	 * The mark is reached through {@link SplitReadMarks} only: {@link CompositeDataOperationImpl} and its
+	 * supertypes declare no method of either name, so no method an extension's subclass, or an interface
+	 * of the subclass, already has under either name, whatever its descriptor, overrides, replaces or
+	 * links to the engine's.
 	 */
 	@Test
-	void theMarkIsReachedOnlyThroughStaticMethods() throws Exception {
-		for (final var name : List.of("rangesSentAsRequests", "markRangesSentAsRequests")) {
-			final var methods = Arrays.stream(CompositeDataOperationImpl.class.getDeclaredMethods())
-							.filter(method -> method.getName().equals(name))
-							.toList();
-			assertEquals(1, methods.size(), name + ": " + methods);
-			final Method method = methods.get(0);
-			assertTrue(Modifier.isPublic(method.getModifiers()), name + " is public");
-			assertTrue(Modifier.isStatic(method.getModifiers()), name + " is static");
-			assertEquals(List.of(CompositeDataOperationImpl.class), List.of(method.getParameterTypes()), name + " takes the operation");
+	void theMarkIsReachedOnlyThroughItsHelperClass() throws Exception {
+		final var names = List.of("rangesSentAsRequests", "markRangesSentAsRequests");
+		final var types = new ArrayList<Class<?>>();
+		final var pending = new ArrayList<Class<?>>(List.of(CompositeDataOperationImpl.class));
+		while (!pending.isEmpty()) {
+			final Class<?> type = pending.remove(pending.size() - 1);
+			if (type == null || types.contains(type)) {
+				continue;
+			}
+			types.add(type);
+			pending.add(type.getSuperclass());
+			pending.addAll(List.of(type.getInterfaces()));
+		}
+		assertTrue(types.contains(CompositeOperation.class), "the walk reaches the interfaces: " + types);
+		for (final var type : types) {
+			for (final var method : type.getDeclaredMethods()) {
+				assertFalse(names.contains(method.getName()), type.getName() + " declares " + method);
+			}
+		}
+
+		assertTrue(Modifier.isFinal(SplitReadMarks.class.getModifiers()), "the helper class is final");
+		for (final var constructor : SplitReadMarks.class.getDeclaredConstructors()) {
+			assertTrue(Modifier.isPrivate(constructor.getModifiers()), "its constructor is private: " + constructor);
+		}
+		final var declared = Arrays.stream(SplitReadMarks.class.getDeclaredMethods())
+						.filter(method -> !method.isSynthetic())
+						.toList();
+		assertEquals(new TreeSet<>(names), declared.stream().map(Method::getName).collect(Collectors.toCollection(TreeSet::new)),
+						"its methods: " + declared);
+		assertEquals(2, declared.size(), "its methods: " + declared);
+		for (final Method method : declared) {
+			assertTrue(Modifier.isPublic(method.getModifiers()), method + " is public");
+			assertTrue(Modifier.isStatic(method.getModifiers()), method + " is static");
+			assertEquals(List.of(CompositeDataOperationImpl.class), List.of(method.getParameterTypes()), method + " takes the operation");
 		}
 		assertFalse(Modifier.isFinal(CompositeDataOperationImpl.class.getMethod("reset").getModifiers()), "reset() stays overridable");
 	}
 
 	@Test
 	void aSubclassWithItsOwnRequestlessLoadsAndKeepsItsSample() throws Exception {
-		assertLoadsAndKeepsItsSample("LegacySubclass", "requestless", Map.of("LegacySubclass", SUBCLASS));
+		assertLoadsAndKeepsItsSample("LegacySubclass", "return c.requestless();", true, Map.of("LegacySubclass", SUBCLASS));
 	}
 
 	@Test
 	void anOwnCompositeWithItsOwnRequestlessDefaultLoadsAndKeepsItsSample() throws Exception {
-		assertLoadsAndKeepsItsSample(
-						"LegacyOwnComposite", "requestless", Map.of("LegacyOwnComposite", OWN_TYPE, "LegacyMarks", MARKS));
+		assertLoadsAndKeepsItsSample("LegacyOwnComposite", "return c.requestless();", true,
+						Map.of("LegacyOwnComposite", OWN_TYPE, "LegacyMarks", MARKS));
 	}
 
 	/** Its own {@code rangesSentAsRequests()} answers true; the engine's mark is unset, so the parent keeps its sample. */
 	@Test
 	void aSubclassWithItsOwnMarkGetterLoadsAndKeepsItsSample() throws Exception {
-		assertLoadsAndKeepsItsSample("LegacyNamedGetter", "rangesSentAsRequests", Map.of("LegacyNamedGetter", NAMED_GETTER));
+		assertLoadsAndKeepsItsSample(
+						"LegacyNamedGetter", "return c.rangesSentAsRequests();", true, Map.of("LegacyNamedGetter", NAMED_GETTER));
 	}
 
-	private void assertLoadsAndKeepsItsSample(final String type, final String ownMethod, final Map<String, String> sources)
+	/**
+	 * Its interface's default {@code rangesSentAsRequests(CompositeDataOperationImpl)}, called on the
+	 * subclass, answers true; the engine's mark is unset, so the parent keeps its sample.
+	 */
+	@Test
+	void aSubclassWithAnInterfaceDefaultMarkGetterLoadsAndKeepsItsSample() throws Exception {
+		assertLoadsAndKeepsItsSample("LegacyDefaultGetter", "return c.rangesSentAsRequests(c);", true,
+						Map.of("LegacyDefaultGetter", DEFAULT_GETTER, "LegacyMarkQueries", MARK_QUERIES));
+	}
+
+	/**
+	 * Its interface's default {@code markRangesSentAsRequests(CompositeDataOperationImpl)}, called on the
+	 * subclass, runs once per call and does not mark the read, so the parent keeps its sample.
+	 */
+	@Test
+	void aSubclassWithAnInterfaceDefaultMarkSetterLoadsAndKeepsItsSample() throws Exception {
+		assertLoadsAndKeepsItsSample("LegacyDefaultMarker", "c.markRangesSentAsRequests(c); return LegacyMarkCommands.CALLS.get();",
+						2, Map.of("LegacyDefaultMarker", DEFAULT_MARKER, "LegacyMarkCommands", MARK_COMMANDS));
+	}
+
+	/**
+	 * {@code ownCall} is the body of the provider's {@code ownAnswer}, which has the composite as
+	 * {@code c}, and {@code expected} what the test's own call of it returns, after the provider's call
+	 * while it loaded.
+	 */
+	private void assertLoadsAndKeepsItsSample(
+					final String type, final String ownCall, final Object expected, final Map<String, String> sources)
 					throws Exception {
 		final var jarDir = dir.resolve("ext");
 		Files.createDirectories(jarDir);
-		buildExtensionJar(type, sources, jarDir.resolve(type + ".jar"));
+		buildExtensionJar(type, ownCall, sources, jarDir.resolve(type + ".jar"));
 		try (var loader = Extension.extClassLoader(jarDir.toFile())) {
 			final var extension = Extension.load(loader).stream()
 							.filter(loaded -> ("legacy-" + type).equals(loaded.id()))
@@ -298,7 +425,8 @@ final class CompositeExtensionCompatibilityTest {
 			final var op = (Operation<DataItem>) extension.getClass()
 							.getMethod("composite", DataItem.class, long.class)
 							.invoke(extension, item, PART_SIZE);
-			assertEquals(Boolean.TRUE, op.getClass().getMethod(ownMethod).invoke(op), "its own method answers");
+			assertEquals(expected, extension.getClass().getMethod("ownAnswer", Operation.class).invoke(extension, op),
+							"its own method answers");
 			finish(op);
 
 			try (var metrics = metricsContext()) {
@@ -315,7 +443,8 @@ final class CompositeExtensionCompatibilityTest {
 	 * Compiles the composite and its provider against the pre-mark stub ahead of this classpath, and
 	 * packs them, without the stub, with a service entry.
 	 */
-	private void buildExtensionJar(final String type, final Map<String, String> sources, final Path jar) throws IOException {
+	private void buildExtensionJar(final String type, final String ownCall, final Map<String, String> sources, final Path jar)
+					throws IOException {
 		final var src = dir.resolve("src/" + type + "/legacy/composite");
 		final var classes = dir.resolve("classes/" + type);
 		final var stubSrc = dir.resolve("stub-src/" + type + "/CompositeDataOperationImpl.java");
@@ -338,7 +467,7 @@ final class CompositeExtensionCompatibilityTest {
 			args.add(file.toString());
 		}
 		final var provider = src.resolve(type + "Extension.java");
-		Files.writeString(provider, PROVIDER.formatted(type));
+		Files.writeString(provider, PROVIDER.formatted(type, ownCall));
 		args.add(provider.toString());
 		final int status = compiler.run(null, null, null, args.toArray(String[]::new));
 		assertEquals(0, status, "the pre-mark source compiles");

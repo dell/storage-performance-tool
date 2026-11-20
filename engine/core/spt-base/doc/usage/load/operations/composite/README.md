@@ -80,12 +80,14 @@ as failed, with that part's status. The read counts once, with the object's size
 bytes of the parts that succeeded also count when the read fails or is retried whole. Each part
 that succeeds adds the duration and latency recorded for it, and the read itself adds none, so the
 step's duration and latency statistics describe range requests. The driver marks such a read with
-the static `CompositeDataOperationImpl.markRangesSentAsRequests(op)`, and the step reads the mark
-with the static `CompositeDataOperationImpl.rangesSentAsRequests(op)`, only on a READ that is a
+the static `SplitReadMarks.markRangesSentAsRequests(op)`, and the step reads the mark with the
+static `SplitReadMarks.rangesSentAsRequests(op)` (both in `com.dell.spt.base.item.op.composite.data`),
+only on a READ that is a
 `CompositeDataOperationImpl` or a subclass of it. The mark lasts one attempt: `reset()`, which
 admission calls before each attempt, and `resetSubOperations()`, which a whole retry calls, clear
-it, and `result()` copies it. Being static, the two methods cannot be overridden, and a method a
-subclass already has under either name plays no part in the mark. A subclass that the driver
+it, and `result()` copies it. `CompositeDataOperationImpl` and its supertypes declare no method of
+either name, so a method a subclass, or an interface of the subclass, already has under either name
+plays no part in the mark. A subclass that the driver
 receives is marked like the engine's own read. Any other `CompositeDataOperation` implementation is
 not marked: its read adds its own sample, as in 5.17.0, next to its parts'. A split read
 ignores a requested version ID: each part reads the current object. The `s3-rdma` driver sends these range GETs over HTTP. Through 5.17.0 the `s3-aws` driver did not split

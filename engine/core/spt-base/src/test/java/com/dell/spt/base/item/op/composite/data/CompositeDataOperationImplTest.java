@@ -312,18 +312,18 @@ class CompositeDataOperationImplTest {
 	@Test
 	void theRangesMarkLastsOnlyForItsAttempt() throws Exception {
 		final var op = newCompositeOp(OpType.READ, 4096, 1024);
-		assertFalse(CompositeDataOperationImpl.rangesSentAsRequests(op), "a new read");
-		CompositeDataOperationImpl.markRangesSentAsRequests(op);
-		assertTrue(CompositeDataOperationImpl.rangesSentAsRequests(op));
-		assertTrue(CompositeDataOperationImpl.rangesSentAsRequests(op.result()), "the attempt's result keeps its mark");
+		assertFalse(SplitReadMarks.rangesSentAsRequests(op), "a new read");
+		SplitReadMarks.markRangesSentAsRequests(op);
+		assertTrue(SplitReadMarks.rangesSentAsRequests(op));
+		assertTrue(SplitReadMarks.rangesSentAsRequests(op.result()), "the attempt's result keeps its mark");
 		op.reset();
-		assertFalse(CompositeDataOperationImpl.rangesSentAsRequests(op), "after reset(), which admission's prepare() calls");
-		CompositeDataOperationImpl.markRangesSentAsRequests(op);
+		assertFalse(SplitReadMarks.rangesSentAsRequests(op), "after reset(), which admission's prepare() calls");
+		SplitReadMarks.markRangesSentAsRequests(op);
 		op.resetSubOperations();
-		assertFalse(CompositeDataOperationImpl.rangesSentAsRequests(op), "after a whole retry clears the sub-operations");
-		CompositeDataOperationImpl.markRangesSentAsRequests(op);
+		assertFalse(SplitReadMarks.rangesSentAsRequests(op), "after a whole retry clears the sub-operations");
+		SplitReadMarks.markRangesSentAsRequests(op);
 		final var recycled = op.result();
 		recycled.reset();
-		assertFalse(CompositeDataOperationImpl.rangesSentAsRequests(recycled), "a recycled copy, once admitted again");
+		assertFalse(SplitReadMarks.rangesSentAsRequests(recycled), "a recycled copy, once admitted again");
 	}
 }

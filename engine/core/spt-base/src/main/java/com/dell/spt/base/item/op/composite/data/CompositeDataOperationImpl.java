@@ -23,7 +23,8 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 	private final Map<String, String> contextData = new ConcurrentHashMap<>();
 	private final List<PartialDataOperation<I>> subTasks = new ArrayList<>();
 	private final AtomicInteger subTaskYieldIndex = new AtomicInteger(0);
-	private volatile boolean rangesSentAsRequests;
+	/** The split-read mark; only {@link SplitReadMarks} sets or reads it. */
+	volatile boolean rangesSentAsRequests;
 
 	public CompositeDataOperationImpl() {
 		super();
@@ -50,36 +51,11 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 		this.rangesSentAsRequests = other.rangesSentAsRequests;
 	}
 
-	/** Also clears the {@link #rangesSentAsRequests(CompositeDataOperationImpl)} mark, which belongs to the attempt it was set in. */
+	/** Also clears the {@link SplitReadMarks split-read mark}, which belongs to the attempt it was set in. */
 	@Override
 	public void reset() throws IllegalArgumentException {
 		super.reset();
 		rangesSentAsRequests = false;
-	}
-
-	/**
-	 * Whether the driver sent {@code op}'s sub-operations as the attempt's only requests: the operation's
-	 * own passes sent no request and did no I/O, so its sub-operations' timings are the only request
-	 * timings it has, and the load step records theirs and none of its own. Only a READ is read for it.
-	 *
-	 * <p>A driver sets it with {@link #markRangesSentAsRequests(CompositeDataOperationImpl)};
-	 * {@link #reset()}, which admission calls before each attempt, and {@link #resetSubOperations()},
-	 * which a whole retry calls, clear it. {@link #result()} copies it.
-	 *
-	 * <p>Static, so that it reads this class's own field: no subclass method overrides it, and a
-	 * subclass's own method of the same name, from before 5.17.1, is unrelated to it.
-	 */
-	public static boolean rangesSentAsRequests(final CompositeDataOperationImpl<?> op) {
-		return op.rangesSentAsRequests;
-	}
-
-	/**
-	 * Called by a driver that sends {@code op}'s sub-operations as the attempt's only requests, as the
-	 * {@code s3}, {@code s3-rdma} and {@code s3-aws} drivers do for a read split by the size threshold.
-	 * Static for the reason {@link #rangesSentAsRequests(CompositeDataOperationImpl)} is.
-	 */
-	public static void markRangesSentAsRequests(final CompositeDataOperationImpl<?> op) {
-		op.rangesSentAsRequests = true;
 	}
 
 	@Override

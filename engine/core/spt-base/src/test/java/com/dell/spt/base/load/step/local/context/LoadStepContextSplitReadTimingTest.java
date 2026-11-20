@@ -11,6 +11,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.item.op.composite.data.SplitReadMarks;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
@@ -431,7 +432,7 @@ final class LoadStepContextSplitReadTimingTest {
 		Published starts() {
 			if (OpType.READ.equals(operation.type())) {
 				passesWithoutData();
-				CompositeDataOperationImpl.markRangesSentAsRequests(operation);
+				SplitReadMarks.markRangesSentAsRequests(operation);
 			} else {
 				respond(operation, Status.SUCC);
 			}
@@ -449,7 +450,7 @@ final class LoadStepContextSplitReadTimingTest {
 
 		/** The driver marks the parent requestless after a pass that has a first-byte stamp. */
 		Published marksRequestless() {
-			CompositeDataOperationImpl.markRangesSentAsRequests(operation);
+			SplitReadMarks.markRangesSentAsRequests(operation);
 			return this;
 		}
 
