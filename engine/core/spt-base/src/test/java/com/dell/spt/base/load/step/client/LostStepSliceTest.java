@@ -33,6 +33,8 @@ import java.io.Serializable;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
@@ -68,8 +70,8 @@ import org.mockito.MockedStatic;
 /**
  * An entry that loses a remote step slice, whose await, stop or close fails in RMI, fails the step:
  * that worker's last operations are missing from the totals. The step's other slices still stop
- * and close, and the entry logs one error per lost slice, naming its node. A stop whose response
- * comes after the RMI response timeout is a slow stop, not a loss, and keeps 5.17.0's warning.
+ * and close, and the entry logs one error per lost slice, naming its node. A stop or await whose
+ * response comes after the RMI response timeout is a slow call, not a loss, and gets a warning.
  *
  * <p>The client step, the slices and their RMI over the loopback interface are the real ones; a
  * proxy around each remote slice's stub records its calls and injects the RMI failures. A slow call
@@ -88,6 +90,7 @@ class LostStepSliceTest {
 	private static final long LATE_ANSWER_MILLIS = 1_500;
 	private static final String STOP_WARNING = "failed to stop the step slice";
 	private static final String CLOSE_WARNING = "failed to close the step service";
+	private static final String AWAIT_WARNING = "did not answer its await within the RMI response timeout";
 
 	private final Config config = TestConfigBuilder.config();
 	private final MetricsManagerImpl entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
@@ -98,6 +101,8 @@ class LostStepSliceTest {
 	private final Map<String, Map<String, RemoteException>> faults = new ConcurrentHashMap<>();
 	/** The calls, by node address, that go through a relay answering after the response timeout. */
 	private final Map<String, Set<String>> slowCalls = new ConcurrentHashMap<>();
+	/** The calls, by node address, whose first call only goes through such a relay. */
+	private final Map<String, Set<String>> slowOnceCalls = new ConcurrentHashMap<>();
 	/** The calls, by node address, that fail as RMI fails a connect that nothing listens for. */
 	private final Map<String, Set<String>> refusedCalls = new ConcurrentHashMap<>();
 	private final List<String> addrs = new ArrayList<>();
@@ -309,6 +314,82 @@ class LostStepSliceTest {
 	}
 
 	@Test
+	void anAwaitAnsweringAfterTheResponseTimeoutWarnsAndTheStepEndsAsBefore() throws Exception {
+		final String slow = addrs.get(1);
+		// The relay's await waits until the slice is done, as a pipeline stage's drain inside the
+		// worker's await call does, then answers after the response timeout.
+		slow(slow, "await");
+		final LinearLoadStepClient client = newClient();
+
+		try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+			client.run();
+		}
+
+		assertNull(client.runFailure(), "a slow await does not fail the step");
+		assertTrue(client.isClosed());
+		awaitWarning(AWAIT_WARNING);
+		assertEquals(List.of(), lostNodes(), "the slice is not lost");
+		final List<String> awaitWarnings = errors.messages().stream()
+						.filter(message -> message.contains(AWAIT_WARNING))
+						.toList();
+		assertEquals(1, awaitWarnings.size(), errors.messages().toString());
+		assertTrue(awaitWarnings.getFirst().contains("recording slice @ " + slow), awaitWarnings.toString());
+		assertTrue(calls(slow).containsAll(List.of("await", "stop", "close")),
+						"the entry goes on to stop and close the slice: " + calls(slow));
+		assertEquals(30L, client.metricsSnapshots().getFirst().successSnapshot().count(), "the totals are complete");
+	}
+
+	@Test
+	void aWorkerThatDiesDuringItsAwaitStillFailsTheStepAndNamesIt() throws Exception {
+		final String lost = addrs.get(1);
+		// What RMI gives the caller when the worker's process ends during the call.
+		fault(lost, "await", new UnmarshalException("Error unmarshaling return header", new EOFException()));
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 3);
+		assertEquals(List.of(lost), lostNodes());
+		assertTrue(errors.messages().stream().anyMatch(message -> message.contains(LOST + lost + " at its await (")),
+						errors.messages().toString());
+		assertFalse(errors.messages().stream().anyMatch(message -> message.contains(AWAIT_WARNING)),
+						errors.messages().toString());
+	}
+
+	@Test
+	void aCloseTimingOutAfterALaterStopAnsweredLosesTheSlice() throws Exception {
+		final String lost = addrs.get(0);
+		// The entry stops its slices from its await and again from its own stop: the first stop is
+		// slow, the second answers, so the close no longer waits behind a slow stop.
+		slowOnce(lost, "stop");
+		slow(lost, "close");
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 2);
+		assertEquals(List.of(lost), lostNodes());
+		assertTrue(errors.messages().stream().anyMatch(message -> message.contains(" at its close (")),
+						errors.messages().toString());
+		assertEquals(1, errors.messages().stream().filter(message -> message.contains(STOP_WARNING)).count(),
+						"only the first stop timed out: " + errors.messages());
+	}
+
+	@Test
+	void aSliceLostAtItsAwaitGetsNoWarningAtItsSlowStopAndClose() throws Exception {
+		final String lost = addrs.get(0);
+		fault(lost, "await", new ConnectException("injected: worker unreachable"));
+		slow(lost, "stop");
+		slow(lost, "close");
+
+		final RunTerminalException failure = runFailing();
+
+		assertLostSliceFailure(failure, 2);
+		assertEquals(0, failure.getSuppressed().length, "one failure for the one lost slice");
+		assertEquals(List.of(lost), lostNodes());
+		assertFalse(errors.messages().stream().anyMatch(message -> message.contains(CLOSE_WARNING)
+						|| message.contains(STOP_WARNING)), "no second line for the lost slice: " + errors.messages());
+	}
+
+	@Test
 	void aStopRefusedByTheWorkerStillFailsTheStepAndNamesTheWorker() throws Exception {
 		final String lost = addrs.get(1);
 		refused(lost, "stop");
@@ -400,6 +481,10 @@ class LostStepSliceTest {
 		slowCalls.computeIfAbsent(addr, key -> ConcurrentHashMap.newKeySet()).add(call);
 	}
 
+	private void slowOnce(final String addr, final String call) {
+		slowOnceCalls.computeIfAbsent(addr, key -> ConcurrentHashMap.newKeySet()).add(call);
+	}
+
 	private void refused(final String addr, final String call) {
 		refusedCalls.computeIfAbsent(addr, key -> ConcurrentHashMap.newKeySet()).add(call);
 	}
@@ -454,7 +539,8 @@ class LostStepSliceTest {
 			if (fault != null) {
 				throw fault;
 			}
-			if (slowCalls.getOrDefault(addr, Set.of()).contains(name)) {
+			if (slowCalls.getOrDefault(addr, Set.of()).contains(name)
+							|| slowOnceCalls.getOrDefault(addr, ConcurrentHashMap.newKeySet()).remove(name)) {
 				relay(stub, LATE_ANSWER_MILLIS).call(name);
 				return null;
 			}
@@ -513,21 +599,23 @@ class LostStepSliceTest {
 	}
 
 	/**
-	 * RMI's own failure for a worker that no longer listens: a call through a stub for a free
-	 * loopback port. A closed relay would not do: RMI serves a call by object id on any connection
-	 * it still holds, so a stub can reach an object whose listener has closed.
+	 * RMI's own failure for a worker that no longer listens: a call through a stub for a loopback
+	 * port that this test holds bound, without listening, until the call has failed, so no other
+	 * process can take the port and listen on it meanwhile. A closed relay would not do: RMI serves
+	 * a call by object id on any connection it still holds, so a stub can reach an object whose
+	 * listener has closed.
 	 */
 	private static RemoteException refusedConnect() throws IOException {
-		final int port;
-		try (ServerSocket socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
-			port = socket.getLocalPort();
+		try (Socket bound = new Socket()) {
+			bound.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
+			final int port = bound.getLocalPort();
+			try {
+				LocateRegistry.getRegistry("127.0.0.1", port).list();
+			} catch (final ConnectException refused) {
+				return refused;
+			}
+			throw new IllegalStateException("something listens on the bound port " + port);
 		}
-		try {
-			LocateRegistry.getRegistry("127.0.0.1", port).list();
-		} catch (final ConnectException refused) {
-			return refused;
-		}
-		throw new IllegalStateException("something listens on the free port " + port);
 	}
 
 	private void startWorkers(final int count) throws Exception {

@@ -153,7 +153,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private Set<LoadStep> lostSlices;
 	/** The step's failure for its lost slices, one suppressed failure per slice after the first. Guarded by lostSliceLock. */
 	private RunTerminalException lostSliceFailure;
-	/** The slices whose stop got no response within the RMI response timeout. Guarded by lostSliceLock. */
+	/** The slices whose latest stop got no response within the RMI response timeout. Guarded by lostSliceLock. */
 	private Set<LoadStep> slowStopSlices;
 	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
@@ -1433,33 +1433,67 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
+	 * A failed await call of a slice, other than a {@linkplain #isResponseReadTimeout response
+	 * timeout}, loses the slice (see {@link #recordLostSlice}). An await whose response timed out is
+	 * the worker still working inside the call, as a pipeline stage that drains its operations in
+	 * flight when it ends does, for up to {@code load.op.wait.limit}: as in 5.17.0 the entry stops
+	 * awaiting that slice and goes on to its normal stop and close of it, where a worker that has
+	 * died or hung is still lost. Unlike 5.17.0, it logs a warning.
+	 */
+	private void recordLostSliceAtAwait(final LoadStep slice, final RemoteException cause) {
+		if (isResponseReadTimeout(cause)) {
+			LogUtil.trace(
+							Loggers.ERR,
+							Level.WARN,
+							cause,
+							"{}: the step slice \"{}\" did not answer its await within the RMI response timeout; the entry no longer awaits it and goes on to stop and close it",
+							loadStepId(),
+							slice);
+			return;
+		}
+		recordLostSlice(slice, "await", cause);
+	}
+
+	/**
 	 * A failed stop of a slice, other than a {@linkplain #isResponseReadTimeout response timeout},
 	 * loses the slice (see {@link #recordLostSlice}). A stop whose response timed out is the worker
 	 * still draining its operations in flight, for up to {@code load.op.wait.limit}, past the RMI
 	 * response timeout: it keeps 5.17.0's warning and does not fail the step, although that worker's
 	 * operations that end after the timeout are missing from the totals.
 	 *
+	 * @param stopSent whether the failed call was the stop itself, rather than a call before it
 	 * @return whether the slice is a lost one, so the caller logs nothing more
 	 */
-	private boolean recordLostSliceAtStop(final LoadStep slice, final RemoteException cause) {
+	private boolean recordLostSliceAtStop(final LoadStep slice, final RemoteException cause, final boolean stopSent) {
 		if (isResponseReadTimeout(cause)) {
 			synchronized (lostSliceLock) {
-				if (slowStopSlices == null) {
-					slowStopSlices = Collections.newSetFromMap(new IdentityHashMap<>());
+				if (stopSent) {
+					if (slowStopSlices == null) {
+						slowStopSlices = Collections.newSetFromMap(new IdentityHashMap<>());
+					}
+					slowStopSlices.add(slice);
 				}
-				slowStopSlices.add(slice);
+				// A slice already lost, at its await, keeps its one error line.
+				return lostSlices != null && lostSlices.contains(slice);
 			}
-			// A slice already lost, at its await, keeps its one error line.
-			return isLostSlice(slice);
 		}
 		return recordLostSlice(slice, "stop", cause);
 	}
 
+	/** A stop of the slice answered, so a later close of it no longer waits behind a slow stop. */
+	private void stopAnswered(final LoadStep slice) {
+		synchronized (lostSliceLock) {
+			if (slowStopSlices != null) {
+				slowStopSlices.remove(slice);
+			}
+		}
+	}
+
 	/**
 	 * A failed close of a slice loses it, like a failed stop. The one exception is a response timeout
-	 * at the close of a slice whose stop timed out the same way: the worker's close waits for that
-	 * stop, which is still draining, so it is the same slow stop and keeps the same warning. A close
-	 * that times out after a stop that answered loses the slice.
+	 * at the close of a slice whose latest stop timed out the same way: the worker's close waits for
+	 * that stop, which is still draining, so it is the same slow stop and keeps the same warning. A
+	 * close that times out after a stop that answered loses the slice.
 	 *
 	 * @return whether the slice is a lost one, so the caller logs nothing more
 	 */
@@ -1467,7 +1501,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		if (isResponseReadTimeout(cause)) {
 			synchronized (lostSliceLock) {
 				if (slowStopSlices != null && slowStopSlices.contains(slice)) {
-					return false;
+					// A slice already lost keeps its one error line.
+					return lostSlices != null && lostSlices.contains(slice);
 				}
 			}
 		}
@@ -2376,7 +2411,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					} catch (final InterruptedException e) {
 						throwUnchecked(e);
 					} catch (final RemoteException e) {
-						recordLostSlice(stepSlice, "await", e);
+						recordLostSliceAtAwait(stepSlice, e);
 						return false;
 					}
 					return false;
@@ -3047,13 +3082,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		} else {
 			stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
+				var stopSent = false;
 				try (
 								final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
 												KEY_CLASS_NAME, getClass().getSimpleName())) {
+					stopSent = true;
 					stepSlice.stop();
+					stopAnswered(stepSlice);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
-					if (!(e instanceof RemoteException remote && recordLostSliceAtStop(stepSlice, remote))) {
+					if (!(e instanceof RemoteException remote && recordLostSliceAtStop(stepSlice, remote, stopSent))) {
 						LogUtil.trace(Loggers.ERR, Level.WARN, e, "{}: failed to stop the step slice \"{}\"", loadStepId(),
 										stepSlice);
 					}
