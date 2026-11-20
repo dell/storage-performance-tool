@@ -160,3 +160,55 @@ func TestUnattendedMessageForALookalikeContainer(t *testing.T) {
 	}
 	holder.assertUntouched(t)
 }
+
+// Without an operator, any holder gets the answer an end of input at the
+// prompt gets: no menu, nothing sent but detection's reads, and an abort that
+// names the holder. It used to try a graceful stop that always failed for a
+// holder that isn't SPT.
+func TestNonInteractiveAbortMatchesEndOfInput(t *testing.T) {
+	newHolder := func(t *testing.T) string {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Errorf("service received %s %s", r.Method, r.URL.Path)
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(server.Close)
+		_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return port
+	}
+	resolve := func(t *testing.T, port string, interactive bool) (*ResolutionResult, string) {
+		t.Helper()
+		checker := NewPortCheckerWithOptions(port, "127.0.0.1", time.Second, 2*time.Second, 1)
+		checker.newFinder = func() (*DockerContainerFinder, error) { return newFakeFinder(&fakeDockerAPI{}), nil }
+		resolver := &ConflictResolver{
+			Port: port, checker: checker, interactiveMode: interactive,
+			clock: NewFakeClock(), input: strings.NewReader(""),
+		}
+		defer resolver.Close()
+		var result *ResolutionResult
+		printed := captureStdout(t, func() {
+			var err error
+			result, err = resolver.CheckAndResolveConflicts(context.Background())
+			assertUnattendedAbort(t, result, err, "port "+port+" is in use (")
+		})
+		return result, printed
+	}
+
+	port := newHolder(t)
+	unattended, printed := resolve(t, port, false)
+	if strings.Contains(printed, "What would you like to do?") || strings.Contains(printed, "[a] Abort") {
+		t.Errorf("non-interactive resolution printed the menu:\n%s", printed)
+	}
+	if strings.Contains(printed, "attempting graceful resolution") {
+		t.Errorf("non-interactive resolution tried a graceful stop:\n%s", printed)
+	}
+	endOfInput, _ := resolve(t, port, true)
+	if unattended.Message != endOfInput.Message || unattended.Strategy != endOfInput.Strategy {
+		t.Errorf("non-interactive result %+v, want the end-of-input result %+v", unattended, endOfInput)
+	}
+}
