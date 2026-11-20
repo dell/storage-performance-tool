@@ -498,8 +498,9 @@ func TestStageDeleteRefusesALongFirstLineWithoutWaitingForItsEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = writer.Close() })
-	// The pipe holds less than the line: write it while the stager reads.
-	go func() { _, _ = writer.WriteString("/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes+10)) }()
+	// Exactly 1 MiB and one byte, the shortest line refused for its length. The pipe holds less
+	// than the line: write it while the stager reads.
+	go func() { _, _ = writer.WriteString("/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes-2)) }()
 	done := make(chan error, 1)
 	go func() {
 		_, stageErr := StageDeleteInputManifest(source, 449, 0, "")
