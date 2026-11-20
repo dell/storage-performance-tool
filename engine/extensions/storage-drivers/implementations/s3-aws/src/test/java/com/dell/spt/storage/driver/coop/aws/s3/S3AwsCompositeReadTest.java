@@ -42,6 +42,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -68,7 +69,9 @@ import org.junit.jupiter.api.io.TempDir;
  * ranges the client completed, whenever the step ends, and only a read with a range unsent at the
  * stop can be unresolved. The step tests take the ranges completed from the client's own range
  * results, in the step's operation trace: a request the stub received is not one the client
- * completed.
+ * completed. The step's {@code operation.lifecycle.csv} ends exactly the results in its trace,
+ * successes and failures, so a result the step output, such as a read it counted, is never also left
+ * unresolved.
  */
 @Timeout(value = 240, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3AwsCompositeReadTest {
@@ -100,12 +103,6 @@ final class S3AwsCompositeReadTest {
 	private static final int WAIT_LIMIT_SECONDS = 60;
 	private static final int RECYCLING_WAIT_LIMIT_SECONDS = 10;
 	private static final int STEP_CONCURRENCY = 4;
-	/**
-	 * Unresolved reads beyond the unfinished ones in the trace: the stop can refuse a read's initial
-	 * pass between its dispatch and its result, which leaves it unresolved with no row. Initial passes
-	 * run one at a time on the driver's dispatching thread, so this is a few at most.
-	 */
-	private static final int UNRESOLVED_WITHOUT_A_ROW = STEP_CONCURRENCY;
 	private static final String LONG_TIME_LIMIT = "120s";
 	/** One object in this many has a range the target refuses, in the tests that refuse any. */
 	private static final int REFUSED_ONE_IN = 8;
@@ -291,6 +288,7 @@ final class S3AwsCompositeReadTest {
 		assertEquals(limit, stub.gets.stream().map(get -> get.split(" ")[1]).distinct().count(),
 						"no object beyond the limit's reads is read");
 		assertEquals(0, unresolved());
+		assertLifecycleEndsEveryResult();
 	}
 
 	/** A range refused once is retried by the driver: its read succeeds and is counted. */
@@ -321,7 +319,7 @@ final class S3AwsCompositeReadTest {
 		assertEquals(completed.complete(), outcome.get(0), () -> outcome + " against " + completed);
 		assertEquals(readsOutOfAttempts(), outcome.get(1), () -> outcome + " against " + stub.gets);
 		assertEquals(completed.bytes(), outcome.get(2), () -> outcome + " against " + completed);
-		assertUnresolvedWithin(completed);
+		assertLifecycleEndsEveryResult();
 	}
 
 	/**
@@ -343,8 +341,7 @@ final class S3AwsCompositeReadTest {
 		assertEquals(completed.complete(), outcome.get(0), () -> outcome + " against " + completed);
 		assertTrue(outcome.get(1) <= refusedObjects, () -> outcome + " with " + refusedObjects + " objects refused");
 		assertEquals(completed.bytes(), outcome.get(2), () -> outcome + " against " + completed);
-		// An object with an incomplete set, refused or not, may have the read the stop left unresolved.
-		assertUnresolvedWithin(completed());
+		assertLifecycleEndsEveryResult();
 	}
 
 	/**
@@ -366,6 +363,7 @@ final class S3AwsCompositeReadTest {
 		assertEquals(List.of((long) limit - alwaysRefused, (long) alwaysRefused), outcome.subList(0, 2),
 						() -> outcome + " against " + stub.gets);
 		assertEquals(0, unresolved());
+		assertLifecycleEndsEveryResult();
 	}
 
 	/** The step counted what the client completed, and completed some reads. */
@@ -377,16 +375,21 @@ final class S3AwsCompositeReadTest {
 
 	/** The step counted what the client completed, which may be nothing. */
 	private void assertCountedAsCompleted(final List<Long> outcome, final RangeResultTrace.Completed completed)
-					throws IOException {
+					throws IOException, InterruptedException {
 		assertEquals(List.of(completed.complete(), 0L, completed.bytes()), outcome, completed::toString);
-		assertUnresolvedWithin(completed);
+		assertLifecycleEndsEveryResult();
 	}
 
-	/** Only reads the stop left unfinished are unresolved. */
-	private void assertUnresolvedWithin(final RangeResultTrace.Completed completed) throws IOException {
-		final var unresolved = unresolved();
-		assertTrue(unresolved <= completed.unfinished() + UNRESOLVED_WITHOUT_A_ROW,
-						() -> unresolved + " unresolved against " + completed);
+	/**
+	 * The lifecycle accepted exactly the successful results in the step's trace and failed exactly the
+	 * others: a result output and then left unresolved, or ended without output, breaks one of them.
+	 * With the artifact's own reconciliation, the unresolved are the rest of what the step selected.
+	 */
+	private void assertLifecycleEndsEveryResult() throws IOException, InterruptedException {
+		final var lifecycle = lifecycle();
+		final var results = trace.results(stepId);
+		assertEquals(results, List.of(lifecycle.get("accepted"), lifecycle.get("failed")),
+						() -> "the lifecycle " + lifecycle + " against the trace's results " + results);
 	}
 
 	private static boolean refusedObject(final String path) {
@@ -426,6 +429,11 @@ final class S3AwsCompositeReadTest {
 
 	/** {@code unresolved} in the last step's {@code operation.lifecycle.csv}, which reconciles. */
 	private long unresolved() throws IOException {
+		return lifecycle().get("unresolved");
+	}
+
+	/** The counts of the last step's {@code operation.lifecycle.csv}, which reconciles, by column. */
+	private Map<String, Long> lifecycle() throws IOException {
 		final var lines = Files.readAllLines(
 						Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), stepId)));
 		assertEquals(OperationLifecycleArtifact.HEADER, lines.get(0));
@@ -433,7 +441,11 @@ final class S3AwsCompositeReadTest {
 		final var header = List.of(lines.get(0).split(",", -1));
 		final var row = lines.get(1).split(",", -1);
 		assertEquals("true", row[header.indexOf("terminal")], () -> "the lifecycle reconciles: " + lines);
-		return Long.parseLong(row[header.indexOf("unresolved")]);
+		final Map<String, Long> counts = new LinkedHashMap<>();
+		for (final var column : List.of("selected", "accepted", "failed", "unattempted", "unresolved")) {
+			counts.put(column, Long.parseLong(row[header.indexOf(column)]));
+		}
+		return counts;
 	}
 
 	/**

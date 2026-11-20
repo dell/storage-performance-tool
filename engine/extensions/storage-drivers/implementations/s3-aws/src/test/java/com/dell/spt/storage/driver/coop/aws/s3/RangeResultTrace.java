@@ -78,8 +78,8 @@ final class RangeResultTrace implements AutoCloseable {
 	 * object's successful ranges divided by its ranges, since each read of it completes each of its
 	 * ranges once at most; one with a remainder was being read when the step ended. The bytes are
 	 * those of every successful range. The unfinished reads, of every object, are the read attempts
-	 * whose initial pass the step received and whose end it did not, whatever their ranges did:
-	 * those a stop may leave unresolved.
+	 * whose initial pass the step received and whose end it did not, whatever their ranges did: they
+	 * include reads whose ranges were all still queued, which a stop settles as unattempted.
 	 */
 	Completed completed(final String stepId, final long rangeSize, final int ranges, final Predicate<String> counted)
 					throws InterruptedException {
@@ -110,6 +110,16 @@ final class RangeResultTrace implements AutoCloseable {
 						.filter(statuses -> statuses.size() == 1 && "SUCC".equals(statuses.get(0)))
 						.count();
 		return new Completed(complete, incomplete, bytes, unfinished);
+	}
+
+	/**
+	 * The results of step {@code stepId} so far, successes and failures: of reads, their initial passes
+	 * and their ranges alike, and of each attempt of a retried range.
+	 */
+	List<Long> results(final String stepId) throws InterruptedException {
+		final var rows = rows(stepId);
+		final var succeeded = rows.stream().filter(row -> "SUCC".equals(row[STATUS])).count();
+		return List.of(succeeded, rows.size() - succeeded);
 	}
 
 	/**

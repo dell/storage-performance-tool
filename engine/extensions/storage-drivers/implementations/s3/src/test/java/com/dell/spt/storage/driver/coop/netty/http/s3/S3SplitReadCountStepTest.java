@@ -11,6 +11,7 @@ import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,8 +31,9 @@ import org.junit.jupiter.api.io.TempDir;
  * of ranges the client completed, whenever the step ends. The ranges completed are the client's own
  * range results, from the step's operation trace: a request the stub received is not one the client
  * completed. The step's bytes are those of every range completed: {@code count * object size} plus
- * the ranges of the reads the stop left unfinished, which are the only reads that may be unresolved.
- * A read the stop leaves unfinished may have completed none of its ranges.
+ * the ranges of the reads the stop left unfinished. The step's {@code operation.lifecycle.csv} ends
+ * exactly the results in its trace, successes and failures, so a result the step output, such as a
+ * read it counted, is never also left unresolved.
  */
 @Timeout(180)
 final class S3SplitReadCountStepTest {
@@ -52,12 +54,6 @@ final class S3SplitReadCountStepTest {
 	private static final int WAIT_LIMIT_SECONDS = 60;
 	/** How long each recycling step may drain, so the ladder ends in minutes at most. */
 	private static final int RECYCLING_WAIT_LIMIT_SECONDS = 10;
-	/**
-	 * Unresolved reads beyond the unfinished ones in the trace: the stop can refuse a read's initial
-	 * pass between its dispatch and its result, which leaves it unresolved with no row. Initial passes
-	 * run one at a time on a driver's dispatching thread, so this is a few at most.
-	 */
-	private static final int UNRESOLVED_WITHOUT_A_ROW = CONCURRENCY;
 	/** A range's first attempt and the driver's three retries. */
 	private static final int RANGE_ATTEMPTS = 4;
 	private static final String CONTEXT = "READ-" + CONCURRENCY;
@@ -169,7 +165,7 @@ final class S3SplitReadCountStepTest {
 		assertEquals(completed.complete(), counts.get(0), () -> counts + " against " + completed);
 		assertTrue(counts.get(1) <= refusedObjects, () -> counts + " with " + refusedObjects + " objects refused");
 		assertEquals(completed.bytes(), bytes.get(CONTEXT), () -> "bytes of " + completed);
-		assertUnresolvedWithin(completed);
+		assertLifecycleEndsEveryResult();
 	}
 
 	/**
@@ -190,6 +186,7 @@ final class S3SplitReadCountStepTest {
 		assertEquals(limit, stub.objectRequests().stream().filter(S3SplitReadCountStepTest::isRange)
 						.map(NicSetLoopback.Request::path).distinct().count(), "no object beyond the limit's reads is read");
 		assertEquals(0, unresolved());
+		assertLifecycleEndsEveryResult();
 	}
 
 	/**
@@ -216,6 +213,7 @@ final class S3SplitReadCountStepTest {
 
 		assertEquals(List.of((long) limit - alwaysRefused, (long) alwaysRefused), counts, stub.objectRequests()::toString);
 		assertEquals(0, unresolved());
+		assertLifecycleEndsEveryResult();
 	}
 
 	private static String countLimited(final int limit, final String opSettings, final String items) {
@@ -233,24 +231,30 @@ final class S3SplitReadCountStepTest {
 	}
 
 	/** The step counted what the client completed, and completed some reads. */
-	private void assertCounted(final List<Long> counts, final RangeResultTrace.Completed completed) throws IOException {
+	private void assertCounted(final List<Long> counts, final RangeResultTrace.Completed completed)
+					throws IOException, InterruptedException {
 		assertTrue(completed.complete() > 0, completed::toString);
 		assertCountedAsCompleted(counts, completed);
 	}
 
 	/** The step counted what the client completed, which may be nothing. */
 	private void assertCountedAsCompleted(final List<Long> counts, final RangeResultTrace.Completed completed)
-					throws IOException {
+					throws IOException, InterruptedException {
 		assertEquals(List.of(completed.complete(), 0L), counts, completed::toString);
 		assertEquals(completed.bytes(), bytes.getOrDefault(CONTEXT, 0L), () -> "bytes of " + completed);
-		assertUnresolvedWithin(completed);
+		assertLifecycleEndsEveryResult();
 	}
 
-	/** Only reads the stop left unfinished are unresolved. */
-	private void assertUnresolvedWithin(final RangeResultTrace.Completed completed) throws IOException {
-		final var unresolved = unresolved();
-		assertTrue(unresolved <= completed.unfinished() + UNRESOLVED_WITHOUT_A_ROW,
-						() -> unresolved + " unresolved against " + completed);
+	/**
+	 * The lifecycle accepted exactly the successful results in the step's trace and failed exactly the
+	 * others: a result output and then left unresolved, or ended without output, breaks one of them.
+	 * With the artifact's own reconciliation, the unresolved are the rest of what the step selected.
+	 */
+	private void assertLifecycleEndsEveryResult() throws IOException, InterruptedException {
+		final var lifecycle = lifecycle();
+		final var results = trace.results(stepId);
+		assertEquals(results, List.of(lifecycle.get("accepted"), lifecycle.get("failed")),
+						() -> "the lifecycle " + lifecycle + " against the trace's results " + results);
 	}
 
 	/** What the client completed of the objects {@code counted} picks, by their paths. */
@@ -306,6 +310,11 @@ final class S3SplitReadCountStepTest {
 
 	/** {@code unresolved} in the step's {@code operation.lifecycle.csv}, which reconciles. */
 	private long unresolved() throws IOException {
+		return lifecycle().get("unresolved");
+	}
+
+	/** The counts of the step's {@code operation.lifecycle.csv}, which reconciles, by column. */
+	private Map<String, Long> lifecycle() throws IOException {
 		final var lines = Files.readAllLines(
 						Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), stepId)));
 		assertEquals(OperationLifecycleArtifact.HEADER, lines.get(0));
@@ -313,6 +322,10 @@ final class S3SplitReadCountStepTest {
 		final var header = List.of(lines.get(0).split(",", -1));
 		final var row = lines.get(1).split(",", -1);
 		assertEquals("true", row[header.indexOf("terminal")], () -> "the lifecycle reconciles: " + lines);
-		return Long.parseLong(row[header.indexOf("unresolved")]);
+		final Map<String, Long> counts = new LinkedHashMap<>();
+		for (final var column : List.of("selected", "accepted", "failed", "unattempted", "unresolved")) {
+			counts.put(column, Long.parseLong(row[header.indexOf(column)]));
+		}
+		return counts;
 	}
 }
