@@ -965,7 +965,7 @@ exit "${STUB_JAVA_EXIT:-0}"
 		def requireOptions = { String name, List<String> got ->
 			def missing = launcherRequiredJavaOptions.findAll { got != null && !got.contains(it) }
 			if (missing) {
-				problems << "${name}: java starts without ${missing}: ${got}"
+				problems << "${name}: java starts without ${missing} (required by launcherRequiredJavaOptions in engine/bundle/build.gradle): ${got}"
 			}
 		}
 		def caseNumber = 0
