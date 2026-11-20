@@ -56,8 +56,8 @@ class LostSliceStopAtOnceTest {
 	/** When each slice's stop began, by slice index. */
 	private final long[] stopNanos = new long[3];
 	private volatile long lostNanos;
-	/** Whether slice 2's loadStepId times out once on a stop at once's thread. */
-	private volatile boolean failLoadStepIdAtOnce;
+	/** The slice whose loadStepId times out once on a stop at once's thread, or -1 for none. */
+	private volatile int failLoadStepIdAtOnceSlice = -1;
 	/** When that failed loadStepId call ended. */
 	private volatile long failedLoadStepIdEndNanos;
 
@@ -84,7 +84,7 @@ class LostSliceStopAtOnceTest {
 	void aStopAtOnceThatFailedBeforeItWasSentIsSentByTheStepsStopOnce() throws Exception {
 		// The reachable worker's loadStepId, which the stop calls before the stop itself, times out once,
 		// on the stop at once's thread, after a while: the step's stop waits for it and then sends the stop.
-		failLoadStepIdAtOnce = true;
+		failLoadStepIdAtOnceSlice = 2;
 		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
 
 		awaitFailing(client);
@@ -96,6 +96,21 @@ class LostSliceStopAtOnceTest {
 		// The close's stop runs the step's stop again: no further stop.
 		client.doStop();
 		assertEquals(1, stoppedBy.get(2).size(), "still one stop: " + stoppedBy.get(2));
+	}
+
+	@Test
+	void aLostSliceWhoseStopAtOnceFailedBeforeItWasSentGetsNoSecondStop() throws Exception {
+		// The lost worker's loadStepId times out on its stop at once's thread, so that stop is never sent:
+		// the step's stop sends a second stop only to a slice that is not lost, as a lost one's would fail.
+		failLoadStepIdAtOnceSlice = 1;
+		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
+
+		awaitFailing(client);
+		client.doStop();
+
+		assertEquals(List.of(), stoppedBy.get(1), "the lost slice gets no stop after its unsent stop at once");
+		assertEquals(1, stoppedBy.get(2).size(), "the reachable worker still gets one stop: " + stoppedBy.get(2));
+		assertEquals(1, stoppedBy.get(0).size(), "the entry's own slice still gets one stop: " + stoppedBy.get(0));
 	}
 
 	@Test
@@ -211,23 +226,19 @@ class LostSliceStopAtOnceTest {
 		for (var i = 0; i < 3; i++) {
 			final int index = i;
 			final LoadStep slice = mock(LoadStep.class);
-			if (i == 2) {
-				final boolean[] failed = new boolean[1];
-				when(slice.loadStepId()).thenAnswer(invocation -> {
-					synchronized (failed) {
-						if (failLoadStepIdAtOnce && !failed[0]
-										&& Thread.currentThread().getName().startsWith(STOP_AT_ONCE_THREAD)) {
-							failed[0] = true;
-							Thread.sleep(300);
-							failedLoadStepIdEndNanos = System.nanoTime();
-							throw responseTimeout();
-						}
+			final boolean[] failed = new boolean[1];
+			when(slice.loadStepId()).thenAnswer(invocation -> {
+				synchronized (failed) {
+					if (failLoadStepIdAtOnceSlice == index && !failed[0]
+									&& Thread.currentThread().getName().startsWith(STOP_AT_ONCE_THREAD)) {
+						failed[0] = true;
+						Thread.sleep(300);
+						failedLoadStepIdEndNanos = System.nanoTime();
+						throw responseTimeout();
 					}
-					return "slice-" + index;
-				});
-			} else {
-				when(slice.loadStepId()).thenReturn("slice-" + i);
-			}
+				}
+				return "slice-" + index;
+			});
 			when(slice.toString()).thenReturn("slice-" + i);
 			if (i == 1) {
 				when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
@@ -238,8 +249,9 @@ class LostSliceStopAtOnceTest {
 				});
 			} else if (i == 2 && timingOut) {
 				when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
-					// A long poll, so that one is in flight when the stop comes, as on a worker.
-					if (slice2StopBegun.await(200, TimeUnit.MILLISECONDS)) {
+					// A poll in flight until the stop comes, as on a worker whose await waits on the state lock
+					// its stop holds: the stop at once begins at the loss, well within this bound.
+					if (slice2StopBegun.await(BOUND.toMillis(), TimeUnit.MILLISECONDS)) {
 						slice2StopEnded.await();
 						throw responseTimeout();
 					}

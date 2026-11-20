@@ -161,8 +161,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	/** Whether a failed metrics fetch can lose a slice: from the aggregator's start to the step's stop. */
 	private volatile boolean metricsFetchLosesSlices;
 	/**
-	 * Whether a lost slice stops the other remote slices at once, from its own thread: from the start
-	 * of an ordinary distributed step's await to its stop. Guarded by lostSliceLock.
+	 * Whether a lost slice stops every started slice at once, each from a thread of its own: from the
+	 * start of an ordinary distributed step's await to its stop. Guarded by lostSliceLock.
 	 */
 	private boolean lostSliceStopsAtOnce;
 	/**
@@ -1465,7 +1465,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				lostSliceFailure.addSuppressed(failure);
 			}
 			if (lostSliceStopsAtOnce && stopsAtOnce == null) {
-				stopsAtOnce = stopReachableSlices();
+				stopsAtOnce = stopStartedSlicesAtOnce();
 			}
 		}
 		return true;
@@ -1481,7 +1481,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 *
 	 * @return the thread of each slice's stop, by slice
 	 */
-	private IdentityHashMap<LoadStep, Thread> stopReachableSlices() {
+	private IdentityHashMap<LoadStep, Thread> stopStartedSlicesAtOnce() {
 		final IdentityHashMap<LoadStep, Thread> stops = new IdentityHashMap<>();
 		var remoteStops = 0;
 		for (var i = 0; i < startedSliceCount && i < stepSlices.size(); i++) {
@@ -1568,10 +1568,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
-	 * Waits for the stops at once, after the step's own stop has stopped every other slice. An
-	 * interrupt ends the wait, and a stop still in flight then overlaps none of the entry's: its slice
-	 * gets no other stop, and the slice runs its close only after its stop, under its state lock, on
-	 * the worker for a remote slice and on the entry for its own.
+	 * Waits for the stops at once, after the step's own stop has stopped each slice that no stop at
+	 * once reached. An interrupt ends the wait, and a stop still in flight then overlaps none of the
+	 * step's: its slice gets no other stop here, and the slice runs its close only after its stop,
+	 * under its state lock, on the worker for a remote slice and on the entry for its own.
 	 *
 	 * @return whether every stop at once has ended
 	 */
