@@ -30,31 +30,22 @@ func TestNewSptAPIClient(t *testing.T) {
 }
 
 func TestSptAPIClient_GetStatus(t *testing.T) {
-	t.Run("successful status retrieval with run and metrics", func(t *testing.T) {
-		// Mock server that returns both run info and metrics
+	t.Run("run ID and state come from /status, metrics from /metrics", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/run":
-				runResponse := sptRunResponse{
-					RunID:     "test-run-123",
-					Status:    "RUNNING",
-					StartTime: "2025-01-15T10:00:00Z",
-				}
-				if err := json.NewEncoder(w).Encode(runResponse); err != nil {
-					t.Fatalf("encode failed: %v", err)
-				}
+				// The engine refuses GET /run without If-Match.
+				w.WriteHeader(http.StatusBadRequest)
+			case "/status":
+				fmt.Fprint(w, `{"state":"RUNNING","since":"2026-11-18T10:00:00Z","run_id":1763456789012}`)
 			case "/metrics":
 				metricsResponse := sptMetricsResponse{
-					LastUpdateTimeISO: "2025-01-15T10:05:00Z",
-					OpType:            "create",
-					SuccessCount:      1000,
-					FailCount:         5,
-					OpsPerSec:         150.5,
-					MeanLatency:       25.7,
-					Concurrency:       8.0,
+					OpType:       "create",
+					SuccessCount: 1000,
+					OpsPerSec:    150.5,
 				}
 				if err := json.NewEncoder(w).Encode(metricsResponse); err != nil {
-					t.Fatalf("encode failed: %v", err)
+					t.Errorf("encode failed: %v", err)
 				}
 			default:
 				w.WriteHeader(http.StatusNotFound)
@@ -62,63 +53,59 @@ func TestSptAPIClient_GetStatus(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		status, err := client.GetStatus(ctx)
+		status, err := NewSptAPIClient(server.URL, 5*time.Second).GetStatus(context.Background())
 		if err != nil {
-			t.Errorf("GetStatus() error = %v, want nil", err)
+			t.Fatalf("GetStatus() error = %v, want nil", err)
 		}
-
-		if status.RunID != "test-run-123" {
-			t.Errorf("RunID = %v, want %v", status.RunID, "test-run-123")
+		if status.RunID != "1763456789012" {
+			t.Errorf("RunID = %q, want 1763456789012", status.RunID)
 		}
 		if status.State != "RUNNING" {
-			t.Errorf("State = %v, want %v", status.State, "RUNNING")
+			t.Errorf("State = %q, want RUNNING", status.State)
 		}
 		if status.OpsPerSec != 150 {
-			t.Errorf("OpsPerSec = %v, want %v", status.OpsPerSec, 150)
+			t.Errorf("OpsPerSec = %v, want 150", status.OpsPerSec)
 		}
 		if status.CompletedItems != 1000 {
-			t.Errorf("CompletedItems = %v, want %v", status.CompletedItems, 1000)
-		}
-		if status.Duration == 0 {
-			t.Errorf("Duration = %v, want > 0", status.Duration)
+			t.Errorf("CompletedItems = %v, want 1000", status.CompletedItems)
 		}
 	})
 
-	t.Run("run info only (no metrics)", func(t *testing.T) {
+	t.Run("idle engine has a state and no run ID", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/run":
-				runResponse := sptRunResponse{
-					RunID:  "test-run-456",
-					Status: "COMPLETED",
-				}
-				if err := json.NewEncoder(w).Encode(runResponse); err != nil {
-					t.Fatalf("encode failed: %v", err)
-				}
-			case "/metrics":
-				w.WriteHeader(http.StatusNotFound)
-			default:
-				w.WriteHeader(http.StatusNotFound)
+			if r.URL.Path == "/status" {
+				fmt.Fprint(w, `{"state":"IDLE"}`)
+				return
 			}
+			w.WriteHeader(http.StatusNotFound)
 		}))
 		defer server.Close()
 
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		status, err := client.GetStatus(ctx)
+		status, err := NewSptAPIClient(server.URL, 5*time.Second).GetStatus(context.Background())
 		if err != nil {
-			t.Errorf("GetStatus() error = %v, want nil", err)
+			t.Fatalf("GetStatus() error = %v, want nil", err)
 		}
+		if status.RunID != "" || status.State != "IDLE" {
+			t.Errorf("status = run %q state %q, want no run and IDLE", status.RunID, status.State)
+		}
+	})
 
-		if status.RunID != "test-run-456" {
-			t.Errorf("RunID = %v, want %v", status.RunID, "test-run-456")
+	t.Run("without /status the run ID comes from the HEAD /run ETag", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodHead && r.URL.Path == "/run" {
+				w.Header().Set("ETag", "41")
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		status, err := NewSptAPIClient(server.URL, 5*time.Second).GetStatus(context.Background())
+		if err != nil {
+			t.Fatalf("GetStatus() error = %v, want nil", err)
 		}
-		if status.State != "COMPLETED" {
-			t.Errorf("State = %v, want %v", status.State, "COMPLETED")
+		if status.RunID != "41" {
+			t.Errorf("RunID = %q, want 41", status.RunID)
 		}
 	})
 
@@ -128,114 +115,62 @@ func TestSptAPIClient_GetStatus(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		status, err := client.GetStatus(ctx)
+		status, err := NewSptAPIClient(server.URL, 5*time.Second).GetStatus(context.Background())
 		if err != nil {
 			t.Errorf("GetStatus() error = %v, want nil", err)
 		}
-
-		// Should still return a status object, even if minimal
 		if status == nil {
-			t.Errorf("GetStatus() status = nil, want non-nil")
+			t.Fatal("GetStatus() status = nil, want non-nil")
+		}
+		if status.RunID != "" {
+			t.Errorf("RunID = %q, want none", status.RunID)
 		}
 	})
 }
 
-func TestSptAPIClient_getRunInfo(t *testing.T) {
-	t.Run("successful run info", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/run" {
-				w.WriteHeader(http.StatusNotFound)
+func TestSptAPIClient_activeRunID(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		etag       string
+		wantID     int64
+		wantActive bool
+		wantErr    string
+	}{
+		{name: "active run", status: http.StatusOK, etag: "1763456789012", wantID: 1763456789012, wantActive: true},
+		{name: "no active run", status: http.StatusNoContent},
+		{name: "active run without ETag", status: http.StatusOK, wantErr: "invalid ETag"},
+		{name: "hexadecimal ETag", status: http.StatusOK, etag: "167514e6082", wantErr: "invalid ETag"},
+		{name: "zero ETag", status: http.StatusOK, etag: "0", wantErr: "invalid ETag"},
+		{name: "unexpected status", status: http.StatusNotFound, wantErr: "run status 404"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var method, path string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				method, path = r.Method, r.URL.Path
+				if tt.etag != "" {
+					w.Header().Set("ETag", tt.etag)
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			runID, active, err := NewSptAPIClient(server.URL, 5*time.Second).activeRunID(context.Background())
+			if method != http.MethodHead || path != "/run" {
+				t.Fatalf("request = %s %s, want HEAD /run", method, path)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("activeRunID() error = %v, want %q", err, tt.wantErr)
+				}
 				return
 			}
-
-			runResponse := sptRunResponse{
-				RunID:     "test-123",
-				Status:    "RUNNING",
-				StartTime: "2025-01-15T10:00:00Z",
-				EndTime:   "",
+			if err != nil || runID != tt.wantID || active != tt.wantActive {
+				t.Fatalf("activeRunID() = %d, %t, %v, want %d, %t, nil", runID, active, err, tt.wantID, tt.wantActive)
 			}
-			if err := json.NewEncoder(w).Encode(runResponse); err != nil {
-				t.Fatalf("encode failed: %v", err)
-			}
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		runInfo, err := client.getRunInfo(ctx)
-		if err != nil {
-			t.Errorf("getRunInfo() error = %v, want nil", err)
-		}
-		if runInfo.RunID != "test-123" {
-			t.Errorf("RunID = %v, want %v", runInfo.RunID, "test-123")
-		}
-		if runInfo.Status != "RUNNING" {
-			t.Errorf("Status = %v, want %v", runInfo.Status, "RUNNING")
-		}
-	})
-
-	t.Run("no test running (404)", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		runInfo, err := client.getRunInfo(ctx)
-		if err == nil {
-			t.Errorf("getRunInfo() error = nil, want error (404)")
-		}
-		if runInfo != nil {
-			t.Errorf("getRunInfo() runInfo = %v, want nil", runInfo)
-		}
-		if !strings.Contains(err.Error(), "no test currently running") {
-			t.Errorf("error message = %v, want to contain 'no test currently running'", err.Error())
-		}
-	})
-
-	t.Run("unexpected status code", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		runInfo, err := client.getRunInfo(ctx)
-		if err == nil {
-			t.Errorf("getRunInfo() error = nil, want error (500)")
-		}
-		if runInfo != nil {
-			t.Errorf("getRunInfo() runInfo = %v, want nil", runInfo)
-		}
-	})
-
-	t.Run("invalid JSON response", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if _, err := fmt.Fprintln(w, "invalid json"); err != nil {
-				t.Fatalf("write failed: %v", err)
-			}
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		runInfo, err := client.getRunInfo(ctx)
-		if err == nil {
-			t.Errorf("getRunInfo() error = nil, want JSON parsing error")
-		}
-		if runInfo != nil {
-			t.Errorf("getRunInfo() runInfo = %v, want nil", runInfo)
-		}
-	})
+		})
+	}
 }
 
 func TestSptAPIClient_getMetrics(t *testing.T) {
@@ -287,57 +222,6 @@ func TestSptAPIClient_getMetrics(t *testing.T) {
 		}
 		if metrics != nil {
 			t.Errorf("getMetrics() metrics = %v, want nil", metrics)
-		}
-	})
-}
-
-func TestSptAPIClient_StopTest(t *testing.T) {
-	t.Run("successful stop", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != "DELETE" || r.URL.Path != "/run" {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		err := client.StopTest(ctx)
-		if err != nil {
-			t.Errorf("StopTest() error = %v, want nil", err)
-		}
-	})
-
-	t.Run("no test running (404)", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		err := client.StopTest(ctx)
-		if err != nil {
-			t.Errorf("StopTest() error = %v, want nil (404 should be treated as success)", err)
-		}
-	})
-
-	t.Run("stop command failed", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer server.Close()
-
-		client := NewSptAPIClient(server.URL, 5*time.Second)
-		ctx := context.Background()
-
-		err := client.StopTest(ctx)
-		if err == nil {
-			t.Errorf("StopTest() error = nil, want error (500)")
 		}
 	})
 }
@@ -503,16 +387,11 @@ func TestWaitForAPIReady(t *testing.T) {
 
 func TestGetSptStatus_HelperFunction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/run":
-			runResponse := sptRunResponse{
-				RunID:  "helper-test",
-				Status: "RUNNING",
-			}
-			json.NewEncoder(w).Encode(runResponse)
-		default:
-			w.WriteHeader(http.StatusNotFound)
+		if r.URL.Path == "/status" {
+			fmt.Fprint(w, `{"state":"RUNNING","run_id":42}`)
+			return
 		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
@@ -522,25 +401,7 @@ func TestGetSptStatus_HelperFunction(t *testing.T) {
 	if err != nil {
 		t.Errorf("GetSptStatus() error = %v, want nil", err)
 	}
-	if status.RunID != "helper-test" {
-		t.Errorf("RunID = %v, want %v", status.RunID, "helper-test")
-	}
-}
-
-func TestStopSptTest_HelperFunction(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "DELETE" && r.URL.Path == "/run" {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	}))
-	defer server.Close()
-
-	ctx := context.Background()
-	err := StopSptTest(ctx, server.URL)
-
-	if err != nil {
-		t.Errorf("StopSptTest() error = %v, want nil", err)
+	if status.RunID != "42" {
+		t.Errorf("RunID = %v, want %v", status.RunID, "42")
 	}
 }
