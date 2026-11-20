@@ -60,7 +60,7 @@ class AtmosUriArgsSigningTest {
 		return new DataOperationImpl<>(0, opType, item, null, "/bucket", CRED, null, 0);
 	}
 
-	private static final class TestAtmosDriver extends AtmosStorageDriver<DataItem, DataOperation<DataItem>> {
+	static final class TestAtmosDriver extends AtmosStorageDriver<DataItem, DataOperation<DataItem>> {
 
 		TestAtmosDriver(final Config cfg) throws Exception {
 			super("test-atmos", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true),
@@ -84,7 +84,7 @@ class AtmosUriArgsSigningTest {
 		}
 	}
 
-	private static Config config(final Map<String, String> uriArgs) {
+	static Config config(final Map<String, String> uriArgs) {
 		try {
 			final List<Map<String, Object>> configSchemas = Extension
 							.load(Thread.currentThread().getContextClassLoader())

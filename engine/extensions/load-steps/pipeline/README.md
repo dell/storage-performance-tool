@@ -36,6 +36,12 @@ configuration element of the pipeline load step.
 4. The `item-output-file` configuration parameter value is taken from
 the ***last*** configuration element of the pipeline load step.
 
+5. When a pipeline's exchange buffer fills (`item-output-queue-limit`,
+see [Configuration](#configuration)), each thread completing an
+operation in the earlier sub-step uses a CPU while it waits, the step
+can stall on `s3-aws`, and the earlier sub-step's reported latency
+includes the wait.
+
 # Requirements
 
 1. Execute the sequence of the configured load operations on the items

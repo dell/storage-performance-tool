@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -205,6 +206,29 @@ public class LoadStepContextImplTest {
 		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
 		when(generator.isNothingPendingRetry()).thenReturn(true);
 		return generator;
+	}
+
+	/** The await's sweep relies on this check: the failure {@code isDone()} throws, and nothing else. */
+	@Test
+	void theTerminalFailureCheckThrowsWhatIsDoneThrowsAndReadsNoLimit() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		final var context = new LoadStepContextImpl<>(
+						"failure-check-context", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			assertDoesNotThrow(context::checkTerminalFailure);
+			verify(generator, never()).isItemInputFinished();
+			verify(generator, never()).generatedOpCount();
+
+			final IntegrityTerminalException failure = new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION, "driver failed");
+			when(driver.terminalFailure()).thenReturn(failure);
+			assertSame(failure, assertThrows(IntegrityTerminalException.class, context::checkTerminalFailure));
+			assertSame(failure, assertThrows(IntegrityTerminalException.class, context::isDone));
+		} finally {
+			context.close();
+		}
 	}
 
 	@Test
@@ -3490,6 +3514,81 @@ public class LoadStepContextImplTest {
 			stepCtx.shutdown();
 			stepCtx.close();
 		}
+	}
+
+	/**
+	 * The end of the input is read after the last handoff, so only the generator's retry idle pass
+	 * can report it. The generator keeps running, so every retry is still dispatched.
+	 */
+	@Test
+	public void finiteRetryWorkloadReportsSchedulingEndAndStillRetries() throws Exception {
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", 3);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final int totalItems = 2;
+		final var flakyDriver = new FlakyThenSucceedsDriver(1, Operation.Status.RESP_FAIL_SVC);
+		final var stepCtx = buildRealRetryStepCtx(totalItems, flakyDriver, "retry-scheduling-end");
+		try {
+			runUntilDoneOrTimeout(stepCtx, "retry-only finite workload should complete");
+			awaitSchedulingEnd(stepCtx);
+			assertEquals(2 * totalItems, flakyDriver.totalPutCalls());
+			assertEquals(totalItems, flakyDriver.successCount());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void operationFailingPastTheRetryLimitStillEndsAFiniteRetryWorkload() throws Exception {
+		final int retryLimit = 2;
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-retryLimit", retryLimit);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var flakyDriver = new FlakyThenSucceedsDriver(Integer.MAX_VALUE, Operation.Status.RESP_FAIL_SVC);
+		final var stepCtx = buildRealRetryStepCtx(1, flakyDriver, "retry-past-limit");
+		try {
+			runUntilDoneOrTimeout(stepCtx, "an operation out of retries should end the workload");
+			awaitSchedulingEnd(stepCtx);
+			assertEquals(retryLimit + 1, flakyDriver.totalPutCalls());
+			assertEquals(0, flakyDriver.successCount());
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	@Test
+	public void emptyFiniteRetryWorkloadReportsSchedulingEnd() throws Exception {
+		testConfig.val("load-op-retry", true);
+		testConfig.val("load-op-recycle-mode", false);
+		testConfig.val("load-op-limit-count", 0);
+
+		final var flakyDriver = new FlakyThenSucceedsDriver(0, Operation.Status.RESP_FAIL_SVC);
+		final var stepCtx = buildRealRetryStepCtx(0, flakyDriver, "retry-empty-scheduling-end");
+		try {
+			runUntilDoneOrTimeout(stepCtx, "an empty retry-only workload should complete");
+			awaitSchedulingEnd(stepCtx);
+		} finally {
+			stepCtx.stop();
+			stepCtx.shutdown();
+			stepCtx.close();
+		}
+	}
+
+	private static void awaitSchedulingEnd(final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx)
+					throws InterruptedException {
+		final long deadline = System.currentTimeMillis() + 5_000;
+		while (stepCtx.schedulingExhaustionNanos().isEmpty() && System.currentTimeMillis() < deadline) {
+			Thread.sleep(5);
+		}
+		assertTrue(stepCtx.schedulingExhaustionNanos().isPresent(), "the end of scheduling should be recorded");
 	}
 
 	@Test

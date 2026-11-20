@@ -57,6 +57,36 @@ public class TestConfigBuilder {
 		return new BasicConfig(PATH_SEPARATOR, schema, values);
 	}
 
+	/**
+	 * Create the full test configuration with every map-typed setting of a node whose classpath holds
+	 * the HTTP and S3 extensions: {@code storage.net.http.headers}, {@code storage.net.http.uri.args},
+	 * {@code storage.object.tagging.tags} and {@code storage.net.nodeInterfaces}, each holding {@code
+	 * base=1}. The cached schema is not modified.
+	 */
+	@SuppressWarnings("unchecked")
+	public static Config configWithMapSettings() {
+		final Map<String, Object> schema = deepCopy(loadFullSchema());
+		final Map<String, Object> values = createFullValues();
+		for (final Map<String, Object> tree : List.of(schema, values)) {
+			final boolean isSchema = tree == schema;
+			final var http = httpBranch(tree);
+			http.put("headers", isSchema ? Map.class : baseEntry());
+			final var uri = (Map<String, Object>) http.computeIfAbsent("uri", k -> new HashMap<String, Object>());
+			uri.put("args", isSchema ? Map.class : baseEntry());
+			final var storage = (Map<String, Object>) tree.get("storage");
+			final var net = (Map<String, Object>) storage.get("net");
+			net.put("nodeInterfaces", isSchema ? Map.class : baseEntry());
+			final var object = (Map<String, Object>) storage.computeIfAbsent("object", k -> new HashMap<String, Object>());
+			final var tagging = (Map<String, Object>) object.computeIfAbsent("tagging", k -> new HashMap<String, Object>());
+			tagging.put("tags", isSchema ? Map.class : baseEntry());
+		}
+		return new BasicConfig(PATH_SEPARATOR, schema, values);
+	}
+
+	private static Map<String, Object> baseEntry() {
+		return new HashMap<>(Map.of("base", "1"));
+	}
+
 	@SuppressWarnings("unchecked")
 	private static Map<String, Object> httpBranch(final Map<String, Object> tree) {
 		final var storage = (Map<String, Object>) tree.computeIfAbsent("storage", k -> new HashMap<String, Object>());
