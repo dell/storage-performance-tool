@@ -389,39 +389,74 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// ── 14b. Wrap the driver result output to release generator permits ──
 		// The LoadStepContextImpl constructor sets itself as the driver's
 		// operationResultOutput.  We replace it with a thin wrapper that
-		// retires each operation the generator dispatched once, at its last
-		// result: it counts the operation out of flight and releases one
-		// MixedLoadGenerator concurrency permit (see endsOperation), then
+		// retires each operation the generator dispatched, counting it out of
+		// flight and releasing one MixedLoadGenerator concurrency permit, then
 		// delegates every result to the original step context unchanged.
 		// This prevents the generator from flooding the driver's input queue.
-		final Output resultOutput = new Output() {
-			@Override
-			public boolean put(final Object op) {
-				retire(generator, (Operation) op, compositeResults);
-				return stepCtx.put((Operation) op);
-			}
+		// On a driver that declares its composite results the wrapper retires an
+		// operation once, at its last result (see endsOperation); on any other
+		// driver it retires one at every result, as before. Chosen here, once.
+		final boolean compositeResultsDeclared = compositeResults == CompositeResults.IN_PARTS
+						|| compositeResults == CompositeResults.ONE_RESULT;
+		final Output resultOutput = !compositeResultsDeclared
+						? new Output() {
+							@Override
+							public boolean put(final Object op) {
+								generator.onOperationCompleted((Operation) op);
+								generator.releasePermit();
+								return stepCtx.put((Operation) op);
+							}
 
-			@Override
-			public int put(final List ops, final int from, final int to) {
-				for (int i = from; i < to; i++) {
-					retire(generator, (Operation) ops.get(i), compositeResults);
-				}
-				return stepCtx.put((List) ops, from, to);
-			}
+							@Override
+							public int put(final List ops, final int from, final int to) {
+								for (int i = from; i < to; i++) {
+									generator.onOperationCompleted((Operation) ops.get(i));
+									generator.releasePermit();
+								}
+								return stepCtx.put((List) ops, from, to);
+							}
 
-			@Override
-			public int put(final List ops) {
-				return put(ops, 0, ops.size());
-			}
+							@Override
+							public int put(final List ops) {
+								return put(ops, 0, ops.size());
+							}
 
-			@Override
-			public Input getInput() {
-				return stepCtx.getInput();
-			}
+							@Override
+							public Input getInput() {
+								return stepCtx.getInput();
+							}
 
-			@Override
-			public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
-		};
+							@Override
+							public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
+						}
+						: new Output() {
+							@Override
+							public boolean put(final Object op) {
+								retire(generator, (Operation) op, compositeResults);
+								return stepCtx.put((Operation) op);
+							}
+
+							@Override
+							public int put(final List ops, final int from, final int to) {
+								for (int i = from; i < to; i++) {
+									retire(generator, (Operation) ops.get(i), compositeResults);
+								}
+								return stepCtx.put((List) ops, from, to);
+							}
+
+							@Override
+							public int put(final List ops) {
+								return put(ops, 0, ops.size());
+							}
+
+							@Override
+							public Input getInput() {
+								return stepCtx.getInput();
+							}
+
+							@Override
+							public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
+						};
 		// A capped step also counts each final result the step context does not count, so the step
 		// can end once every operation it dispatched has ended. A step with no count limit (0, or
 		// Long.MAX_VALUE), or on a driver that does not declare its composite results, keeps the
@@ -526,7 +561,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 	 *
 	 * <p>On a driver that does not say ({@link CompositeResults#UNDECLARED}, the interface default,
 	 * for example a driver that wraps a cooperative one), every result ends its operation, as
-	 * before: the step cannot tell a composite's first result from its last there.
+	 * before: the step cannot tell a composite's first result from its last there. The step's result
+	 * wrapper on such a driver retires every result without asking this.
 	 *
 	 * <p>On a driver that declares it, a part's result never ends one: the driver creates parts, and
 	 * the generator never counted one in. An ordinary operation's result does, whatever its status:

@@ -919,15 +919,14 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/**
 	 * Takes queue custody of {@code childOp}. A composite's own finalization or abort is the
-	 * operation its load generator dispatched, and so is an operation the driver held before that
-	 * an extension queues again as its own permit owner; any other child, a part or an extension's
-	 * ordinary child (a new one, whatever its permit owner), the driver created, and the tracker
-	 * records it so (see {@link OperationLifecycleTracker#driverCreatedQueued}).
+	 * operation its load generator dispatched; any other child, a part or an extension's ordinary
+	 * child, the driver created, and the tracker records it so (see
+	 * {@link OperationLifecycleTracker#driverCreatedQueued}).
 	 */
 	private boolean queueChild(final OperationLifecycleTracker<O> lifecycle, final O childOp, final O permitOwner) {
-		final boolean generatorDispatched = compositeParent(childOp, permitOwner) == childOp
-						|| (childOp == permitOwner && lifecycle.stateOf(childOp) != OperationLifecycleState.NEW);
-		return generatorDispatched ? lifecycle.driverQueued(childOp) : lifecycle.driverCreatedQueued(childOp);
+		return compositeParent(childOp, permitOwner) == childOp
+						? lifecycle.driverQueued(childOp)
+						: lifecycle.driverCreatedQueued(childOp);
 	}
 
 	@SuppressWarnings("unchecked")

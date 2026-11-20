@@ -147,6 +147,10 @@ class MixedLoadStepCompositeResultTest {
 				awaitQuiet(factory);
 				// The control keeps one permit and one count for each upload; every other mode none.
 				final int kept = mode == Mode.UNFINISHED_ABORT_SUCCEEDS ? n : 0;
+				if (mode == Mode.CHILD_ENQUEUE_TIMEOUT) {
+					// The recorder counts the failure after the step's output has retired it.
+					awaitCount(factory.timeoutFailures, n);
+				}
 				awaitSettled(generator, permits, type, kept);
 				assertEquals(CONCURRENCY - kept, permits.availablePermits(),
 								mode + ": permits after operation " + n + ": " + factory.sequence);
@@ -284,6 +288,14 @@ class MixedLoadStepCompositeResultTest {
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
 		while (System.nanoTime() < deadline
 						&& (permits.availablePermits() != CONCURRENCY - kept || generator.inFlightCount(type) != kept)) {
+			Thread.sleep(10);
+		}
+	}
+
+	/** Waits, bounded, until {@code counter} reaches {@code expected}. */
+	private static void awaitCount(final AtomicInteger counter, final int expected) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (System.nanoTime() < deadline && counter.get() < expected) {
 			Thread.sleep(10);
 		}
 	}

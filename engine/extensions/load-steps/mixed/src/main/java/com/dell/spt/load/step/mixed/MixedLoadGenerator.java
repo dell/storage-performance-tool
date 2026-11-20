@@ -7,7 +7,6 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
-import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -75,9 +74,9 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private long dispatched = 0;
 	// Set once dispatch has reached the count limit, read by the step's completion check.
 	private volatile boolean countLimitReached = false;
-	// Whether the result wrapper retires a composite only at its last result, see compositeResults.
-	// Set once at setup; read only when an operation is settled unattempted.
-	private volatile boolean compositesRetireOnce;
+	// Whether the driver declares how it publishes composite results, see compositeResults. Set once
+	// at setup, before operationLifecycle, which alone reads it.
+	private boolean compositeResultsDeclared;
 	// Operations whose final result the step context did not count, such as an interrupted one.
 	// Counted only in a count-limited step, by UncountedFinalResultOutput on the drivers'
 	// completion threads; a result the step context counts is not counted here. Each platform
@@ -384,42 +383,40 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	@Override
 	public void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {
 		this.operationLifecycle = lifecycle == null ? OperationLifecycleTracker.disabled() : lifecycle;
-		if (lifecycle != null && lifecycle.isEnabled()) {
+		if (lifecycle != null && lifecycle.isEnabled() && compositeResultsDeclared) {
 			lifecycle.unattemptedObserver(this::onOperationUnattempted);
 		}
 	}
 
 	/**
 	 * Counts out an operation the driver accepted but never sent, which publishes no result at
-	 * stop. The tracker calls it only for an operation that entered the driver's custody as one
-	 * the generator dispatched, not one the driver created itself ({@code
+	 * stop. The generator registers it only on a driver that declares its composite results (see
+	 * {@link #compositeResults}). The tracker calls it only for an operation that entered the
+	 * driver's custody as one the generator dispatched, not one the driver created itself ({@code
 	 * OperationLifecycleTracker.driverCreatedQueued}), so it debits only operations the generator
 	 * counted in. A part was never counted in either, so it never counts out, from whatever route.
-	 * On a driver that declares its composite results (see {@link #compositeResults}), a composite
-	 * counts out here once: the result wrapper retires a composite only at its last result, so an
-	 * unfinished one is still counted when the stop settles it, and a composite that published its
-	 * last result is terminal and is not settled unattempted after it. On any other driver the
-	 * wrapper retires a composite at its first result, so it never counts out here, as before. Runs inside
+	 * A composite counts out here once: the result wrapper retires a composite only at its last
+	 * result, so an unfinished one is still counted when the stop settles it, and a composite that
+	 * published its last result is terminal and is not settled unattempted after it. Runs inside
 	 * the tracker's unattempted transition, so it must stay bounded and non-throwing.
 	 */
 	void onOperationUnattempted(final O op) {
-		if (op instanceof PartialOperation || (!compositesRetireOnce && op instanceof CompositeOperation)) {
-			return;
+		if (!(op instanceof PartialOperation)) {
+			onOperationCompleted(op);
 		}
-		onOperationCompleted(op);
 	}
 
 	/**
-	 * Tells the generator how its driver publishes composite results, read once at setup, before the
-	 * step starts. Only on a driver that declares it ({@link CompositeResults#IN_PARTS} or
-	 * {@link CompositeResults#ONE_RESULT}) does the result wrapper retire a composite once, at its
-	 * last result, so that an unsent composite is still counted when the stop settles it and counts
-	 * out then. On any other driver, and when this is never called, every result retires its
-	 * operation, a composite's first result included, so an unsent composite does not count out
-	 * again, as before.
+	 * Tells the generator how its driver publishes composite results, read once at setup, before
+	 * {@link #operationLifecycle}. Only on a driver that declares it ({@link CompositeResults#IN_PARTS}
+	 * or {@link CompositeResults#ONE_RESULT}) does the generator count out an operation the driver
+	 * held unsent at the stop, since only there does the result wrapper retire each operation once.
+	 * On any other driver ({@link CompositeResults#UNDECLARED}), and when this is never called, the
+	 * step keeps its earlier accounting: every result retires an operation and nothing counts out
+	 * at the stop.
 	 */
 	void compositeResults(final CompositeResults compositeResults) {
-		compositesRetireOnce = compositeResults == CompositeResults.IN_PARTS
+		compositeResultsDeclared = compositeResults == CompositeResults.IN_PARTS
 						|| compositeResults == CompositeResults.ONE_RESULT;
 	}
 

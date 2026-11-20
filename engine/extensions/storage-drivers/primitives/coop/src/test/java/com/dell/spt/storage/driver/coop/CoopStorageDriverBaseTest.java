@@ -1653,13 +1653,12 @@ class CoopStorageDriverBaseTest {
 	}
 
 	/**
-	 * An operation a load generator dispatched, whose pass ended, and that an extension queues
-	 * again as its own permit owner, stays the generator's: it is not marked driver-created, so a
-	 * mixed step's result wrapper still retires it at its result, and the stop that takes it back
-	 * unsent reaches the observer. A new extension child is driver-created, whatever its owner.
+	 * A child the driver created, whose pass ended, and that the driver queues again as its own
+	 * permit owner, as the base's part retry does, stays driver-created: the stop that takes it back
+	 * unsent does not reach the unattempted observer, which counts out only generator work.
 	 */
 	@Test
-	void anOperationRequeuedAsItsOwnPermitOwnerStaysTheGenerators() throws Exception {
+	void aDriverCreatedChildRequeuedAsItsOwnPermitOwnerStaysDriverCreated() throws Exception {
 		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
 		final var dataInput = DataInput.instance(
 						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
@@ -1667,28 +1666,26 @@ class CoopStorageDriverBaseTest {
 						"requeued-own-owner-step", dataInput, storageConfig, false, 4);
 		final List<Operation<Item>> observed = new CopyOnWriteArrayList<>();
 		driver.operationLifecycle().unattemptedObserver(observed::add);
-		final Operation<Item> generated = new OperationImpl<>(
-						0, OpType.READ, new DataItemImpl("generated", 0, 1), null, "/bucket", null);
-		final Operation<Item> newChild = new OperationImpl<>(
-						0, OpType.READ, new DataItemImpl("new-child", 0, 1), null, "/bucket", null);
+		final Operation<Item> owner = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("owner", 0, 1), null, "/bucket", null);
+		final Operation<Item> child = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("child", 0, 1), null, "/bucket", null);
 		try {
 			final var lifecycle = driver.operationLifecycle();
-			assertTrue(lifecycle.driverQueued(generated));
-			assertTrue(lifecycle.dispatched(generated));
-			assertTrue(lifecycle.completionStarted(generated));
-			assertTrue(lifecycle.terminal(generated));
-			assertTrue(driver.enqueueChildOperation(generated, generated, "extension retry"));
-			assertTrue(driver.enqueueChildOperation(newChild, newChild, "extension child"));
-			assertEquals(OperationLifecycleState.DRIVER_QUEUED, generated.lifecycle().state());
-			assertFalse(generated.lifecycle().isDriverCreated(), "the requeued operation is the generator's");
-			assertTrue(newChild.lifecycle().isDriverCreated(), "a new child is the driver's");
+			assertTrue(driver.enqueueChildOperation(child, owner, "extension child"));
+			assertTrue(child.lifecycle().isDriverCreated(), "precondition: a new child is the driver's");
+			assertTrue(lifecycle.dispatched(child));
+			assertTrue(lifecycle.completionStarted(child));
+			assertTrue(lifecycle.terminal(child));
+			assertTrue(driver.enqueueChildOperation(child, child, "extension retry"));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, child.lifecycle().state());
+			assertTrue(child.lifecycle().isDriverCreated(), "the retried child is still the driver's");
 
 			driver.closeAdmission();
 			driver.recoverQueuedOperations();
 
-			assertEquals(OperationLifecycleState.UNATTEMPTED, generated.lifecycle().state());
-			assertEquals(OperationLifecycleState.UNATTEMPTED, newChild.lifecycle().state());
-			assertEquals(List.of(generated), observed, "only the generator's operation reaches the observer");
+			assertEquals(OperationLifecycleState.UNATTEMPTED, child.lifecycle().state());
+			assertEquals(List.of(), observed, "the driver's own child does not reach the observer");
 		} finally {
 			driver.close();
 		}

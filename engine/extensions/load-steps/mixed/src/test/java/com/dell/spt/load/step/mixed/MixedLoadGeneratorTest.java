@@ -1274,6 +1274,7 @@ class MixedLoadGeneratorTest {
 			}
 		};
 		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, driver, 1_000);
+		gen.compositeResults(CompositeResults.IN_PARTS);
 		gen.operationLifecycle(lifecycle);
 		dispatch(gen, 300);
 		// The schedule is shuffled, so the sent operations are chosen by type: four of each.
@@ -1416,6 +1417,7 @@ class MixedLoadGeneratorTest {
 		builders.put(OpType.STAT, testBuilder(OpType.STAT, null));
 		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
 						new PoolItemInput<>(makeItems(10)), builders, driver, 1_000, mockNewItemSupplier());
+		gen.compositeResults(CompositeResults.IN_PARTS);
 		gen.operationLifecycle(lifecycle);
 		dispatch(gen, 20);
 		final List<Operation> reads = held.stream().filter(op -> op.type() == OpType.READ).toList();
@@ -1433,6 +1435,37 @@ class MixedLoadGeneratorTest {
 		// The generator's own unsent READ still counts out.
 		assertTrue(lifecycle.unattempted(reads.get(0)));
 		assertEquals(count - 1, gen.inFlightCount(OpType.READ), "the generator's unsent READ counted out");
+	}
+
+	@Test
+	@DisplayName("On a driver that does not declare its composite results nothing counts out when unattempted")
+	@Timeout(30)
+	void anUndeclaredDriverCountsNothingOutWhenUnattempted() throws Exception {
+		final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+		final List<Operation> held = new ArrayList<>();
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				assertTrue(lifecycle.driverQueued(op));
+				held.add(op);
+				return true;
+			}
+		};
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		for (int i = 0; i < 20; i++) {
+			pool.addDeleteItem(new ItemImpl("to-delete-" + i));
+		}
+		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, driver, 1_000);
+		gen.compositeResults(CompositeResults.UNDECLARED);
+		gen.operationLifecycle(lifecycle);
+		dispatch(gen, 20);
+		final Operation read = held.stream().filter(op -> op.type() == OpType.READ).findFirst().orElseThrow();
+		final int count = gen.inFlightCount(OpType.READ);
+
+		// As before the step counted operations held unsent out at the stop: the step keeps that
+		// accounting on such a driver, whose every result retires an operation.
+		assertTrue(lifecycle.unattempted(read));
+		assertEquals(count, gen.inFlightCount(OpType.READ), "an unsent READ stays counted, as before");
 	}
 
 	private static long count(final List<Operation> ops, final OpType type) {
