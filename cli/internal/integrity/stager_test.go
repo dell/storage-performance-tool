@@ -515,6 +515,17 @@ func TestStageRefusalDoesNotWaitOnAnOpenWriter(t *testing.T) {
 			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field", ""},
 		{"buffered saved row with a quote inside its path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
 			savedItemRowMessage("2"), deleteSavedItemRowMessage("2")},
+		// DELETE reads a first line the canonical reader refused as a saved row, and refuses it
+		// from the bytes read, without waiting for the rest of the line.
+		{"first line with a quote in the name and no line end yet", `/b/k"1,2a0f`,
+			"read canonical header: unexpected quote in unquoted field",
+			savedItemsLineMessage(1, "has a quote in the object name")},
+		{"first line with a quote after the name and no line end yet", `/b/k,2"a0f`,
+			"read canonical header: unexpected quote in unquoted field",
+			savedItemsLineMessage(1, "has a quote, which no field of a saved row holds")},
+		{"whole first line with a quote in the name", `/b/k"1,2a0f,10,0/0` + "\n",
+			`items file must use exact header ["bucket" "key" "size" "version_id"]: ` + savedItemRowMessage("1"),
+			savedItemsLineMessage(1, "has a quote in the object name")},
 	}
 	sources := map[string]func(t *testing.T) (path string, writer *os.File){
 		"named pipe": func(t *testing.T) (string, *os.File) {

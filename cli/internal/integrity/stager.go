@@ -180,6 +180,14 @@ func stageInputManifestWithPolicyAndOperations(
 		if savedErr := engineCheck.refusalUnderHeader(reader, 1); savedErr != nil {
 			return "", "", "", savedErr
 		}
+		if !engineCheck.regularFile {
+			// A stream may not go on yet: judge the first line from the bytes already read, and
+			// read on only when it parses as a saved row, so a refusal never waits for a writer.
+			known := append(bytes.Clone(firstBytes), reader.Buffered()...)
+			if savedErr := savedFirstLineRefusal(known, reader.Done()); savedErr != nil {
+				return "", "", "", savedErr
+			}
+		}
 		if engineCheck.regularFile {
 			// The check above may have read on past the first record: read the file again.
 			if _, seekErr := in.Seek(0, io.SeekStart); seekErr != nil {

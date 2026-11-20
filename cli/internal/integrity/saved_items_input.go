@@ -63,6 +63,12 @@ const (
 	savedItemsPercentReason = `has a "%" in its object name, and a write can store a percent ` +
 		"escape decoded, so the row may not name the stored key; convert such a file by hand to a " +
 		"canonical bucket,key,size,version_id manifest of the stored keys"
+	savedItemsPlusReason = `has a "+" in its object name, and a write sends it raw while DELETE ` +
+		`encodes it, so a target that reads a raw "+" as a space may store another key; convert ` +
+		"such a file by hand to a canonical bucket,key,size,version_id manifest of the stored keys"
+	// savedItemsQuoteReason is the reason for a first line, not yet read to its end, with a quote
+	// after the object name: no field of a saved row holds one.
+	savedItemsQuoteReason = "has a quote, which no field of a saved row holds"
 )
 
 // savedItemsLineTooLong is the reason for a line whose content, without its line end, is longer
@@ -125,6 +131,11 @@ func parseSavedItemLine(line string) (ManifestRecord, string) {
 	if strings.ContainsRune(name, '%') {
 		return ManifestRecord{}, savedItemsPercentReason
 	}
+	// A Netty S3 write sends a "+" raw in the path while DELETE encodes it as %2B, so a target
+	// that reads a raw "+" as a space stores another key than the row names.
+	if strings.ContainsRune(name, '+') {
+		return ManifestRecord{}, savedItemsPlusReason
+	}
 	if !isSavedItemOffset(offset) {
 		return ManifestRecord{}, "has an offset that is not a hexadecimal 64-bit integer"
 	}
@@ -136,6 +147,58 @@ func parseSavedItemLine(line string) (ManifestRecord, string) {
 		return ManifestRecord{}, "has a layer/mask that is not <hex layer>/<hex mask>"
 	}
 	return ManifestRecord{bucket: bucket, key: key, size: size}, ""
+}
+
+// savedFirstLineRefusal judges the first line of a stream from the bytes already read, known,
+// without reading more: the line up to its line end when known holds one, or all of known when the
+// input ended there (atEnd). Otherwise known is the start of a line whose end is not read yet, and
+// the line is refused only for a reason true of every line that starts with known. It returns the
+// refusal, or nil when the line parses as a saved row or the start does not decide it.
+func savedFirstLineRefusal(known []byte, atEnd bool) error {
+	line, found := known, false
+	if end := bytes.IndexByte(known, '\n'); end >= 0 {
+		line, found = bytes.TrimSuffix(known[:end], []byte("\r")), true
+	}
+	if found || atEnd {
+		if len(line) > maxCanonicalCSVRecordBytes {
+			return savedItemsLineError(1, savedItemsLineTooLong)
+		}
+		if _, reason := parseSavedItemLine(string(line)); reason != "" {
+			return savedItemsLineError(1, reason)
+		}
+		return nil
+	}
+	if reason := savedLineStartReason(known); reason != "" {
+		return savedItemsLineError(1, reason)
+	}
+	return nil
+}
+
+// savedLineStartReason returns a reason true of every line that starts with start, which holds no
+// LF, or "" when the line's end decides it.
+func savedLineStartReason(start []byte) string {
+	limit := maxCanonicalCSVRecordBytes
+	// The content is longer than the limit, unless the byte after it is the CR of a CRLF.
+	if len(start) > limit+1 || (len(start) == limit+1 && start[limit] != '\r') {
+		return savedItemsLineTooLong
+	}
+	name, _, _ := bytes.Cut(start, []byte(","))
+	switch {
+	case bytes.IndexByte(name, '"') >= 0:
+		return "has a quote in the object name"
+	case bytes.IndexByte(start, '"') >= 0:
+		return savedItemsQuoteReason
+	case bytes.Count(start, []byte(",")) > 3:
+		return "has more than 4 fields: a comma in the object key cannot be told from a field separator"
+	}
+	if len(start) == limit+1 {
+		// Only the byte after the CR is unread: whether the content ends at the limit or goes on,
+		// a content that does not parse refuses the line.
+		if _, reason := parseSavedItemLine(string(start[:limit])); reason != "" {
+			return reason
+		}
+	}
+	return ""
 }
 
 // readSavedItems reads input, from the start of the file, as a saved engine items file and passes
@@ -226,7 +289,7 @@ func findSavedItemsConflict(rawPath string, conflict ManifestRecord) (first, sec
 		if parseErr != nil {
 			return 0, 0, parseErr
 		}
-		if record.identity() != conflict.identity() {
+		if record.compare(conflict) != 0 {
 			continue
 		}
 		switch {

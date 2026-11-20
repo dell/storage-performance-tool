@@ -129,8 +129,10 @@ to 64 bytes) and their count.
 - **Rows the CLI refuses because the key may not be the stored one.** A `~` anywhere in the key: a
   versioned Netty write names a version as `key~versionId`, and the version ID can hold `/`. A `%`
   anywhere in the name: a Netty write can send a `%XX` as a URI escape, so the target stores the
-  decoded key (`r%41` stores `rA`) while DELETE addresses the literal `%` (a known 5.17.1 limit,
-  `s3-object-key-query-char`). Convert such a file by hand to a canonical manifest of the stored
+  decoded key (`r%41` stores `rA`) while DELETE addresses the literal `%` (a known 5.17.1 limit:
+  the `s3` driver sends a `%XX` in a key as written). A `+` anywhere in the name: a Netty write
+  sends it raw while DELETE encodes it as `%2B`, so a target that reads a raw `+` in a path as a
+  space stores another key. Convert such a file by hand to a canonical manifest of the stored
   keys and versions.
 - **Several buckets** need `--delete-batch-size=1`.
 - **`--object-count`** caps after the canonical sort, not in file order.
@@ -140,7 +142,7 @@ One line that can't be mapped safely to one object refuses the whole file before
 with exit 1 and no request sent. The error names the line number and the reason, never the row or
 its bucket or key, and names both accepted formats: a name that does not start with `/`, which
 includes a canonical file without its header; an empty bucket (`//k`); a missing or empty key
-(`/b`, `/b/`); a key that starts with `/` (`/b//k`); a `~` anywhere in the key; a `%` anywhere in
+(`/b`, `/b/`); a key that starts with `/` (`/b//k`); a `~` anywhere in the key; a `%` or `+` anywhere in
 the name; more than three commas, so a comma in the key; a quote in the name; a line over 1 MiB
 without its line end; a blank line; a bare CR; invalid UTF-8; or an offset, size or layer/mask that
 is not `<hex>`, `<nonnegative decimal>` or `<hex>/<hex>`. A row whose bucket is not `--bucket` is

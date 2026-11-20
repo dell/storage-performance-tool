@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeStagerSource(t *testing.T, content string) string {
@@ -167,6 +169,8 @@ func TestStageDeleteRefusesSavedItemsFilesWithAnUnsafeLine(t *testing.T) {
 		// A Netty write can store r%41 as rA, so the row may name another object.
 		{"percent escape on line 1", "/b/r%41/qq7,2a0f,10,0/0\n" + good, 1, percentReason},
 		{"percent escape on a later line", good + good + "/b/r%41/qq7,2a0f,10,0/0\n", 3, percentReason},
+		{"plus on line 1", "/b/a+qq7/k,2a0f,10,0/0\n" + good, 1, plusReason},
+		{"plus on a later line", good + "/b/a+qq7/k,2a0f,10,0/0\n", 2, plusReason},
 		{"comma in the key", good + "/b/a,qq7/k,2a0f,10,0/0\n", 2, "has more than 4 fields: a comma in the object key cannot be told from a field separator"},
 		{"quote in the name", good + `/b/qq7"x,2a0f,10,0/0` + "\n", 2, "has a quote in the object name"},
 		{"invalid UTF-8", good + "/b/qq7\xff,2a0f,10,0/0\n", 2, "is not valid UTF-8"},
@@ -296,8 +300,8 @@ func TestStageDeleteOfSavedItemsHasOneLineLimit(t *testing.T) {
 // version itself, and stages as before on every route.
 func TestStageKeepsCanonicalManifestsWithPercentAndTilde(t *testing.T) {
 	const header = "bucket,key,size,version_id\n"
-	rows := "b,r%41/k,10,\nb,s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,10,\nb,a~x/k,10,v~1\nb,50%,10,\n"
-	want := header + "b,50%,10,\nb,a~x/k,10,v~1\nb,r%41/k,10,\nb,s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,10,\n"
+	rows := "b,a+b/k,10,\nb,r%41/k,10,\nb,s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,10,\nb,a~x/k,10,v~1\nb,50%,10,\n"
+	want := header + "b,50%,10,\nb,a+b/k,10,\nb,a~x/k,10,v~1\nb,r%41/k,10,\nb,s0/k~3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY,10,\n"
 	stageThroughEveryRoute(t, header+rows, func(t *testing.T, _, manifest string, err error) {
 		if err != nil {
 			t.Fatalf("error = %v, want the manifest accepted", err)
@@ -321,6 +325,16 @@ func TestStageDeleteOfSavedItemsNamesTheLinesOfConflictingSizes(t *testing.T) {
 	want := "items file lines 1 and 4 give the same object two sizes"
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+	requireEmptyDir(t, tempDir)
+
+	// A NUL in a bucket and in another row's key gives two objects the same display string: the
+	// lines are found by the sort's own comparison, so the lines of the real conflict are named.
+	content = "/b\x00x/k,2a0f,10,0/0\n/b/x\x00k,2a0f,20,0/0\n/b\x00x/k,2a0f,30,0/0\n"
+	_, err = StageDeleteInputManifest(writeStagerSource(t, content), 447, 0, "")
+	want = "items file lines 1 and 3 give the same object two sizes"
+	if err == nil || err.Error() != want {
+		t.Fatalf("NUL error = %v, want %q", err, want)
 	}
 	requireEmptyDir(t, tempDir)
 
@@ -416,4 +430,90 @@ func TestStageKeepsAQuotedCanonicalHeaderOnEveryRoute(t *testing.T) {
 			t.Fatalf("staged bytes = %q, want %q", staged, want)
 		}
 	})
+}
+
+// A first line the canonical reader refuses, but that the engine reads as the canonical header, is
+// not read as a saved row: a saved row after it gets the refusal a header file gets, on a regular
+// file and through a named pipe.
+func TestStageDeleteRefusesSavedRowsUnderAHeaderOnlyTheEngineReads(t *testing.T) {
+	const savedRow = "/b/s0/name,2a0f,1024,0/0\n"
+	for _, test := range []struct{ name, content string }{
+		{"space after a quoted header field", `"bucket" ,key,size,version_id` + "\n" + savedRow},
+		{"quoted header field and a saved row on bare-CR line ends", `"bucket" ,key,size,version_id` + "\r" + savedRow},
+	} {
+		t.Run(test.name+"/regular file", func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("TMPDIR", tempDir)
+			_, err := StageDeleteInputManifest(writeStagerSource(t, test.content), 448, 0, "")
+			if want := deleteSavedItemRowMessage("2"); err == nil || err.Error() != want {
+				t.Fatalf("error = %v, want %q", err, want)
+			}
+			requireEmptyDir(t, tempDir)
+		})
+		t.Run(test.name+"/named pipe", func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("TMPDIR", tempDir)
+			source := filepath.Join(t.TempDir(), "input.csv")
+			if err := syscall.Mkfifo(source, 0o600); err != nil {
+				t.Skipf("mkfifo: %v", err)
+			}
+			writer, err := os.OpenFile(source, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
+			if _, err := writer.WriteString(test.content); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, stageErr := StageDeleteInputManifest(source, 448, 0, "")
+				done <- stageErr
+			}()
+			select {
+			case err := <-done:
+				if want := deleteSavedItemRowMessage("2"); err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
+				}
+			case <-time.After(10 * time.Second):
+				_ = writer.Close()
+				t.Fatal("a refusal waited for a writer that stays open")
+			}
+			requireEmptyDir(t, tempDir)
+		})
+	}
+}
+
+// A first line over 1 MiB on a stream whose writer stays open is refused once its first 1 MiB and
+// one more byte are read, without waiting for its line end.
+func TestStageDeleteRefusesALongFirstLineWithoutWaitingForItsEnd(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	source := filepath.Join(t.TempDir(), "input.csv")
+	if err := syscall.Mkfifo(source, 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	writer, err := os.OpenFile(source, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	// The pipe holds less than the line: write it while the stager reads.
+	go func() { _, _ = writer.WriteString("/b/" + strings.Repeat("q", maxCanonicalCSVRecordBytes+10)) }()
+	done := make(chan error, 1)
+	go func() {
+		_, stageErr := StageDeleteInputManifest(source, 449, 0, "")
+		done <- stageErr
+	}()
+	select {
+	case err := <-done:
+		want := savedItemsLineMessage(1, fmt.Sprintf("exceeds %d bytes without its line end", maxCanonicalCSVRecordBytes))
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	case <-time.After(10 * time.Second):
+		_ = writer.Close()
+		t.Fatal("a refusal waited for a writer that stays open")
+	}
+	requireEmptyDir(t, tempDir)
 }

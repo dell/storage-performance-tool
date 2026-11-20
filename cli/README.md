@@ -626,9 +626,10 @@ anything starts, with exit 1 and the line number: a name that does not start wit
 mock-driver row, or a canonical file without its header), an empty bucket or key, a key starting
 with `/`, a `~` anywhere in the key (a versioned write's `key~versionId`, whose version ID can hold
 `/`), a `%` anywhere in the name (a Netty write can store a `%XX` escape decoded, a known 5.17.1
-limit), a comma in the key (more than four fields), a quote in the name, a line over 1 MiB, a blank
+limit), a `+` anywhere in the name (a Netty write sends it raw, which a target can read as a space,
+while DELETE encodes it), a comma in the key (more than four fields), a quote in the name, a line over 1 MiB, a blank
 line, a bare CR, invalid UTF-8, or a malformed offset, size or layer/mask; convert a file refused
-for `~` or `%` by hand to a canonical manifest of the stored keys. The error gives the line number
+for `~`, `%` or `+` by hand to a canonical manifest of the stored keys. The error gives the line number
 and reason, never the row's bucket or key. The file must come from an S3 write: an absolute `fs`
 path reads as an S3 path, so pass `--bucket`, which is a recommended check and must be the first
 path segment of the saved names (`b` for a write with `--bucket b/sub/`). The CLI cannot see whether

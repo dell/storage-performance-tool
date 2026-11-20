@@ -21,6 +21,9 @@ const (
 	percentReason = `has a "%" in its object name, and a write can store a percent escape decoded, so ` +
 		"the row may not name the stored key; convert such a file by hand to a canonical " +
 		"bucket,key,size,version_id manifest of the stored keys"
+	plusReason = `has a "+" in its object name, and a write sends it raw while DELETE encodes it, so ` +
+		`a target that reads a raw "+" as a space may store another key; convert such a file by ` +
+		"hand to a canonical bucket,key,size,version_id manifest of the stored keys"
 )
 
 func notAnObjectPath(line int) string {
@@ -55,6 +58,8 @@ func TestParseSavedItemLineConvertsToACurrentKeyRecord(t *testing.T) {
 		// A canonical row without its header that happens to be a valid engine row: it can't be
 		// told apart, so it is read as the engine row it is.
 		{"headerless canonical-looking engine row", "/b/k,ff,10,0/0", "b", "k", 10},
+		// Only the key can name a version, so a "~" in the bucket segment is kept.
+		{"tilde in the bucket", "/b~1/k,ff,10,0/0", "b~1", "k", 10},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -100,6 +105,9 @@ func TestParseSavedItemLineRefusesRowsThatNameNoSingleObject(t *testing.T) {
 		{"percent escape in the key", "/b/r%41/k,ff,10,0/0", percentReason},
 		{"bare percent in the key", "/b/s0/50%,ff,10,0/0", percentReason},
 		{"percent in the bucket", "/b%41/k,ff,10,0/0", percentReason},
+		// A write sends a "+" raw and DELETE encodes it, so the target may store a space.
+		{"plus in the key", "/b/a+b/k,ff,10,0/0", plusReason},
+		{"plus in the bucket", "/b+1/k,ff,10,0/0", plusReason},
 		{"bad hex offset", "/b/k,zz,10,0/0", "has an offset that is not a hexadecimal 64-bit integer"},
 		{"empty offset", "/b/k,,10,0/0", "has an offset that is not a hexadecimal 64-bit integer"},
 		{"offset too large", "/b/k,ffffffffffffffffff,10,0/0", "has an offset that is not a hexadecimal 64-bit integer"},
@@ -129,5 +137,50 @@ func TestSavedItemsLineErrorNamesBothFormatsAndNotTheRow(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("savedItemsLineError() = %q, want it to name %q", err, want)
 		}
+	}
+}
+
+// A first line of a stream is judged from the bytes already read: the whole line when its end or
+// the input's end is read, otherwise only for a reason every line with that start has.
+func TestSavedFirstLineRefusalJudgesOnlyTheBytesRead(t *testing.T) {
+	limit := maxCanonicalCSVRecordBytes
+	long := "/b/" + strings.Repeat("q", limit)
+	// atLimit is a saved row of exactly limit bytes.
+	atLimit := "/b/" + strings.Repeat("q", limit-len("/b/,2a0f,10,0/0")) + ",2a0f,10,0/0"
+	tooLong := fmt.Sprintf("exceeds %d bytes without its line end", limit)
+	tests := []struct {
+		name   string
+		known  string
+		atEnd  bool
+		reason string // "" when the bytes read do not refuse the line
+	}{
+		{"whole saved row", "/b/k,2a0f,10,0/0\nmore", false, ""},
+		{"whole row with a quote in the name", `/b/k"1,2a0f,10,0/0` + "\n", false, "has a quote in the object name"},
+		{"whole row with a CRLF", `/b/k"1,2a0f,10,0/0` + "\r\n", false, "has a quote in the object name"},
+		{"row at the end of the input", `/b/k,2"a0f,10,0/0`, true, "has an offset that is not a hexadecimal 64-bit integer"},
+		{"start with a quote in the name", `/b/k"1,2a0f`, false, "has a quote in the object name"},
+		{"start with a quote in the name only", `/b/k"1`, false, "has a quote in the object name"},
+		{"start with a quote after the name", `/b/k,2"a0f`, false, "has a quote, which no field of a saved row holds"},
+		{"start with five fields", `/b/k,1,2,3,"`, false, "has a quote, which no field of a saved row holds"},
+		{"start over the limit", long + "q", false, tooLong},
+		{"start at the limit and a byte that is not a CR", long[:limit] + "q", false, tooLong},
+		{"start at the limit and a CR", atLimit + "\r", false, ""},
+		{"start at the limit, refused, and a CR", long[:limit] + "\r", false,
+			"has 1 fields, want 4"},
+		{"start without a refusal", "/b/k,2a0f", false, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := savedFirstLineRefusal([]byte(test.known), test.atEnd)
+			if test.reason == "" {
+				if err != nil {
+					t.Fatalf("savedFirstLineRefusal() = %v, want nil", err)
+				}
+				return
+			}
+			if want := savedItemsLineMessage(1, test.reason); err == nil || err.Error() != want {
+				t.Fatalf("savedFirstLineRefusal() = %v, want %q", err, want)
+			}
+		})
 	}
 }

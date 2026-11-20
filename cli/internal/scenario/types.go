@@ -66,17 +66,17 @@ type Params struct {
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
 	// Standalone DELETE workload.
-	DeleteBatchSize         int
-	DeleteExisting          bool
-	AllowEmptyPrefix        bool
-	SelectionSourceCount    int
-	SelectionUniqueCount    int
-	SelectionSelectedCount  int
-	SelectionSHA256         string
-	SelectionOrder          string
+	DeleteBatchSize        int
+	DeleteExisting         bool
+	AllowEmptyPrefix       bool
+	SelectionSourceCount   int
+	SelectionUniqueCount   int
+	SelectionSelectedCount int
+	SelectionSHA256        string
+	SelectionOrder         string
 	// DeleteSavedItems is set when --items-file was read as a saved items file; nil for a
 	// canonical manifest.
-	DeleteSavedItems *SavedItemsSource
+	DeleteSavedItems        *SavedItemsSource
 	FailureBudgetMode       string
 	MaxFailedObjects        int64
 	MaxFailurePercent       float64
