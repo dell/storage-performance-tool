@@ -115,7 +115,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 		final int[] cycle = withMinimumCycle(weights);
 		if (cycle != weights) {
 			Loggers.MSG.info(
-							"Weights {} sum below {}, so the weight throttle uses {}",
+							"Weights {}: the positive ones sum below {}, so the weight throttle uses {}",
 							Arrays.toString(weights),
 							MIN_WEIGHT_CYCLE,
 							Arrays.toString(cycle));

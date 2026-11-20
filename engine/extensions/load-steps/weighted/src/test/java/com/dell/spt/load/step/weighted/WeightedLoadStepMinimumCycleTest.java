@@ -107,7 +107,7 @@ class WeightedLoadStepMinimumCycleTest {
 	@Test
 	void theStepLogsTheScaledWeightsOnce() throws Exception {
 		assertEquals(
-						List.of("Weights [1, 4] sum below 100, so the weight throttle uses [20, 80]"),
+						List.of("Weights [1, 4]: the positive ones sum below 100, so the weight throttle uses [20, 80]"),
 						weightMessagesWhileBuilding(1, 4));
 	}
 
