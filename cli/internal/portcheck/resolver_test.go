@@ -213,9 +213,10 @@ func TestConflictResolver_ExecuteGracefulStop(t *testing.T) {
 		resolver.clock = NewFakeClock()
 
 		serviceInfo := &ServiceInfo{
-			IsListening: true,
-			IsSpt:       true,
-			Status:      &SptStatus{RunID: "test-123", State: "RUNNING"},
+			IsListening:  true,
+			IsSpt:        true,
+			APIConfirmed: true,
+			Status:       &SptStatus{RunID: "123", State: "RUNNING"},
 		}
 
 		ctx := context.Background()

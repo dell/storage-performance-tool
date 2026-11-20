@@ -114,6 +114,8 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantLock;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -141,7 +143,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private static final Semaphore FAILURE_BUDGET_SNAPSHOT_FLIGHT_ADMISSION = new Semaphore(FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS);
 	private static final AtomicInteger ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS = new AtomicInteger();
 
-	private final List<LoadStep> stepSlices = new ArrayList<>();
+	// Copy-on-write: a signal's exit hook clears it in the close while the scenario thread's await reads it.
+	private final List<LoadStep> stepSlices = new CopyOnWriteArrayList<>();
+	// Held for the whole of doStop() and doClose(). A signal runs both on the exit hook while the scenario
+	// thread runs await()'s trailing doStop(), outside the state lock. Order: state lock, then this lock,
+	// then the base class's metrics unregister lock.
+	private final ReentrantLock stopCloseLock = new ReentrantLock();
+	// Set when doClose() returns: a later doStop() has nothing left to stop.
+	private volatile boolean stopCloseDone = false;
 	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
@@ -179,6 +188,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
+	// Of this start: how many slices, in slice order, returned from their start(), and whether the
+	// start ended as a stop. A stopped start publishes the slice files of those slices only.
+	private volatile int startedSliceCount;
+	private volatile boolean startStopped;
 
 	static int activeFailureBudgetSnapshotFlightCount() {
 		return FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS
@@ -285,12 +298,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 											+ "Build a new step from a prototype with config() and run that.",
 							null);
 		}
-		super.doStart();
+		try {
+			super.doStart();
+		} catch (final Throwable cause) {
+			// The base class ends a start that a stop cut short, or refused at JVM exit, with this.
+			if (cause instanceof InterruptedException) {
+				startStopped = true;
+			}
+			throw cause;
+		}
 	}
 
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
+		// Reset where a start really begins: a restart the base class refuses (at JVM exit) keeps the
+		// count of the start before it, so its close still publishes that start's slices.
+		startedSliceCount = 0;
+		startStopped = false;
 		resetDurationLifecycleForStart();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			// need to set the once generated step id
@@ -1351,6 +1376,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			try {
 				stepSlice.start();
+				startedSliceCount = i + 1;
 			} catch (final Exception e) {
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
@@ -2177,6 +2203,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throws IllegalStateException, InterruptedException {
 		final var stepSliceCount = stepSlices.size();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+			if (closedAtJvmExit(stepSliceCount)) {
+				throw stoppedAtJvmExit();
+			}
 			if (0 == stepSliceCount) {
 				throw new IllegalStateException("No step slices are available");
 			}
@@ -2202,7 +2231,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				// Compared by subtraction, since toMillis saturates for a step without a time limit.
 				final var invokeTimeMillis = System.currentTimeMillis();
 				final var timeOutMillis = timeUnit.toMillis(timeout);
-				return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
+				final boolean allSlicesDone = stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
 					try {
 						var awaitResult = false;
 						// A slice still queued at the limit gets one poll: only a poll reports its terminal failure.
@@ -2225,6 +2254,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					}
 					return false;
 				}).reduce((flag1, flag2) -> flag1 && flag2).orElse(false);
+				if (closedAtJvmExit(stepSlices.size())) {
+					throw stoppedAtJvmExit();
+				}
+				return allSlicesDone;
 			} finally {
 				stopFailureBudgetMonitor();
 				Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
@@ -2236,6 +2269,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				doStop();
 			}
 		}
+	}
+
+	/**
+	 * Whether the exit hook has stopped and closed this step, or is closing it: the JVM exits, and
+	 * the step is closed or has no slices left after its start. A step still in its initial state is not; one the exit closed before it started is treated as stopped.
+	 */
+	private boolean closedAtJvmExit(final int stepSliceCount) {
+		return JvmExit.begun() && (stopCloseDone || isClosed() || (0 == stepSliceCount && !isInitial()));
+	}
+
+	private InterruptedException stoppedAtJvmExit() {
+		return new InterruptedException(loadStepId() + ": stopped, the engine is exiting");
 	}
 
 	private synchronized void startFailureBudgetMonitor() {
@@ -2865,6 +2910,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	@Override
 	protected final void doStop() {
+		stopCloseLock.lock();
+		try {
+			if (stopCloseDone) {
+				// await()'s trailing stop after the exit hook's close: everything is stopped and closed.
+				Loggers.MSG.debug("{}: already closed, nothing to stop", loadStepId());
+				return;
+			}
+			stopUnderLock();
+		} finally {
+			stopCloseLock.unlock();
+		}
+	}
+
+	private void stopUnderLock() {
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
@@ -2960,6 +3019,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected final void doClose()
 					throws IOException {
+		stopCloseLock.lock();
+		try {
+			closeUnderLock();
+			stopCloseDone = true;
+		} finally {
+			stopCloseLock.unlock();
+		}
+	}
+
+	private void closeUnderLock() throws IOException {
 		releaseBucketMetrics();
 		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
@@ -3165,7 +3234,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
 			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
 				try {
-					deleteArtifactAggregator.close();
+					if (startStopped && deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
+						aggregator.closeAfterStoppedStart(startedSliceCount);
+					} else {
+						deleteArtifactAggregator.close();
+					}
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					failedDeleteArtifactAggregators.add(deleteArtifactAggregator);
@@ -3180,7 +3253,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
 			for (final var aggregator : operationLifecycleAggregators) {
 				try {
-					aggregator.close();
+					closeSliceLoggerArtifact(aggregator);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(terminalCause,
@@ -3199,7 +3272,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
-					integrityLogFileAggregator.close();
+					closeSliceLoggerArtifact(integrityLogFileAggregator);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(
@@ -3248,8 +3321,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			for (final var itemOutputFileAggregator : itemOutputFileAggregators) {
 				try {
 					if (itemOutputFileAggregator instanceof CsvArtifactAggregator csvAggregator) {
-						csvAggregator.close(terminalFailureCountsByOpType.getOrDefault(
-										csvAggregator.artifactOpType(), -1L));
+						final long failedOperationCount = terminalFailureCountsByOpType.getOrDefault(
+										csvAggregator.artifactOpType(), -1L);
+						if (startStopped) {
+							csvAggregator.closeAfterStoppedStart(failedOperationCount, startedSliceCount);
+						} else {
+							csvAggregator.close(failedOperationCount);
+						}
 					} else {
 						itemOutputFileAggregator.close();
 					}
@@ -3326,6 +3404,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				durationCleanupRetryPending = false;
 			}
 			closeRetainedDurationPhases();
+		}
+	}
+
+	/**
+	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
+	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
+	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
+	 * started, nothing is published.
+	 */
+	private void closeSliceLoggerArtifact(final AutoCloseable aggregator) throws Exception {
+		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+			sliceArtifact.closeAfterStoppedStart(startedSliceCount);
+		} else {
+			aggregator.close();
 		}
 	}
 
