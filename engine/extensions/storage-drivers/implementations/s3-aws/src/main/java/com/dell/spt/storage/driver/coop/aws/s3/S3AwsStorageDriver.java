@@ -1006,6 +1006,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (slashPos > 0) {
 				final var bucket = rel.substring(0, slashPos);
 				final var prefix = rel.substring(slashPos + 1);
+				if (rel.charAt(rel.length() - 1) == '/') {
+					return new String[]{bucket, keyUnderSlashPrefix(prefix, key)
+					};
+				}
 				return new String[]{bucket, prefix + "/" + key
 				};
 			}
@@ -1015,6 +1019,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		// No dstPath — parse full path from item name
 		return parseBucketAndKey(itemName);
+	}
+
+	/**
+	 * Joins a key to a prefix that ends in a slash, or is empty because the path is "/bucket/". The
+	 * prefix already holds the separator, and the key stays whole: "/k" under "a" is the key "a//k".
+	 * An empty name is the other case: splitting a listed "/bucket/a//" leaves the path "/bucket/a/"
+	 * and no name, and only the separator join gives back the key "a//". Kept out of
+	 * {@code resolveBucketAndKey} so that a path without the slash runs the same
+	 * code as before.
+	 */
+	private static String keyUnderSlashPrefix(final String prefix, final String key) {
+		return key.isEmpty() ? prefix + "/" : prefix + key;
 	}
 
 	/**
