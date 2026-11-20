@@ -161,6 +161,8 @@ class RemoteStepSliceReleaseIntegrationTest {
 			abandoned.metricsSnapshots();
 
 			awaitClosedContexts(1, ENTRY_SILENCE_MILLIS + 5_000);
+			// The slice's context closes before the service leaves the registry and the open set.
+			awaitNoOpenSlices(worker, 5_000);
 
 			assertThrows(java.rmi.RemoteException.class, abandoned::loadStepId);
 			assertEquals(List.of(), worker.busySliceRunIds());
@@ -230,6 +232,15 @@ class RemoteStepSliceReleaseIntegrationTest {
 			Thread.sleep(20);
 		}
 		assertEquals(expected, contextCloses.get(), "slices closed by the worker");
+	}
+
+	/** Waits for the worker's last open slice to be unexported and to leave its open set. */
+	private static void awaitNoOpenSlices(final LoadStepManagerServiceImpl worker, final long timeoutMillis)
+					throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+		while (worker.hasOpenSlices() && System.nanoTime() < deadline) {
+			Thread.sleep(20);
+		}
 	}
 
 	/** The limit is read as each step service is built. */
