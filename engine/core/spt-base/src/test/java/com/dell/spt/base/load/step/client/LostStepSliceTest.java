@@ -65,6 +65,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
@@ -102,10 +104,14 @@ class LostStepSliceTest {
 	private static final String CLOSE_WARNING = "failed to close the step service";
 	private static final String AWAIT_WARNING = "did not answer its await within the RMI response timeout";
 	private static final String METRICS_FETCH = "metricsSnapshots";
+	/** The key of the entry's own slice in the call times. */
+	private static final String ENTRY = "entry";
 	/** How soon a step whose slice is lost must end: the ticket's 10 s, less the test's own setup. */
 	private static final long LOST_STEP_END_MILLIS = 10_000;
 	/** The longest any step of these tests runs before the test fails instead of waiting on. */
 	private static final Duration RUN_BOUND = Duration.ofSeconds(45);
+	/** The longest the cleanup of a step that did not end may take. */
+	private static final Duration CLOSE_BOUND = Duration.ofSeconds(30);
 
 	private final Config config = TestConfigBuilder.config();
 	private final MetricsManagerImpl entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
@@ -142,6 +148,14 @@ class LostStepSliceTest {
 	private volatile long localDrainMillis;
 	/** When the entry's own slice's slow await began and ended. */
 	private final long[] localDrainNanos = new long[2];
+	/** Whether the entry's own slice is wrapped, to record its calls and sample its successes. */
+	private volatile boolean recordLocal;
+	/** The entry's own slice, once the step has created it. */
+	private volatile LoadStep localSlice;
+	/** How long each node's stop takes to answer after the slice has stopped, as a worker's drain; by node address. */
+	private final Map<String, Long> slowStopReplies = new ConcurrentHashMap<>();
+	/** How many stops each node's slice got, by node address. */
+	private final Map<String, Integer> stops = new ConcurrentHashMap<>();
 	/** The worker services by node address, so that a test can take a worker down. */
 	private final Map<String, List<AutoCloseable>> workerServices = new ConcurrentHashMap<>();
 	private final List<String> addrs = new ArrayList<>();
@@ -190,9 +204,12 @@ class LostStepSliceTest {
 			errLogger.removeAppender(errors);
 			errLogger.setLevel(errLevel);
 			errors.stop();
-			for (final AutoCloseable closeable : closeables.reversed()) {
-				closeable.close();
-			}
+			// A step that did not end must not hang the test JVM in its cleanup: it fails the test instead.
+			assertTimeoutPreemptively(CLOSE_BOUND, () -> {
+				for (final AutoCloseable closeable : closeables.reversed()) {
+					closeable.close();
+				}
+			}, "the cleanup did not end");
 		} finally {
 			ServiceUtil.shutdown();
 			if (originalRmiHostname == null) {
@@ -697,6 +714,78 @@ class LostStepSliceTest {
 	}
 
 	@Test
+	void aSliceLostWhileAnotherWorkersStopDrainsStopsTheEntrysOwnSliceAtOnce() throws Exception {
+		unlimited();
+		config.val("load-op-limit-rate", 90.0);
+		final String lost = addrs.get(0);
+		final String draining = addrs.get(1);
+		// The other worker has stopped, but answers its stop only after a 5 s drain, as a worker whose
+		// target holds the replies of its last requests.
+		slowStopReplies.put(draining, 5_000L);
+		recordLocal = true;
+		final LinearLoadStepClient client = newClient();
+		final long[] killedNanos = new long[1];
+		final Thread killer = takeDownAfterItsAwait(lost, killedNanos);
+		final List<long[]> localSuccesses = Collections.synchronizedList(new ArrayList<>());
+		final AtomicBoolean sampling = new AtomicBoolean(true);
+		final Thread sampler = Thread.ofPlatform().daemon(true).start(() -> sampleSuccesses(localSuccesses, sampling));
+
+		final Throwable failure;
+		try {
+			failure = runBounded(client);
+		} finally {
+			sampling.set(false);
+			sampler.join();
+		}
+		killer.join();
+		awaitLostNodes();
+
+		assertLostSliceFailure(assertInstanceOf(RunTerminalException.class, failure), 2);
+		assertEquals(List.of(lost), lostNodes());
+		final long drainingStopNanos = firstCallNanos.get(draining + "#stop");
+		final long localStopNanos = firstCallNanos.get(ENTRY + "#stop");
+		final long localStopAfterLossMillis = TimeUnit.NANOSECONDS.toMillis(localStopNanos - killedNanos[0]);
+		final long localSuccessesAfterLoss = successesAfter(localSuccesses, killedNanos[0]);
+		System.out.printf(
+						"lost-slice drain measurement: the other worker's stop %d ms after the loss, the entry's own stop %d ms after it, the entry's successes after the loss %d%n",
+						TimeUnit.NANOSECONDS.toMillis(drainingStopNanos - killedNanos[0]), localStopAfterLossMillis,
+						localSuccessesAfterLoss);
+		assertTrue(localStopAfterLossMillis < 2_000,
+						"the entry's own slice stops at once, not after the other worker's drain: " + localStopAfterLossMillis + " ms");
+		// The entry runs a third of 90 op/s: 2 s of its load is 60 operations, and the 5 s drain about 150.
+		assertTrue(localSuccessesAfterLoss < 60,
+						"the entry's own slice stops generating at the loss: " + localSuccessesAfterLoss + " successes after it");
+		assertEquals(1, stopCalls(draining), "the draining worker is stopped once");
+	}
+
+	private int stopCalls(final String addr) {
+		return stops.getOrDefault(addr, 0);
+	}
+
+	/** Samples the entry's own slice's success count every 20 ms while {@code sampling} holds. */
+	private void sampleSuccesses(final List<long[]> samples, final AtomicBoolean sampling) {
+		while (sampling.get()) {
+			final LoadStep local = localSlice;
+			if (local != null) {
+				try {
+					final List<? extends AllMetricsSnapshot> snapshots = local.metricsSnapshots();
+					if (snapshots != null && !snapshots.isEmpty() && snapshots.getFirst().successSnapshot() != null) {
+						samples.add(new long[]{System.nanoTime(), snapshots.getFirst().successSnapshot().count()
+						});
+					}
+				} catch (final Exception e) {
+					// A closed slice has no metrics.
+				}
+			}
+			try {
+				Thread.sleep(20);
+			} catch (final InterruptedException e) {
+				return;
+			}
+		}
+	}
+
+	@Test
 	void aMetricsFetchFailingOnceTheStepStopsDoesNotLoseTheSlice() throws Exception {
 		final String closing = addrs.get(1);
 		// A fetch still in flight, or the terminal metrics read, as the worker closes its slice.
@@ -799,30 +888,42 @@ class LostStepSliceTest {
 	}
 
 	/**
-	 * Runs the step on a thread of its own and returns its failure, or null. A step that never ends
-	 * fails the test at {@link #RUN_BOUND}: JUnit's own timeout interrupts the test's thread, which
-	 * does not wake a thread parked in the await's parallel stream. The slices resolve on the step's
-	 * thread, so the recording is set up there.
+	 * Runs the step on a pool of its own, with a poller for each slice whatever the host's CPU count,
+	 * and returns its failure, or null. A step that never ends fails the test at {@link #RUN_BOUND},
+	 * and the pool is shut down, interrupting its await's pollers: JUnit's own timeout interrupts the
+	 * test's thread, which does not wake a thread parked in the await's parallel stream. The slices
+	 * resolve on the step's thread, so the recording is set up there.
 	 */
-	private Throwable runBounded(final LinearLoadStepClient client) {
-		return assertTimeoutPreemptively(RUN_BOUND, () -> {
-			try (
-							MockedStatic<LoadStepSliceUtil> util = recordingSlices();
-							MockedStatic<LoadStepFactory> local = localDrainMillis > 0 ? drainingLocalSlice() : null) {
-				client.run();
-				return null;
-			} catch (final Throwable failure) {
-				return failure;
-			}
-		}, "the step did not end");
+	private Throwable runBounded(final LinearLoadStepClient client) throws Exception {
+		final ForkJoinPool pollers = new ForkJoinPool(addrs.size() + 1);
+		try {
+			return pollers.submit(() -> {
+				try (
+								MockedStatic<LoadStepSliceUtil> util = recordingSlices();
+								MockedStatic<LoadStepFactory> local = localDrainMillis > 0 || recordLocal ? drainingLocalSlice() : null) {
+					client.run();
+					return null;
+				} catch (final Throwable failure) {
+					return failure;
+				}
+			}).get(RUN_BOUND.toMillis(), TimeUnit.MILLISECONDS);
+		} catch (final TimeoutException e) {
+			throw new AssertionError("the step did not end within " + RUN_BOUND, e);
+		} finally {
+			pollers.shutdownNow();
+		}
 	}
 
-	/** Wraps the entry's own slice, whose first await then takes {@link #localDrainMillis}. */
+	/**
+	 * Wraps the entry's own slice, whose first await then takes {@link #localDrainMillis}, and records
+	 * when each of its calls first came, under {@link #ENTRY}.
+	 */
 	private MockedStatic<LoadStepFactory> drainingLocalSlice() {
 		final MockedStatic<LoadStepFactory> factory = mockStatic(LoadStepFactory.class, CALLS_REAL_METHODS);
 		factory.when(() -> LoadStepFactory.createLocalLoadStep(any(), anyList(), anyList(), any(), anyString()))
 						.thenAnswer(invocation -> {
 							final LoadStep local = (LoadStep) invocation.callRealMethod();
+							localSlice = local;
 							final InvocationHandler handler = (proxy, method, args) -> {
 								if (method.getDeclaringClass() == Object.class) {
 									return switch (method.getName()) {
@@ -831,7 +932,8 @@ class LostStepSliceTest {
 									default -> "draining local slice";
 									};
 								}
-								if ("await".equals(method.getName()) && localDrainNanos[0] == 0) {
+								firstCallNanos.putIfAbsent(ENTRY + "#" + method.getName(), System.nanoTime());
+								if ("await".equals(method.getName()) && localDrainMillis > 0 && localDrainNanos[0] == 0) {
 									localDrainNanos[0] = System.nanoTime();
 									Thread.sleep(localDrainMillis);
 									localDrainNanos[1] = System.nanoTime();
@@ -922,6 +1024,9 @@ class LostStepSliceTest {
 				}
 			}
 			firstCallNanos.putIfAbsent(addr + "#" + name, System.nanoTime());
+			if ("stop".equals(name)) {
+				stops.merge(addr, 1, Integer::sum);
+			}
 			if (METRICS_FETCH.equals(name)) {
 				fetches.merge(addr, 1, Integer::sum);
 				if (refusedFetchesAfterDone.contains(addr) && answeredDone.contains(addr)) {
@@ -956,6 +1061,10 @@ class LostStepSliceTest {
 				result = method.invoke(stub, args);
 			} catch (final InvocationTargetException e) {
 				throw e.getCause();
+			}
+			final Long stopReplyMillis = slowStopReplies.get(addr);
+			if ("stop".equals(name) && stopReplyMillis != null) {
+				Thread.sleep(stopReplyMillis);
 			}
 			if (METRICS_FETCH.equals(name) && result instanceof List<?> list && !list.isEmpty()
 							&& list.getFirst() instanceof AllMetricsSnapshot snapshot) {
@@ -1066,7 +1175,11 @@ class LostStepSliceTest {
 
 	/** A node's successes from its last fetch before {@code sinceNanos} to its last fetch. */
 	private long successesAfter(final String addr, final long sinceNanos) {
-		final List<long[]> counts = successCounts.getOrDefault(addr, List.of());
+		return successesAfter(successCounts.getOrDefault(addr, List.of()), sinceNanos);
+	}
+
+	/** The successes from the last count before {@code sinceNanos} to the highest count. */
+	private static long successesAfter(final List<long[]> counts, final long sinceNanos) {
 		synchronized (counts) {
 			long before = 0;
 			long last = 0;
