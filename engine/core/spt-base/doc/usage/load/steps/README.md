@@ -66,7 +66,7 @@ A DELETE, STAT or NOOP load started with a size limit logs a warning in its `err
 * *Weighted* step: a sub-load that reached the limit keeps running until the other sub-loads finish.
   At an unlimited rate it can run far past the limit.
 * *Pipeline* step: a later stage that reaches its own count or size limit does not stop the stages
-  before it; without a time limit the step then does not end.
+  before it; without a time limit the step ends only when those earlier stages end by themselves.
 
 ### 3.4. End Of Input
 
