@@ -248,7 +248,9 @@ final class S3AwsMultipartTimingTest {
 		assertEquals(0, stub.completionRequests.get(), "the completion is not sent");
 		results.drainTo(published);
 		final var composites = composites(published);
-		assertTrue(composites.size() >= 1, () -> "the initiation: " + published);
+		// The closed gate refuses the completion, so this route publishes the initiation only, and no
+		// parent result whose timing could be wrong.
+		assertEquals(1, composites.size(), () -> "the initiation alone: " + published);
 		for (final var parent : composites.subList(1, composites.size())) {
 			assertTrue(parent.status() != Operation.Status.SUCC, () -> "a parent not completed: " + times(parent));
 			assertTrue(parent.duration() >= 0 && parent.duration() <= wallMicros,
