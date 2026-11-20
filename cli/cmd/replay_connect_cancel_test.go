@@ -38,7 +38,7 @@ func TestReplayCommandCancelEndsTheHostConnection(t *testing.T) {
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			t.Cleanup(installReplayEngineInfoSeams(t))
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connecting := make(chan struct{})
