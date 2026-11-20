@@ -57,7 +57,7 @@ func TestReplayCommandWarnsOfTheLaunchScriptFlagsItDoesNotKeep(t *testing.T) {
 	for _, mode := range []string{"generate-only", "headless", "TUI"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Cleanup(installReplayEngineInfoSeams(t))
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			shouldReplayRunHeadless = func(*cobra.Command) bool { return mode == "headless" }

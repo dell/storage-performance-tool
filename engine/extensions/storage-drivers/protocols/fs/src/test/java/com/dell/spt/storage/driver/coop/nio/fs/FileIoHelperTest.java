@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.nio.fs;
 
 import com.dell.spt.base.data.SeedDataInput;
+import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -9,12 +10,14 @@ import com.github.akurilov.commons.collection.Range;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.BitSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -224,6 +227,114 @@ public class FileIoHelperTest {
 		assertTrue(done, "invokeReadAndVerify should complete within iterations");
 		assertEquals(size, op.countBytesDone());
 		assertEquals(size, item.position());
+	}
+
+	// Random-range UPDATE into a range whose data crosses the end of the data ring. The dedupable
+	// writeToFileChannel stops at the ring end, so the range is finished over several calls; each call
+	// must go on from the range's own position, not from its first byte.
+
+	private static final int RING_SIZE = 4096;
+	private static final long RING_SEED = 0x7a42d9c483244167L;
+
+	/** A 1 KiB item whose range 9 (item bytes 511-1022) starts at ring position 3800: the ring ends 296 bytes in. */
+	@Test
+	public void aCurrentLayerRangeCrossingTheRingEndGetsItsOwnBytes() throws Exception {
+		assertRandomRangesUpdateMatchesTheLayers(1024, 3289, false, 9);
+	}
+
+	/** Range 9 starts at ring position 4091: the ring ends 5 bytes into the range. */
+	@Test
+	public void aCurrentLayerRangeCrossingTheRingEndFiveBytesInGetsItsOwnBytes() throws Exception {
+		assertRandomRangesUpdateMatchesTheLayers(1024, 3580, false, 9);
+	}
+
+	/** The next-layer slice is cached by the operation, so it kept its position before the fix too. */
+	@Test
+	public void aNextLayerRangeCrossingTheRingEndGetsItsOwnBytes() throws Exception {
+		assertRandomRangesUpdateMatchesTheLayers(1024, 3289, true, 9);
+	}
+
+	/** A 16 KiB item on a 4 KiB ring, every range updated: the larger ranges wrap the ring more than once. */
+	@Test
+	public void anItemLargerThanTheRingGetsEveryUpdatedRangeRight() throws Exception {
+		final long size = 16 * 1024;
+		final int[] all = new int[DataItem.rangeCount(size)];
+		for (int i = 0; i < all.length; i++) {
+			all[i] = i;
+		}
+		assertRandomRangesUpdateMatchesTheLayers(size, 1234, false, all);
+	}
+
+	private static void assertRandomRangesUpdateMatchesTheLayers(
+					final long size, final long itemOffset, final boolean nextLayer, final int... rangeIdxs)
+					throws Exception {
+		final SeedDataInput dataInput = new SeedDataInput(RING_SEED, RING_SIZE, 16, true);
+		final DataItemImpl item = new DataItemImpl("item", itemOffset, size);
+		item.dataInput(dataInput);
+		final BitSet marked = new BitSet();
+		for (final int i : rangeIdxs) {
+			marked.set(i);
+		}
+		if (nextLayer) {
+			// Every range was updated once already, so this update writes the marked ones at the next layer.
+			final BitSet all = new BitSet();
+			all.set(0, DataItem.rangeCount(size));
+			item.commitUpdatedRanges(new BitSet[]{all, new BitSet()
+			});
+		}
+		final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, null, null, null, 0);
+		op.markedRangesMaskPair()[nextLayer ? 1 : 0].or(marked);
+		final int writeLayer = nextLayer ? 2 : 1;
+
+		// The file starts as the item's recorded state; the update replaces the marked ranges.
+		final byte[] before = new byte[(int) size];
+		final byte[] expected = new byte[(int) size];
+		final int rangeCount = DataItem.rangeCount(size);
+		for (int i = 0; i < rangeCount; i++) {
+			final int beforeLayer = item.isRangeUpdated(i) ? 1 : 0;
+			fillFromLayer(before, dataInput, beforeLayer, itemOffset, i, item.rangeSize(i));
+			fillFromLayer(expected, dataInput, marked.get(i) ? writeLayer : beforeLayer, itemOffset, i, item.rangeSize(i));
+		}
+
+		final Path dst = Files.createTempFile("fs-random-ranges-update-", ".bin");
+		try {
+			Files.write(dst, before);
+			try (final FileChannel dstCh = FileChannel.open(dst, StandardOpenOption.WRITE)) {
+				boolean done = false;
+				int guard = 0;
+				while (!done) {
+					assertTrue(guard++ < 10_000, "the update makes progress");
+					done = FileIoHelper.invokeRandomRangesUpdate(item, op, dstCh);
+				}
+			}
+			assertArrayEquals(expected, Files.readAllBytes(dst), "the file holds each updated range's bytes of layer " + writeLayer);
+
+			// A verified read of the item in its new recorded state agrees with the file.
+			item.commitUpdatedRanges(op.markedRangesMaskPair());
+			item.reset();
+			final DataOperationImpl<DataItemImpl> read = new DataOperationImpl<>(0, OpType.READ, item, null, null, null, null, 0);
+			try (final FileChannel srcCh = FileChannel.open(dst, StandardOpenOption.READ)) {
+				boolean done = false;
+				int guard = 0;
+				while (!done) {
+					assertTrue(guard++ < 10_000, "the verified read makes progress");
+					done = FileIoHelper.invokeReadAndVerify(item, read, srcCh);
+				}
+			}
+			assertEquals(size, read.countBytesDone());
+		} finally {
+			Files.deleteIfExists(dst);
+		}
+	}
+
+	private static void fillFromLayer(
+					final byte[] dst, final SeedDataInput dataInput, final int layerIdx, final long itemOffset,
+					final int rangeIdx, final long rangeSize) {
+		final ByteBuffer layer = dataInput.getLayer(layerIdx).asReadOnlyBuffer();
+		final long rangeOffset = DataItem.rangeOffset(rangeIdx);
+		for (long k = rangeOffset; k < rangeOffset + rangeSize; k++) {
+			dst[(int) k] = layer.get((int) ((itemOffset + k) % RING_SIZE));
+		}
 	}
 
 	// @Test

@@ -79,7 +79,7 @@ func TestReplayRoutesInstallCurrentParticipantIdentityGate(t *testing.T) {
 				}
 			}
 
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
@@ -269,7 +269,7 @@ func TestReplayIdentityGateCancellationStopsBeforeSubmission(t *testing.T) {
 	newReplayEngineIdentityCollector = func() engineinfo.FleetCollector {
 		return replayCancelCollector{}
 	}
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
@@ -345,7 +345,7 @@ func TestReplayCommandRetriesTransientVersionResponsesWithinSubmissionGate(t *te
 					RetryDelay:      time.Millisecond,
 				}))
 			}
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
@@ -399,7 +399,7 @@ func TestReplaySourceEngineIdentityIsProvenanceOnly(t *testing.T) {
 	newReplayEngineIdentityCollector = func() engineinfo.FleetCollector {
 		return &replayGateCollector{t: t, wantDescriptors: []engineinfo.ParticipantDescriptor{standalone}, fleet: currentFleet}
 	}
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
