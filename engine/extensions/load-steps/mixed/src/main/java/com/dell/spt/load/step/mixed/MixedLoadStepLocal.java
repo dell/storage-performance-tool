@@ -521,7 +521,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 	// ── Helpers ────────────────────────────────────────────────────────────────
 
-	/** The file that lists a step's created items when {@code item.output.file} is not set. */
 	/**
 	 * The item output file of the merged configuration, or else of the base; {@code null} for none.
 	 * A context's empty value, merged over the base, must not hide the base's file.
@@ -535,6 +534,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		return baseFile != null && !baseFile.isEmpty() ? baseFile : null;
 	}
 
+	/** The file that lists a step's created items when {@code item.output.file} is not set. */
 	static Path defaultPutRemainingFile(final String stepId) {
 		final String homeDir = ThreadContext.get("home_dir");
 		if (homeDir != null && !homeDir.isEmpty()) {
