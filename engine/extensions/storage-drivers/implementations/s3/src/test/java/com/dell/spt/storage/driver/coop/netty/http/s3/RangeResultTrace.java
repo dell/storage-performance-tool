@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import com.dell.spt.base.logging.Loggers;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -22,12 +23,14 @@ import org.apache.logging.log4j.core.config.Property;
  * ({@code output.metrics.trace.persist}): one row for each result the step accepted, ranges and
  * reads alike. A range's successful row carries its range's bytes and a read's row none, so the
  * successful rows of {@code rangeSize} bytes are the ranges the client completed, whatever the
- * target received.
+ * target received. A read attempt has two rows with the same start: its initial pass, successful
+ * and unfinished, and its end; an attempt with only the first had not ended when the step did.
  */
 final class RangeResultTrace implements AutoCloseable {
 
 	private static final int PATH = 1;
 	private static final int STATUS = 3;
+	private static final int START = 4;
 	private static final int SIZE = 8;
 
 	private final Logger traces = (Logger) Loggers.OP_TRACES;
@@ -74,16 +77,25 @@ final class RangeResultTrace implements AutoCloseable {
 	 * {@code ranges} to an object. The objects {@code counted} picks give the complete sets: an
 	 * object's successful ranges divided by its ranges, since each read of it completes each of its
 	 * ranges once at most; one with a remainder was being read when the step ended. The bytes are
-	 * those of every successful range.
+	 * those of every successful range. The unfinished reads, of every object, are the read attempts
+	 * whose initial pass the step received and whose end it did not, whatever their ranges did:
+	 * those a stop may leave unresolved.
 	 */
 	Completed completed(final String stepId, final long rangeSize, final int ranges, final Predicate<String> counted)
 					throws InterruptedException {
 		final Map<String, Long> byObject = new HashMap<>();
+		// A read attempt's rows by its object and start, first row first; range rows' keys are their own.
+		final Map<String, List<String>> readRows = new LinkedHashMap<>();
 		var bytes = 0L;
+		final var rangeBytes = Long.toString(rangeSize);
 		for (final var row : rows(stepId)) {
-			if ("SUCC".equals(row[STATUS]) && Long.toString(rangeSize).equals(row[SIZE])) {
-				bytes += rangeSize;
-				byObject.merge(row[PATH], 1L, Long::sum);
+			if (rangeBytes.equals(row[SIZE])) {
+				if ("SUCC".equals(row[STATUS])) {
+					bytes += rangeSize;
+					byObject.merge(row[PATH], 1L, Long::sum);
+				}
+			} else {
+				readRows.computeIfAbsent(row[PATH] + " " + row[START], unused -> new ArrayList<>()).add(row[STATUS]);
 			}
 		}
 		var complete = 0L;
@@ -94,11 +106,17 @@ final class RangeResultTrace implements AutoCloseable {
 				incomplete += entry.getValue() % ranges == 0 ? 0 : 1;
 			}
 		}
-		return new Completed(complete, incomplete, bytes);
+		final var unfinished = readRows.values().stream()
+						.filter(statuses -> statuses.size() == 1 && "SUCC".equals(statuses.get(0)))
+						.count();
+		return new Completed(complete, incomplete, bytes, unfinished);
 	}
 
-	/** The complete sets of ranges the client completed, the objects with an incomplete set, and the bytes. */
-	record Completed(long complete, long incomplete, long bytes) {}
+	/**
+	 * The complete sets of ranges the client completed, the objects with an incomplete set, the bytes,
+	 * and the reads begun and not ended.
+	 */
+	record Completed(long complete, long incomplete, long bytes, long unfinished) {}
 
 	@Override
 	public void close() {

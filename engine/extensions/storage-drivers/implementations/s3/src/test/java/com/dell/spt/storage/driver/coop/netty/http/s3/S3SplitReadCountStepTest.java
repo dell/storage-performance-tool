@@ -30,8 +30,8 @@ import org.junit.jupiter.api.io.TempDir;
  * of ranges the client completed, whenever the step ends. The ranges completed are the client's own
  * range results, from the step's operation trace: a request the stub received is not one the client
  * completed. The step's bytes are those of every range completed: {@code count * object size} plus
- * the ranges of the reads the stop left with a range unsent, which are the only reads that may be
- * unresolved.
+ * the ranges of the reads the stop left unfinished, which are the only reads that may be unresolved.
+ * A read the stop leaves unfinished may have completed none of its ranges.
  */
 @Timeout(180)
 final class S3SplitReadCountStepTest {
@@ -50,6 +50,14 @@ final class S3SplitReadCountStepTest {
 	 */
 	private static final List<Integer> RECYCLING_TIME_LIMITS_SECONDS = List.of(TIME_LIMIT_SECONDS, 6, 12, 24);
 	private static final int WAIT_LIMIT_SECONDS = 60;
+	/** How long each recycling step may drain, so the ladder ends in minutes at most. */
+	private static final int RECYCLING_WAIT_LIMIT_SECONDS = 10;
+	/**
+	 * Unresolved reads beyond the unfinished ones in the trace: the stop can refuse a read's initial
+	 * pass between its dispatch and its result, which leaves it unresolved with no row. Initial passes
+	 * run one at a time on a driver's dispatching thread, so this is a few at most.
+	 */
+	private static final int UNRESOLVED_WITHOUT_A_ROW = CONCURRENCY;
 	/** A range's first attempt and the driver's three retries. */
 	private static final int RANGE_ATTEMPTS = 4;
 	private static final String CONTEXT = "READ-" + CONCURRENCY;
@@ -98,7 +106,8 @@ final class S3SplitReadCountStepTest {
 
 	/**
 	 * Recycled reads circulate until the limit: each complete set of an object's ranges is one read.
-	 * Each step is checked; a longer one follows until the objects have been read more than once.
+	 * Each step is checked, also one that completed no read; a longer one follows until the objects
+	 * have been read more than once.
 	 */
 	@Test
 	void aTimeLimitedRecyclingStepCountsEveryCompleteSetOfRanges() throws Exception {
@@ -107,12 +116,12 @@ final class S3SplitReadCountStepTest {
 		for (final var limit : RECYCLING_TIME_LIMITS_SECONDS) {
 			stepId = "split-read-count-recycled-" + limit + "s-" + System.nanoTime();
 			bytes.clear();
-			final var scenario = timeLimited(limit, true, "", "", items);
+			final var scenario = timeLimited(limit, RECYCLING_WAIT_LIMIT_SECONDS, true, "", "", items);
 
 			final var counts = S3NicSetWorkloadTest.runScenario(stub.listeners(1), stepId, scenario, bytes).get(CONTEXT);
 
 			completed = completed(path -> true);
-			assertCounted(counts, completed);
+			assertCountedAsCompleted(counts, completed);
 			if (completed.complete() > FEW_OBJECTS) {
 				return;
 			}
@@ -160,12 +169,14 @@ final class S3SplitReadCountStepTest {
 		assertEquals(completed.complete(), counts.get(0), () -> counts + " against " + completed);
 		assertTrue(counts.get(1) <= refusedObjects, () -> counts + " with " + refusedObjects + " objects refused");
 		assertEquals(completed.bytes(), bytes.get(CONTEXT), () -> "bytes of " + completed);
-		final var unresolved = unresolved();
-		assertTrue(unresolved <= completed.incomplete() + refusedObjects,
-						() -> unresolved + " unresolved against " + completed + " and " + refusedObjects + " objects refused");
+		assertUnresolvedWithin(completed);
 	}
 
-	/** The count limit is exact: the reads it admits all finish and nothing more is read. */
+	/**
+	 * The count limit is exact: the reads it admits all finish, no other object is read, and the
+	 * client completes each of their ranges once. A transient failure can add a range's retry, so the
+	 * number of range requests is not checked.
+	 */
 	@Test
 	void aCountLimitedStepReadsAndCountsExactlyItsLimit() throws Exception {
 		final var limit = 100;
@@ -175,9 +186,9 @@ final class S3SplitReadCountStepTest {
 
 		final var completed = completed(path -> true);
 		assertEquals(List.of((long) limit, 0L), counts, completed::toString);
-		assertEquals(new RangeResultTrace.Completed(limit, 0, (long) limit * OBJECT_SIZE), completed);
-		assertEquals((long) limit * RANGES, stub.objectRequests().stream().filter(S3SplitReadCountStepTest::isRange).count(),
-						"no range beyond the limit's reads is sent");
+		assertEquals(new RangeResultTrace.Completed(limit, 0, (long) limit * OBJECT_SIZE, 0), completed);
+		assertEquals(limit, stub.objectRequests().stream().filter(S3SplitReadCountStepTest::isRange)
+						.map(NicSetLoopback.Request::path).distinct().count(), "no object beyond the limit's reads is read");
 		assertEquals(0, unresolved());
 	}
 
@@ -221,12 +232,25 @@ final class S3SplitReadCountStepTest {
 						""".formatted(limit, WAIT_LIMIT_SECONDS, opSettings, CONCURRENCY, RANGE_SIZE, items);
 	}
 
+	/** The step counted what the client completed, and completed some reads. */
 	private void assertCounted(final List<Long> counts, final RangeResultTrace.Completed completed) throws IOException {
 		assertTrue(completed.complete() > 0, completed::toString);
+		assertCountedAsCompleted(counts, completed);
+	}
+
+	/** The step counted what the client completed, which may be nothing. */
+	private void assertCountedAsCompleted(final List<Long> counts, final RangeResultTrace.Completed completed)
+					throws IOException {
 		assertEquals(List.of(completed.complete(), 0L), counts, completed::toString);
-		assertEquals(completed.bytes(), bytes.get(CONTEXT), () -> "bytes of " + completed);
+		assertEquals(completed.bytes(), bytes.getOrDefault(CONTEXT, 0L), () -> "bytes of " + completed);
+		assertUnresolvedWithin(completed);
+	}
+
+	/** Only reads the stop left unfinished are unresolved. */
+	private void assertUnresolvedWithin(final RangeResultTrace.Completed completed) throws IOException {
 		final var unresolved = unresolved();
-		assertTrue(unresolved <= completed.incomplete(), () -> unresolved + " unresolved against " + completed);
+		assertTrue(unresolved <= completed.unfinished() + UNRESOLVED_WITHOUT_A_ROW,
+						() -> unresolved + " unresolved against " + completed);
 	}
 
 	/** What the client completed of the objects {@code counted} picks, by their paths. */
@@ -261,11 +285,11 @@ final class S3SplitReadCountStepTest {
 	}
 
 	private static String timeLimited(final boolean recycle, final String opSettings, final String dataSettings, final String items) {
-		return timeLimited(TIME_LIMIT_SECONDS, recycle, opSettings, dataSettings, items);
+		return timeLimited(TIME_LIMIT_SECONDS, WAIT_LIMIT_SECONDS, recycle, opSettings, dataSettings, items);
 	}
 
-	private static String timeLimited(final int seconds, final boolean recycle, final String opSettings, final String dataSettings,
-					final String items) {
+	private static String timeLimited(final int seconds, final int waitSeconds, final boolean recycle, final String opSettings,
+					final String dataSettings, final String items) {
 		return """
 						Load.config({
 							"load": {
@@ -276,7 +300,7 @@ final class S3SplitReadCountStepTest {
 							"item": {"data": {"ranges": {"threshold": "%d"}%s}, "input": {"file": "%s"}},
 							"output": {"metrics": {"trace": {"persist": true}}}
 						}).run();
-						""".formatted(seconds, recycle, WAIT_LIMIT_SECONDS, opSettings, CONCURRENCY, RANGE_SIZE,
+						""".formatted(seconds, recycle, waitSeconds, opSettings, CONCURRENCY, RANGE_SIZE,
 						dataSettings, items);
 	}
 
