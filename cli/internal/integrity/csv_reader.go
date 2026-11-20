@@ -61,6 +61,9 @@ func (reader *canonicalCSVReader) Buffered() []byte {
 	return buffered
 }
 
+// Done reports whether the reader met the end of its input.
+func (reader *canonicalCSVReader) Done() bool { return reader.done }
+
 // RecordHasBareCR reports whether an unquoted field of the last record read kept a CR that does
 // not start a CRLF. The engine's Commons CSV parser ends a record there.
 func (reader *canonicalCSVReader) RecordHasBareCR() bool { return reader.bareCR }

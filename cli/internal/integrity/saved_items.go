@@ -12,9 +12,17 @@ import (
 // The rules are the ones the engine's DataItemImpl reads: a signed 64-bit offset, a signed 32-bit
 // layer, and a mask of hex digits in either case that may be empty.
 func IsSavedItemFields(offset, layerMask string) bool {
-	if _, err := strconv.ParseInt(offset, 16, 64); err != nil {
-		return false
-	}
+	return isSavedItemOffset(offset) && isSavedItemLayerMask(layerMask)
+}
+
+// isSavedItemOffset reports whether offset is a saved row's offset: a signed 64-bit hex integer.
+func isSavedItemOffset(offset string) bool {
+	_, err := strconv.ParseInt(offset, 16, 64)
+	return err == nil
+}
+
+// isSavedItemLayerMask reports whether layerMask is a saved row's <hex layer>/<hex mask>.
+func isSavedItemLayerMask(layerMask string) bool {
 	layer, mask, found := strings.Cut(layerMask, "/")
 	if !found {
 		return false
@@ -44,6 +52,13 @@ func savedItemRowError(recordNumber int) error {
 			"size, layer/mask), not a canonical manifest row; the %q header does not convert it. "+
 			"Give each object as <bucket>,<key>,<size>,<version_id or empty>",
 		recordNumber, strings.Join(canonicalHeader, ","))
+}
+
+// deleteSavedItemRowError is savedItemRowError for DELETE, which also reads a saved S3 items file
+// without the header, so it adds that removing the header line is the other way.
+func deleteSavedItemRowError(recordNumber int) error {
+	return fmt.Errorf("%w, or remove the header line: delete --items-file reads a saved S3 items "+
+		"file as it is saved, without a header", savedItemRowError(recordNumber))
 }
 
 // RefuseSavedItemsUnderHeader returns an error when the engine would read path as a canonical
