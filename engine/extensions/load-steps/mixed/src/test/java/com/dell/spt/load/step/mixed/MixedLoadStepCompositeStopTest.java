@@ -22,6 +22,9 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,8 +48,10 @@ import org.junit.jupiter.api.io.TempDir;
  * A timed mixed step that stops with a plain READ dispatched and never answered, next to a split
  * (composite) READ, ends with that one READ counted active, whatever became of the composite: the
  * result wrapper retires the composite once, at its last result, and the stop counts out only
- * operations the generator dispatched and the driver never sent. The three cases are the ones
- * re-review 2 of {@code mixed-final-active-at-stop} probed; on the release base each ended at 1.
+ * operations the generator dispatched and the driver never sent. The first three cases are the
+ * ones re-review 2 of {@code mixed-final-active-at-stop} probed, and the last three the ones
+ * re-review 3 probed, each through a route an extension driver may take; on the release base each
+ * ended at 1.
  */
 @Timeout(120)
 class MixedLoadStepCompositeStopTest {
@@ -114,6 +119,67 @@ class MixedLoadStepCompositeStopTest {
 		assertEquals(1L, concurrency.get(OpType.READ), "the unresolved plain READ stays active: " + concurrency);
 	}
 
+	/**
+	 * Before the kickoff, the driver queues an ordinary READ of its own with the composite as its
+	 * permit owner, through the cooperative enqueue API, and sends it; it succeeds. A second plain
+	 * READ stays queued, unsent. The child's result must neither count a READ out nor return a
+	 * permit: the generator never counted it in.
+	 */
+	@Test
+	void aDriverCreatedFlatChildThatCompletesDoesNotCountOut() throws Exception {
+		final ScriptedDriverFactory drivers = new ScriptedDriverFactory(Scenario.COMPLETED_EXTENSION_CHILD);
+		final Map<OpType, Long> concurrency = run(drivers);
+
+		assertEquals(1, drivers.kickoffs.get(), "the composite's kickoff results");
+		assertEquals(0, drivers.rangeResults.get(), "no range was sent");
+		assertTrue(drivers.childQueued.get(), "the driver queued its own READ");
+		assertEquals(1, drivers.childResults.get(), "the driver's own READ was sent and answered");
+		final OperationLifecycleCounters counters = drivers.counters();
+		assertEquals(1, counters.unresolved(), "the dispatched plain READ is unresolved: " + counters);
+		assertEquals(4, counters.unattempted(),
+						"the queued plain READ, the composite and its two ranges are unattempted: " + counters);
+		assertEquals(1L, concurrency.get(OpType.READ), "the unresolved plain READ stays active: " + concurrency);
+	}
+
+	/**
+	 * Before the kickoff, the driver writes an ordinary READ of its own straight into the protected
+	 * child queue, as an extension written before the cooperative enqueue API may, and the
+	 * dispatcher takes custody of it; it is never sent. Recovered at the stop, it must not count out.
+	 */
+	@Test
+	void aFlatChildFromTheProtectedQueueLeftUnsentDoesNotCountOut() throws Exception {
+		final ScriptedDriverFactory drivers = new ScriptedDriverFactory(Scenario.LEGACY_QUEUE_CHILD);
+		final Map<OpType, Long> concurrency = run(drivers);
+
+		assertEquals(1, drivers.kickoffs.get(), "the composite's kickoff results");
+		assertEquals(0, drivers.rangeResults.get(), "no range was sent");
+		assertTrue(drivers.childQueued.get(), "the driver queued its own READ");
+		assertTrue(drivers.childSubmitted.get(), "the dispatcher took custody of the driver's own READ");
+		assertEquals(0, drivers.childResults.get(), "the driver's own READ was never sent");
+		final OperationLifecycleCounters counters = drivers.counters();
+		assertEquals(1, counters.unresolved(), "the dispatched plain READ is unresolved: " + counters);
+		assertEquals(4, counters.unattempted(), "the composite, its ranges and the child are unattempted: " + counters);
+		assertEquals(1L, concurrency.get(OpType.READ), "the unresolved plain READ stays active: " + concurrency);
+	}
+
+	/**
+	 * As the kickoff case, through a decorator that does not declare how the driver publishes
+	 * composite results ({@code UNDECLARED}, the interface default). The result wrapper retires the
+	 * composite at its kickoff, as before, so the stop must not count it out a second time.
+	 */
+	@Test
+	void anUndeclaredDriverCompositeRetiredAtItsKickoffDoesNotCountOutAgain() throws Exception {
+		final ScriptedDriverFactory drivers = new ScriptedDriverFactory(Scenario.UNDECLARED_KICKOFF);
+		final Map<OpType, Long> concurrency = run(drivers);
+
+		assertEquals(1, drivers.kickoffs.get(), "the composite's kickoff results");
+		assertEquals(0, drivers.rangeResults.get(), "no range was sent");
+		final OperationLifecycleCounters counters = drivers.counters();
+		assertEquals(1, counters.unresolved(), "the dispatched plain READ is unresolved: " + counters);
+		assertEquals(3, counters.unattempted(), "the composite and its two ranges are unattempted: " + counters);
+		assertEquals(1L, concurrency.get(OpType.READ), "the unresolved plain READ stays active: " + concurrency);
+	}
+
 	private Map<OpType, Long> run(final ScriptedDriverFactory drivers) throws Exception {
 		final String stepId = "mixed-composite-stop-" + UUID.randomUUID();
 		final FinalCountsMetricsManager metrics = new FinalCountsMetricsManager();
@@ -172,7 +238,19 @@ class MixedLoadStepCompositeStopTest {
 		/** One plain READ, one composite READ, then three plain READs kept queued; the composite ends. */
 		COMPLETED_COMPOSITE(4),
 		/** As {@link #KICKOFF_ONLY}, and the driver queues a plain READ child after the kickoff. */
-		FLAT_EXTENSION_CHILD(1);
+		FLAT_EXTENSION_CHILD(1),
+		/**
+		 * One plain READ, one composite READ, then one plain READ kept queued; before the kickoff the
+		 * driver queues a plain READ child through the cooperative enqueue API and sends it.
+		 */
+		COMPLETED_EXTENSION_CHILD(2),
+		/**
+		 * As {@link #KICKOFF_ONLY}, and before the kickoff the driver writes a plain READ child into
+		 * its protected child queue directly; the child is never sent.
+		 */
+		LEGACY_QUEUE_CHILD(1),
+		/** As {@link #KICKOFF_ONLY}, through a decorator that leaves the composite results undeclared. */
+		UNDECLARED_KICKOFF(1);
 
 		/** The plain READs the driver admits: the first is sent and never answered. */
 		final int flats;
@@ -200,6 +278,8 @@ class MixedLoadStepCompositeStopTest {
 		final AtomicInteger rangeResults = new AtomicInteger();
 		final AtomicInteger finalizations = new AtomicInteger();
 		final AtomicReference<Boolean> childQueued = new AtomicReference<>(false);
+		final AtomicReference<Boolean> childSubmitted = new AtomicReference<>(false);
+		final AtomicInteger childResults = new AtomicInteger();
 		private final AtomicReference<StorageDriver<?, ?>> created = new AtomicReference<>();
 
 		ScriptedDriverFactory(final Scenario scenario) {
@@ -237,6 +317,7 @@ class MixedLoadStepCompositeStopTest {
 				private final AtomicInteger flatsAdmitted = new AtomicInteger();
 				private final AtomicInteger compositesAdmitted = new AtomicInteger();
 				private final AtomicInteger flatsSubmitted = new AtomicInteger();
+				private final AtomicReference<Operation> child = new AtomicReference<>();
 
 				@Override
 				protected boolean offerIncomingOperationLocked(final Operation op, final BlockingQueue queue) {
@@ -291,12 +372,36 @@ class MixedLoadStepCompositeStopTest {
 							// Kick off only once the later plain READs are queued behind it.
 							return hold();
 						}
+						if (child.get() == null) {
+							// Queued before the kickoff, so that the child reaches the dispatcher ahead of
+							// the ranges the kickoff queues.
+							if (scenario == Scenario.COMPLETED_EXTENSION_CHILD) {
+								final Operation flatChild = flatChild(op);
+								child.set(flatChild);
+								childQueued.set(enqueueChildOperation(flatChild, op, "extension child"));
+							} else if (scenario == Scenario.LEGACY_QUEUE_CHILD) {
+								final Operation flatChild = flatChild(op);
+								child.set(flatChild);
+								childQueued.set(childOpQueue.offer(flatChild));
+							}
+						}
 						final boolean sent = super.submit(op);
 						if (sent) {
 							kickoffs.incrementAndGet();
 							if (scenario == Scenario.FLAT_EXTENSION_CHILD) {
 								childQueued.set(enqueueChildOperation(flatChild(op), op, "extension child"));
 							}
+						}
+						return sent;
+					}
+					if (op == child.get()) {
+						childSubmitted.set(true);
+						if (scenario != Scenario.COMPLETED_EXTENSION_CHILD) {
+							return hold();
+						}
+						final boolean sent = super.submit(op);
+						if (sent) {
+							childResults.incrementAndGet();
 						}
 						return sent;
 					}
@@ -321,7 +426,28 @@ class MixedLoadStepCompositeStopTest {
 				}
 			};
 			created.set(driver);
-			return driver;
+			return scenario == Scenario.UNDECLARED_KICKOFF ? undeclared(driver) : driver;
+		}
+
+		/**
+		 * An interface decorator, as a driver author might write one: it forwards every method to
+		 * {@code driver} except the composite results declaration, so it has the interface's default,
+		 * {@code UNDECLARED}.
+		 */
+		private static StorageDriver undeclared(final StorageDriver driver) {
+			return (StorageDriver) Proxy.newProxyInstance(
+							StorageDriver.class.getClassLoader(), new Class<?>[]{StorageDriver.class
+							},
+							(proxy, method, args) -> {
+								if ("compositeResults".equals(method.getName())) {
+									return InvocationHandler.invokeDefault(proxy, method, args);
+								}
+								try {
+									return method.invoke(driver, args);
+								} catch (final InvocationTargetException e) {
+									throw e.getCause();
+								}
+							});
 		}
 
 		/** Declines a dispatch, parked, so the dispatcher retrying it does not spin. */

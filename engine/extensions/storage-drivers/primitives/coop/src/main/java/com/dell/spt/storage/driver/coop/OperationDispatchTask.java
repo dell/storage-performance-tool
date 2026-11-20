@@ -321,8 +321,10 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 							|| state == OperationLifecycleState.GENERATOR_BUFFERED) {
 				// Existing extensions may still write the protected child queue directly.
 				// Claim their compatibility ownership before the task-local buffer is the
-				// only place retaining the identity.
-				if (!tracker.driverQueued(op)) {
+				// only place retaining the identity. Such an entry is one the driver created:
+				// every operation a load generator dispatches enters the driver through its
+				// input queue, and every in-tree child enters this queue already claimed.
+				if (!tracker.driverCreatedQueued(op)) {
 					tracker.unattempted(op);
 					buff.remove(i);
 				}

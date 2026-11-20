@@ -1337,6 +1337,7 @@ class MixedLoadGeneratorTest {
 			}));
 			final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
 							new PoolItemInput<>(makeItems(10)), builders, driver, 1_000, mockNewItemSupplier());
+			gen.compositeResults(CompositeResults.IN_PARTS);
 			gen.operationLifecycle(lifecycle);
 			dispatch(gen, 40);
 			final List<Operation> composites = held.stream().filter(op -> op instanceof CompositeOperation).toList();
@@ -1368,8 +1369,8 @@ class MixedLoadGeneratorTest {
 			// queued again for its parts: taken back unsent, it counts out once.
 			final Operation kickedOff = composites.get(2);
 			kickedOff.status(Operation.Status.SUCC);
-			assertFalse(MixedLoadStepLocal.endsOperation(kickedOff, true), "its first result does not end it");
-			MixedLoadStepLocal.retire(gen, kickedOff, true);
+			assertFalse(MixedLoadStepLocal.endsOperation(kickedOff, CompositeResults.IN_PARTS), "its first result does not end it");
+			MixedLoadStepLocal.retire(gen, kickedOff, CompositeResults.IN_PARTS);
 			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "its first result retired nothing");
 			assertTrue(lifecycle.dispatched(kickedOff));
 			assertTrue(lifecycle.completionStarted(kickedOff));
@@ -1385,7 +1386,7 @@ class MixedLoadGeneratorTest {
 				assertTrue(lifecycle.dispatched(finished));
 				assertTrue(lifecycle.completionStarted(finished));
 				finished.status(Operation.Status.RESP_FAIL_CLIENT);
-				MixedLoadStepLocal.retire(gen, finished, true);
+				MixedLoadStepLocal.retire(gen, finished, CompositeResults.IN_PARTS);
 				assertTrue(lifecycle.terminal(finished, Operation.Status.RESP_FAIL_CLIENT));
 				assertFalse(lifecycle.unattempted(finished));
 				assertEquals(creates - 3, gen.inFlightCount(OpType.CREATE), "retired once, by its last result");

@@ -727,9 +727,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	 */
 	private boolean isDriverCreated(final O op, final OperationLifecycle lifecycle) {
 		if (lifecycle.isTracked()) {
-			synchronized (lifecycle) {
-				return lifecycle.isDriverCreated();
-			}
+			return lifecycle.isDriverCreated();
 		}
 		synchronized (compatibilityStates) {
 			final var compatibilityState = compatibilityState(op);
