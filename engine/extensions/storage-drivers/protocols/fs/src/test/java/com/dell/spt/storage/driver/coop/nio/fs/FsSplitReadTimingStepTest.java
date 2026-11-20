@@ -217,7 +217,7 @@ final class FsSplitReadTimingStepTest {
 				if (((DataOperation<?>) result).respDataTimeStart() > 0) {
 					parentsThatRead++;
 				}
-				if (parent instanceof CompositeDataOperationImpl<?> impl && impl.rangesSentAsRequests()) {
+				if (parent instanceof CompositeDataOperationImpl<?> impl && CompositeDataOperationImpl.rangesSentAsRequests(impl)) {
 					markedRequestless++;
 				}
 			} else if (result instanceof PartialOperation) {

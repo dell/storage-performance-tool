@@ -431,7 +431,7 @@ final class LoadStepContextSplitReadTimingTest {
 		Published starts() {
 			if (OpType.READ.equals(operation.type())) {
 				passesWithoutData();
-				operation.markRangesSentAsRequests();
+				CompositeDataOperationImpl.markRangesSentAsRequests(operation);
 			} else {
 				respond(operation, Status.SUCC);
 			}
@@ -449,7 +449,7 @@ final class LoadStepContextSplitReadTimingTest {
 
 		/** The driver marks the parent requestless after a pass that has a first-byte stamp. */
 		Published marksRequestless() {
-			operation.markRangesSentAsRequests();
+			CompositeDataOperationImpl.markRangesSentAsRequests(operation);
 			return this;
 		}
 

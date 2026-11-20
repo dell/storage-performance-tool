@@ -42,11 +42,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * The split-read mark adds nothing an extension built against 5.17.0 can collide with. Two such
- * providers had their own {@code requestless()}: one in a subclass of {@link CompositeDataOperationImpl},
- * one as an interface default on its own {@link CompositeDataOperation}. Each is compiled here from
- * source that uses only the 5.17.0 API, packed as an extension jar, loaded the way the engine loads
- * extensions, and its finished read is given to the load step, which keeps its sample as in 5.17.0.
+ * The split-read mark adds nothing an extension built before it can collide with. Two such providers
+ * had their own {@code requestless()}: one in a subclass of {@link CompositeDataOperationImpl}, one as
+ * an interface default on its own {@link CompositeDataOperation}. A third subclass has its own
+ * {@code boolean rangesSentAsRequests()}, which the engine's static mark does not consult. Each is
+ * compiled here against {@link CompositeDataOperationImpl}'s shape before the mark (a stub with only
+ * its constructor, ahead of this build on the class path), packed as an extension jar, loaded the way
+ * the engine loads extensions, and its finished, unmarked read is given to the load step, which keeps
+ * its sample as in 5.17.0.
  */
 final class CompositeExtensionCompatibilityTest {
 
@@ -54,12 +57,56 @@ final class CompositeExtensionCompatibilityTest {
 	private static final int PARTS = 4;
 	private static final long PAUSE_NANOS = 5_000;
 
-	/** The methods the two interfaces declared in 5.17.0, as name/parameter count. */
-	private static final Map<Class<?>, List<String>> API_5_17_0 = Map.of(
+	/**
+	 * The methods the two interfaces declare at this branch's base, as name/parameter count: 5.17.0's,
+	 * and {@code resetSubOperations()}, added after it.
+	 */
+	private static final Map<Class<?>, List<String>> INTERFACES_AT_BRANCH_BASE = Map.of(
 					CompositeOperation.class, List.of("allSubOperationsDone/0", "get/1", "item/0",
 									"markSubTaskCompleted/0", "nextSubOperations/1", "put/2", "resetSubOperations/0",
 									"subOperations/0", "undoMarkSubTaskCompleted/0"),
 					CompositeDataOperation.class, List.of("sizeThreshold/0", "subOperations/0"));
+
+	/** {@link CompositeDataOperationImpl} as an extension compiled before the mark saw it. */
+	private static final String PRE_MARK_IMPL = """
+					package com.dell.spt.base.item.op.composite.data;
+
+					import com.dell.spt.base.item.DataItem;
+					import com.dell.spt.base.item.op.OpType;
+					import com.dell.spt.base.item.op.data.DataOperationImpl;
+					import com.dell.spt.base.storage.Credential;
+					import com.github.akurilov.commons.collection.Range;
+					import java.util.List;
+
+					public class CompositeDataOperationImpl<I extends DataItem> extends DataOperationImpl<I> {
+						public CompositeDataOperationImpl(final int originIndex, final OpType opType, final I item,
+										final String srcPath, final String dstPath, final Credential credential,
+										final List<Range> fixedRanges, final int randomRangesCount, final long sizeThreshold) {
+							super(originIndex, opType, item, srcPath, dstPath, credential, fixedRanges, randomRangesCount);
+						}
+					}
+					""";
+
+	/** A subclass whose own getter has the mark's name and answers true. */
+	private static final String NAMED_GETTER = """
+					package legacy.composite;
+
+					import com.dell.spt.base.item.DataItem;
+					import com.dell.spt.base.item.op.OpType;
+					import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+
+					public class LegacyNamedGetter<I extends DataItem> extends CompositeDataOperationImpl<I> {
+
+						public LegacyNamedGetter(final I item, final long threshold) {
+							super(0, OpType.READ, item, null, "/bucket", null, null, 0, threshold);
+						}
+
+						/** The extension's own meaning, unrelated to the engine's mark. */
+						public boolean rangesSentAsRequests() {
+							return true;
+						}
+					}
+					""";
 
 	private static final String SUBCLASS = """
 					package legacy.composite;
@@ -189,8 +236,8 @@ final class CompositeExtensionCompatibilityTest {
 	Path dir;
 
 	@Test
-	void theCompositeInterfacesDeclareOnlyTheir5170Methods() {
-		for (final var entry : API_5_17_0.entrySet()) {
+	void theCompositeInterfacesDeclareOnlyTheirBranchBaseMethods() {
+		for (final var entry : INTERFACES_AT_BRANCH_BASE.entrySet()) {
 			final var declared = Arrays.stream(entry.getKey().getDeclaredMethods())
 							.filter(method -> !method.isSynthetic())
 							.map(method -> method.getName() + "/" + method.getParameterCount())
@@ -199,27 +246,44 @@ final class CompositeExtensionCompatibilityTest {
 		}
 	}
 
+	/**
+	 * The mark is reached through static methods only, which take the operation: no subclass method
+	 * overrides them, and none an extension already has, of any name, is called in their place.
+	 */
 	@Test
-	void theMarkIsOnTheImplementationOnlyAndOverridable() throws Exception {
+	void theMarkIsReachedOnlyThroughStaticMethods() throws Exception {
 		for (final var name : List.of("rangesSentAsRequests", "markRangesSentAsRequests")) {
-			final Method method = CompositeDataOperationImpl.class.getDeclaredMethod(name);
+			final var methods = Arrays.stream(CompositeDataOperationImpl.class.getDeclaredMethods())
+							.filter(method -> method.getName().equals(name))
+							.toList();
+			assertEquals(1, methods.size(), name + ": " + methods);
+			final Method method = methods.get(0);
 			assertTrue(Modifier.isPublic(method.getModifiers()), name + " is public");
-			assertFalse(Modifier.isFinal(method.getModifiers()), name + " is not final");
+			assertTrue(Modifier.isStatic(method.getModifiers()), name + " is static");
+			assertEquals(List.of(CompositeDataOperationImpl.class), List.of(method.getParameterTypes()), name + " takes the operation");
 		}
 		assertFalse(Modifier.isFinal(CompositeDataOperationImpl.class.getMethod("reset").getModifiers()), "reset() stays overridable");
 	}
 
 	@Test
 	void aSubclassWithItsOwnRequestlessLoadsAndKeepsItsSample() throws Exception {
-		assertLoadsAndKeepsItsSample("LegacySubclass", Map.of("LegacySubclass", SUBCLASS));
+		assertLoadsAndKeepsItsSample("LegacySubclass", "requestless", Map.of("LegacySubclass", SUBCLASS));
 	}
 
 	@Test
 	void anOwnCompositeWithItsOwnRequestlessDefaultLoadsAndKeepsItsSample() throws Exception {
-		assertLoadsAndKeepsItsSample("LegacyOwnComposite", Map.of("LegacyOwnComposite", OWN_TYPE, "LegacyMarks", MARKS));
+		assertLoadsAndKeepsItsSample(
+						"LegacyOwnComposite", "requestless", Map.of("LegacyOwnComposite", OWN_TYPE, "LegacyMarks", MARKS));
 	}
 
-	private void assertLoadsAndKeepsItsSample(final String type, final Map<String, String> sources) throws Exception {
+	/** Its own {@code rangesSentAsRequests()} answers true; the engine's mark is unset, so the parent keeps its sample. */
+	@Test
+	void aSubclassWithItsOwnMarkGetterLoadsAndKeepsItsSample() throws Exception {
+		assertLoadsAndKeepsItsSample("LegacyNamedGetter", "rangesSentAsRequests", Map.of("LegacyNamedGetter", NAMED_GETTER));
+	}
+
+	private void assertLoadsAndKeepsItsSample(final String type, final String ownMethod, final Map<String, String> sources)
+					throws Exception {
 		final var jarDir = dir.resolve("ext");
 		Files.createDirectories(jarDir);
 		buildExtensionJar(type, sources, jarDir.resolve(type + ".jar"));
@@ -234,7 +298,7 @@ final class CompositeExtensionCompatibilityTest {
 			final var op = (Operation<DataItem>) extension.getClass()
 							.getMethod("composite", DataItem.class, long.class)
 							.invoke(extension, item, PART_SIZE);
-			assertEquals(Boolean.TRUE, op.getClass().getMethod("requestless").invoke(op), "its own method answers");
+			assertEquals(Boolean.TRUE, op.getClass().getMethod(ownMethod).invoke(op), "its own method answers");
 			finish(op);
 
 			try (var metrics = metricsContext()) {
@@ -247,14 +311,27 @@ final class CompositeExtensionCompatibilityTest {
 		}
 	}
 
-	/** Compiles the composite and its provider against this classpath, and packs them with a service entry. */
+	/**
+	 * Compiles the composite and its provider against the pre-mark stub ahead of this classpath, and
+	 * packs them, without the stub, with a service entry.
+	 */
 	private void buildExtensionJar(final String type, final Map<String, String> sources, final Path jar) throws IOException {
 		final var src = dir.resolve("src/" + type + "/legacy/composite");
 		final var classes = dir.resolve("classes/" + type);
+		final var stubSrc = dir.resolve("stub-src/" + type + "/CompositeDataOperationImpl.java");
+		final var stubClasses = dir.resolve("stub-classes/" + type);
 		Files.createDirectories(src);
 		Files.createDirectories(classes);
+		Files.createDirectories(stubSrc.getParent());
+		Files.createDirectories(stubClasses);
+		Files.writeString(stubSrc, PRE_MARK_IMPL);
+		final var classpath = System.getProperty("java.class.path");
+		final var compiler = ToolProvider.getSystemJavaCompiler();
+		assertNotNull(compiler, "the tests run on a JDK");
+		assertEquals(0, compiler.run(null, null, null, "-proc:none", "-nowarn", "-cp", classpath, "-d", stubClasses.toString(),
+						stubSrc.toString()), "the pre-mark stub compiles");
 		final List<String> args = new ArrayList<>(List.of("-proc:none", "-nowarn", "-cp",
-						System.getProperty("java.class.path"), "-d", classes.toString()));
+						stubClasses + File.pathSeparator + classpath, "-d", classes.toString()));
 		for (final var source : sources.entrySet()) {
 			final var file = src.resolve(source.getKey() + ".java");
 			Files.writeString(file, source.getValue());
@@ -263,10 +340,8 @@ final class CompositeExtensionCompatibilityTest {
 		final var provider = src.resolve(type + "Extension.java");
 		Files.writeString(provider, PROVIDER.formatted(type));
 		args.add(provider.toString());
-		final var compiler = ToolProvider.getSystemJavaCompiler();
-		assertNotNull(compiler, "the tests run on a JDK");
 		final int status = compiler.run(null, null, null, args.toArray(String[]::new));
-		assertEquals(0, status, "the 5.17.0-era source compiles");
+		assertEquals(0, status, "the pre-mark source compiles");
 		try (var out = new JarOutputStream(Files.newOutputStream(jar));
 						var files = Files.walk(classes)) {
 			for (final var file : files.filter(Files::isRegularFile).toList()) {

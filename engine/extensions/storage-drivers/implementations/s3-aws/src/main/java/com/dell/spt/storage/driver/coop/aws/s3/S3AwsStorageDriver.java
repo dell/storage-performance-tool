@@ -1203,7 +1203,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// Its parts are this attempt's only requests: the step takes their timings only. An
 			// extension's own composite type is not marked, and keeps its parent sample.
 			if (op instanceof CompositeDataOperationImpl<?> marked) {
-				marked.markRangesSentAsRequests();
+				CompositeDataOperationImpl.markRangesSentAsRequests(marked);
 			}
 		}
 		return CompletableFuture.completedFuture(null);

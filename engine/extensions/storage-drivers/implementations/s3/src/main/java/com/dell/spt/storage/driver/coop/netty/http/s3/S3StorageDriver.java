@@ -2289,7 +2289,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				// Its ranges are this attempt's only requests: the step takes their timings only. An
 				// extension's own composite type is not marked, and keeps its parent sample.
 				if (compositeReadOp instanceof CompositeDataOperationImpl<?> marked) {
-					marked.markRangesSentAsRequests();
+					CompositeDataOperationImpl.markRangesSentAsRequests(marked);
 				}
 				complete(null, op);
 				return true;

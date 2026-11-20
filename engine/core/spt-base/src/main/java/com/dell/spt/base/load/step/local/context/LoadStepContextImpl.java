@@ -556,7 +556,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	/**
 	 * Whether a finished composite is a READ whose driver marked it
-	 * {@link CompositeDataOperationImpl#rangesSentAsRequests()}: a read split by the size threshold on
+	 * {@link CompositeDataOperationImpl#rangesSentAsRequests(CompositeDataOperationImpl)}: a read split by the size threshold on
 	 * {@code s3}, {@code s3-rdma} or {@code s3-aws}. Any other composite, an extension's own composite
 	 * type included, keeps its timing sample. The step calls it while it still owns the result, before
 	 * the result can be recycled and re-admitted, which clears the mark.
@@ -564,7 +564,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private static boolean rangesSentAsRequests(final Operation<?> composite) {
 		return composite.type() == OpType.READ
 						&& composite instanceof CompositeDataOperationImpl<?> parent
-						&& parent.rangesSentAsRequests();
+						&& CompositeDataOperationImpl.rangesSentAsRequests(parent);
 	}
 
 	/**
