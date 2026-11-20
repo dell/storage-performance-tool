@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import com.dell.spt.testing.tags.IntegrationTest;
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -40,6 +39,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 class NodeJarLostWorkerE2ETest {
 
 	private static final Duration READY_TIMEOUT = Duration.ofSeconds(60);
+	/** Each readiness request's bound, so a node that accepts the connect but never answers cannot stall the wait. */
+	private static final Duration READY_REQUEST_TIMEOUT = Duration.ofSeconds(3);
 	/** The ticket's bound from the signal to the Entry Node's exit. */
 	private static final Duration EXIT_AFTER_SIGNAL = Duration.ofSeconds(10);
 	private static final String LOST_FAILURE = "engine 2 of 2: the entry lost this node's step slice";
@@ -63,8 +64,10 @@ class NodeJarLostWorkerE2ETest {
 	void theEntryFailsTheStepAtOnceNamingTheLostEngine(
 					final String signal, final String timeLimit, @TempDir final Path dir) throws Exception {
 		final Path jar = packagedJar();
-		final int workerApi = freePort();
-		final int workerRmi = freePort();
+		// Taken together, so the two ports differ.
+		final int[] workerPorts = FreePorts.freePorts(2);
+		final int workerApi = workerPorts[0];
+		final int workerRmi = workerPorts[1];
 		final Path workerDir = Files.createDirectories(dir.resolve("worker"));
 		final Path entryDir = Files.createDirectories(dir.resolve("entry"));
 		final Process worker = start(jar, workerDir, List.of(
@@ -133,12 +136,12 @@ class NodeJarLostWorkerE2ETest {
 		final long deadline = System.nanoTime() + READY_TIMEOUT.toNanos();
 		while (System.nanoTime() < deadline) {
 			try {
-				if (http.send(HttpRequest.newBuilder(URI.create(base + "/ready")).GET().build(),
+				if (http.send(HttpRequest.newBuilder(URI.create(base + "/ready")).timeout(READY_REQUEST_TIMEOUT).GET().build(),
 								HttpResponse.BodyHandlers.discarding()).statusCode() == 200) {
 					return;
 				}
 			} catch (final IOException notYet) {
-				// The node is still starting.
+				// The node is still starting, or its answer timed out (HttpTimeoutException).
 			}
 			Thread.sleep(250);
 		}
@@ -167,13 +170,6 @@ class NodeJarLostWorkerE2ETest {
 		}
 		Assumptions.abort("packaged spt.jar not found; run :bundle:assembleDist first");
 		return null;
-	}
-
-	private static int freePort() throws IOException {
-		try (ServerSocket socket = new ServerSocket(0)) {
-			socket.setReuseAddress(true);
-			return socket.getLocalPort();
-		}
 	}
 
 	private static String read(final Path file) {

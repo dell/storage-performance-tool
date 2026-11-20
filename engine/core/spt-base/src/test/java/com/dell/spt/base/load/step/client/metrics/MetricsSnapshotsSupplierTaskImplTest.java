@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client.metrics;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -20,7 +21,11 @@ import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
@@ -60,10 +65,10 @@ class MetricsSnapshotsSupplierTaskImplTest {
 		final RemoteException refused = new ConnectException("injected: connection refused");
 		doReturn(fresh).doThrow(refused).when(step).metricsSnapshots();
 		final List<RemoteException> told = Collections.synchronizedList(new ArrayList<>());
-		final var supplier = new MetricsSnapshotsSupplierTaskImpl(step, metricsConfig(), failure -> {
+		final var supplier = new MetricsSnapshotsSupplierTaskImpl(step, metricsConfig(), recorder(failure -> {
 			told.add(failure);
 			return true;
-		});
+		}));
 
 		try (var fetchFailures = new FetchFailureCapture()) {
 			assertSame(fresh, supplier.get());
@@ -84,10 +89,10 @@ class MetricsSnapshotsSupplierTaskImplTest {
 		final LoadStep step = mock(LoadStep.class);
 		doThrow(new ConnectException("injected: connection refused")).when(step).metricsSnapshots();
 		final AtomicInteger told = new AtomicInteger();
-		final var supplier = new MetricsSnapshotsSupplierTaskImpl(step, metricsConfig(), failure -> {
+		final var supplier = new MetricsSnapshotsSupplierTaskImpl(step, metricsConfig(), recorder(failure -> {
 			told.incrementAndGet();
 			return false;
-		});
+		}));
 
 		try (var fetchFailures = new FetchFailureCapture()) {
 			for (var i = 0; i < 50; i++) {
@@ -132,6 +137,83 @@ class MetricsSnapshotsSupplierTaskImplTest {
 		} finally {
 			supplier.close();
 		}
+	}
+
+	@Test
+	void aSliceLostByAnotherOfTheEntrysCallsGetsNoFurtherFetch() throws Exception {
+		final LoadStep step = mock(LoadStep.class);
+		final List<AllMetricsSnapshot> fresh = new ArrayList<>();
+		fresh.add(mock(AllMetricsSnapshot.class));
+		doReturn(fresh).when(step).metricsSnapshots();
+		final AtomicBoolean lostAtAwait = new AtomicBoolean();
+		final AtomicInteger told = new AtomicInteger();
+		final var supplier = new MetricsSnapshotsSupplierTaskImpl(step, metricsConfig(), new MetricsAggregatorImpl.SliceLoss() {
+			@Override
+			public boolean isLost(final LoadStep slice) {
+				assertSame(step, slice);
+				return lostAtAwait.get();
+			}
+
+			@Override
+			public boolean fetchFailed(final LoadStep slice, final RemoteException failure) {
+				told.incrementAndGet();
+				return true;
+			}
+		});
+
+		try {
+			assertSame(fresh, supplier.get());
+			// The entry loses the slice at its await, stop or close, which answered or failed elsewhere.
+			lostAtAwait.set(true);
+			assertNull(supplier.get(), "a lost slice publishes no snapshots");
+			supplier.start();
+			Thread.sleep(300);
+			assertNull(supplier.get());
+			verify(step, times(1)).metricsSnapshots();
+			assertEquals(0, told.get(), "no fetch, so no failure to tell of");
+		} finally {
+			supplier.close();
+		}
+	}
+
+	@Test
+	void fetchesFailingTogetherLogOnceAtInfo() throws Exception {
+		final int rounds = 200;
+		try (var fetchFailures = new FetchFailureCapture()) {
+			for (var round = 0; round < rounds; round++) {
+				final LoadStep step = mock(LoadStep.class);
+				final CyclicBarrier together = new CyclicBarrier(2);
+				doAnswer(invocation -> {
+					together.await(5, TimeUnit.SECONDS);
+					throw new ConnectException("injected: connection refused");
+				}).when(step).metricsSnapshots();
+				final var supplier = new MetricsSnapshotsSupplierTaskImpl(step, metricsConfig(), recorder(failure -> false));
+				try {
+					// The background fetch and the step's metrics output fail at the same time.
+					final Thread other = Thread.ofPlatform().start(supplier::get);
+					assertNull(supplier.get());
+					other.join();
+				} finally {
+					supplier.close();
+				}
+			}
+			assertEquals(rounds, fetchFailures.count(), "one INFO line per slice, also for failures at the same time");
+		}
+	}
+
+	/** A record of lost slices that loses none by another route and tells each fetch failure to the predicate. */
+	private static MetricsAggregatorImpl.SliceLoss recorder(final Predicate<RemoteException> fetchFailed) {
+		return new MetricsAggregatorImpl.SliceLoss() {
+			@Override
+			public boolean isLost(final LoadStep slice) {
+				return false;
+			}
+
+			@Override
+			public boolean fetchFailed(final LoadStep slice, final RemoteException failure) {
+				return fetchFailed.test(failure);
+			}
+		};
 	}
 
 	private static com.github.akurilov.confuse.Config metricsConfig() {

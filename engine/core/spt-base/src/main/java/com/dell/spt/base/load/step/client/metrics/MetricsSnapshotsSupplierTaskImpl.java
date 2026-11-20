@@ -11,7 +11,7 @@ import com.github.akurilov.confuse.Config;
 
 import java.rmi.RemoteException;
 import java.util.List;
-import java.util.function.Predicate;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.logging.log4j.Level;
 
@@ -21,14 +21,17 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 				implements MetricsSnapshotsSupplierTask {
 
 	private final LoadStep loadStep;
-	/** Told of each failed fetch in RMI; answers whether the slice is now lost. Null: no slice is lost. */
-	private final Predicate<RemoteException> lossRecorder;
+	/** The entry's record of its lost slices; null when no fetch failure loses the slice. */
+	private final MetricsAggregatorImpl.SliceLoss sliceLoss;
 	private volatile List<? extends AllMetricsSnapshot> snapshotsByOrigin = null;
 	private volatile boolean failedBeforeFlag = false;
-	/** Set when a failed fetch lost the slice: no fetch follows. */
+	/** Set once the slice is lost, by a failed fetch or by any other route: no fetch follows. */
 	private volatile boolean lost = false;
-	/** Set at the first failed fetch, which alone logs at INFO; later ones log at DEBUG. */
-	private volatile boolean failureLogged = false;
+	/**
+	 * Set by the first failed fetch that does not lose the slice, which alone logs at INFO; every
+	 * later one logs at DEBUG, also after fetches have succeeded again.
+	 */
+	private final AtomicBoolean failureLogged = new AtomicBoolean();
 	private int AGGREGATION_PERIOD_MILLIS;
 
 	public MetricsSnapshotsSupplierTaskImpl(final LoadStep loadStep, Config metricsConfig) {
@@ -36,12 +39,12 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 	}
 
 	/**
-	 * @param lossRecorder told of each fetch that fails in RMI, and answers whether that lost the
-	 *     slice; null when no fetch failure loses it
+	 * @param sliceLoss the entry's record of its lost slices, which tells this supplier when the
+	 *     slice is lost and hears of each fetch that fails in RMI; null when no fetch failure loses it
 	 */
-	public MetricsSnapshotsSupplierTaskImpl(
-					final LoadStep loadStep, final Config metricsConfig, final Predicate<RemoteException> lossRecorder) {
-		this(ServiceTaskExecutor.TASK_EXECUTOR, loadStep, lossRecorder);
+	MetricsSnapshotsSupplierTaskImpl(
+					final LoadStep loadStep, final Config metricsConfig, final MetricsAggregatorImpl.SliceLoss sliceLoss) {
+		this(ServiceTaskExecutor.TASK_EXECUTOR, loadStep, sliceLoss);
 		AGGREGATION_PERIOD_MILLIS = metricsConfig.intVal("average-aggregation-period");
 	}
 
@@ -50,10 +53,10 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 	}
 
 	private MetricsSnapshotsSupplierTaskImpl(
-					final ThreadTaskExecutor executor, final LoadStep loadStep, final Predicate<RemoteException> lossRecorder) {
+					final ThreadTaskExecutor executor, final LoadStep loadStep, final MetricsAggregatorImpl.SliceLoss sliceLoss) {
 		super(executor);
 		this.loadStep = loadStep;
-		this.lossRecorder = lossRecorder;
+		this.sliceLoss = sliceLoss;
 	}
 
 	/** Preserves the constructor descriptor used by existing extensions. */
@@ -63,7 +66,7 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 
 	@Override
 	protected final void doWork() throws Exception {
-		if (lost) {
+		if (isLost()) {
 			stop();
 			return;
 		}
@@ -90,7 +93,8 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 
 	@Override
 	public final List<? extends AllMetricsSnapshot> get() {
-		if (lost) {
+		if (isLost()) {
+			snapshotsByOrigin = null;
 			return null;
 		}
 		try {
@@ -102,6 +106,14 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 		return snapshotsByOrigin;
 	}
 
+	/** Whether the slice is lost, by a fetch of this supplier or by the entry's other calls to it. */
+	private boolean isLost() {
+		if (!lost && sliceLoss != null && sliceLoss.isLost(loadStep)) {
+			lost = true;
+		}
+		return lost;
+	}
+
 	/**
 	 * Handles a failed fetch: the snapshots are dropped, as before, and a lost slice gets no further
 	 * fetch. Only the first failed fetch from the slice logs at INFO, since the step's metrics output
@@ -111,15 +123,15 @@ public final class MetricsSnapshotsSupplierTaskImpl extends TaskBase
 	 */
 	private boolean fetchFailed(final Exception e) {
 		snapshotsByOrigin = null;
-		if (lost || (e instanceof RemoteException remote && lossRecorder != null && lossRecorder.test(remote))) {
+		if (lost || (e instanceof RemoteException remote && sliceLoss != null && sliceLoss.fetchFailed(loadStep, remote))) {
 			lost = true;
 			return true;
 		}
-		if (failureLogged) {
-			LogUtil.exception(Level.DEBUG, e, "Failed to fetch the metrics snapshots from \"{}\"", loadStep);
-		} else {
-			failureLogged = true;
+		// Atomic, as the background fetch and a synchronous get() can fail together.
+		if (failureLogged.compareAndSet(false, true)) {
 			LogUtil.exception(Level.INFO, e, "Failed to fetch the metrics snapshots from \"{}\"", loadStep);
+		} else {
+			LogUtil.exception(Level.DEBUG, e, "Failed to fetch the metrics snapshots from \"{}\"", loadStep);
 		}
 		return false;
 	}
