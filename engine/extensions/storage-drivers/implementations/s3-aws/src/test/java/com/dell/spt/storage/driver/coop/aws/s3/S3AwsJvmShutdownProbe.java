@@ -35,6 +35,8 @@ public final class S3AwsJvmShutdownProbe {
 	/** How long the hook waits for the answered request: the engine's default stop grace. */
 	private static final Duration RESULT_BUDGET = Duration.ofSeconds(5);
 	private static final Duration REQUEST_BUDGET = Duration.ofSeconds(30);
+	/** How long a probe in signal mode waits for its signal before it exits on its own. */
+	private static final Duration SIGNAL_BUDGET = REQUEST_BUDGET.multipliedBy(2);
 
 	private S3AwsJvmShutdownProbe() {}
 
@@ -65,7 +67,7 @@ public final class S3AwsJvmShutdownProbe {
 		target.start();
 
 		final S3AwsStorageDriver<DataItem, DataOperation<DataItem>> driver = S3AwsDriverHarness.driver(
-						home, target.getAddress().getPort(), Map.of(), CrtShutdownRef.CRT_COUNTER, false);
+						home, target.getAddress().getPort(), Map.of());
 		final DataOperationImpl<DataItem> put = S3AwsDriverHarness.putOp(KEY);
 		final var started = S3AwsDriverHarness.Started.<DataItem, DataOperation<DataItem>> start(driver, put);
 		if (!received.await(REQUEST_BUDGET.toMillis(), TimeUnit.MILLISECONDS)) {
@@ -93,7 +95,10 @@ public final class S3AwsJvmShutdownProbe {
 
 		report(READY);
 		if (waitForSignal) {
-			Thread.sleep(Long.MAX_VALUE);
+			// Bounded, so a probe whose test worker died does not stay on the host.
+			Thread.sleep(SIGNAL_BUDGET.toMillis());
+			report(PREFIX + "no signal within " + SIGNAL_BUDGET);
+			System.exit(3);
 		}
 		System.exit(0);
 	}

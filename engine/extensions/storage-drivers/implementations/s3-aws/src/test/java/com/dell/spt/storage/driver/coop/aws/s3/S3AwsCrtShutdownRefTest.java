@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -97,7 +97,11 @@ final class S3AwsCrtShutdownRefTest {
 		final Config storage = S3AwsMergedConfig.create(home, UNUSED_PORT, Map.of()).configVal("storage");
 		final S3AsyncClient client = mock(S3AsyncClient.class);
 		final var closeFailure = new LinkageError("injected client close failure");
-		doThrow(closeFailure).when(client).close();
+		final var releasedWhenClientClosed = new AtomicInteger(-1);
+		doAnswer(invocation -> {
+			releasedWhenClientClosed.set(refs.released.get());
+			throw closeFailure;
+		}).when(client).close();
 		final S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
 						"s3-aws-ref",
 						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
@@ -115,6 +119,7 @@ final class S3AwsCrtShutdownRefTest {
 
 		assertSame(closeFailure, assertThrows(LinkageError.class, driver::close));
 		assertEquals(1, refs.acquired.get());
+		assertEquals(0, releasedWhenClientClosed.get(), "the reference must be held until the client is closed");
 		assertEquals(1, refs.released.get());
 	}
 

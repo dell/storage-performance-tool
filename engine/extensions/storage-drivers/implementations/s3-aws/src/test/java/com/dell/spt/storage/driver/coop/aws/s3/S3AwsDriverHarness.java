@@ -32,7 +32,23 @@ final class S3AwsDriverHarness {
 
 	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(
 					final Path home, final ScriptedS3Server server, final Map<String, Object> overrides) throws Exception {
-		return driver(home, server.port(), overrides, CrtShutdownRef.CRT_COUNTER, false);
+		return driver(home, server.port(), overrides);
+	}
+
+	/**
+	 * A driver for an endpoint on a loopback port, built by the factory {@code ServiceLoader} creates,
+	 * so with its default CRT shutdown reference count.
+	 */
+	@SuppressWarnings("unchecked")
+	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(
+					final Path home, final int port, final Map<String, Object> overrides) throws Exception {
+		final Config storage = S3AwsMergedConfig.create(home, port, overrides).configVal("storage");
+		return (S3AwsStorageDriver<I, O>) new S3AwsStorageDriverFactory<I, O>().create(
+						"s3-aws-harness",
+						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+						storage,
+						false,
+						16);
 	}
 
 	/** A driver for an endpoint on a loopback port whose CRT shutdown references count on {@code crtShutdownRefs}. */

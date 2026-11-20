@@ -3,13 +3,16 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -47,10 +50,21 @@ final class S3AwsJvmShutdownTest {
 	@EnumSource(Shutdown.class)
 	void aRequestAnsweredAfterJvmShutdownBeganCompletes(final Shutdown shutdown, @TempDir final Path home)
 					throws Exception {
-		final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-		final Process child = new ProcessBuilder(java, "-cp", System.getProperty("java.class.path"),
+		final List<String> command = new ArrayList<>();
+		if (shutdown == Shutdown.SIGINT) {
+			// A launcher started as a background job of a shell ignores SIGINT, and a child inherits
+			// that, so the JVM would never see the signal. Restore its default disposition.
+			if (envRestoresDefaultSignals()) {
+				command.addAll(List.of("env", "--default-signal=INT"));
+			} else {
+				assumeFalse(sigintIgnored(), "SIGINT is ignored here and env cannot restore it");
+			}
+		}
+		command.addAll(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+						"-cp", System.getProperty("java.class.path"),
 						S3AwsJvmShutdownProbe.class.getName(),
-						shutdown == Shutdown.EXIT ? "exit" : "signal", home.toString())
+						shutdown == Shutdown.EXIT ? "exit" : "signal", home.toString()));
+		final Process child = new ProcessBuilder(command)
 						.redirectErrorStream(true)
 						.start();
 		final List<String> output = new CopyOnWriteArrayList<>();
@@ -92,5 +106,28 @@ final class S3AwsJvmShutdownTest {
 		} finally {
 			child.destroyForcibly();
 		}
+	}
+
+	/** Whether {@code env} has {@code --default-signal} (GNU coreutils 8.31 and later). */
+	private static boolean envRestoresDefaultSignals() throws InterruptedException {
+		try {
+			final Process probe = new ProcessBuilder("env", "--default-signal=INT", "true")
+							.redirectErrorStream(true)
+							.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+							.start();
+			return probe.waitFor(10, TimeUnit.SECONDS) && probe.exitValue() == 0;
+		} catch (final IOException e) {
+			return false;
+		}
+	}
+
+	/** Whether this JVM, and so a child it starts, ignores SIGINT: bit 2 of {@code SigIgn}. */
+	private static boolean sigintIgnored() throws IOException {
+		for (final String line : Files.readAllLines(Path.of("/proc/self/status"), StandardCharsets.US_ASCII)) {
+			if (line.startsWith("SigIgn:")) {
+				return (Long.parseUnsignedLong(line.substring("SigIgn:".length()).trim(), 16) & 0x2L) != 0;
+			}
+		}
+		return false;
 	}
 }
