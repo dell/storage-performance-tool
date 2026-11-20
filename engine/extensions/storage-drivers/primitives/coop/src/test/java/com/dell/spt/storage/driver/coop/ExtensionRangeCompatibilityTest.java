@@ -51,8 +51,9 @@ import org.junit.jupiter.api.io.TempDir;
  * A split read whose ranges are not the engine's own {@code PartialDataOperationImpl}, or are
  * subclasses of it built against 5.17.0, ends as it did in 5.17.0: a range out of retries gives the
  * read its failure, and the read ends once. The engine's mark that a range recorded its failure is
- * kept on {@code PartialDataOperationImpl} and reached only through its static methods, so an
- * extension's own methods of the same names neither break loading nor are called by the driver.
+ * kept in a package-private field of {@code PartialDataOperationImpl} and reached only through the
+ * static methods of {@code PartialDataOperationFailureMark}, so an extension's own methods of the
+ * same names neither break loading nor are called by the driver.
  */
 @SuppressWarnings("unchecked")
 @Timeout(60)
