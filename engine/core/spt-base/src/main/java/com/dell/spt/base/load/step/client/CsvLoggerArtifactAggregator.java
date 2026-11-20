@@ -75,8 +75,27 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 
 	@Override
 	public void close() {
+		publish(sourceNames.size());
+	}
+
+	/**
+	 * Publishes the artifact of a step whose start ended as a stop, from its first
+	 * {@code startedSlices} slices: those whose start returned. The others wrote nothing to publish.
+	 * With none, publishes nothing. A missing source of a started slice is still a failure.
+	 */
+	void closeAfterStoppedStart(final int startedSlices) {
+		if (startedSlices < 0 || startedSlices > sourceNames.size()) {
+			throw new IllegalArgumentException(
+							"started slices " + startedSlices + " not in 0.." + sourceNames.size());
+		}
+		if (startedSlices > 0) {
+			publish(startedSlices);
+		}
+	}
+
+	private void publish(final int sliceCount) {
 		try {
-			collectAndPublish();
+			collectAndPublish(sliceCount);
 		} catch (final IntegrityTerminalException e) {
 			throw e;
 		} catch (final Exception e) {
@@ -84,12 +103,12 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 		}
 	}
 
-	private void collectAndPublish() throws IOException {
+	private void collectAndPublish(final int sliceCount) throws IOException {
 		LogUtil.flushAll();
 		final Path parent = canonicalPath.toAbsolutePath().getParent();
 		Files.createDirectories(parent);
-		final List<Path> nodeSources = new ArrayList<>(sourceNames.size());
-		for (int i = 0; i < sourceNames.size(); i++) {
+		final List<Path> nodeSources = new ArrayList<>(sliceCount);
+		for (int i = 0; i < sliceCount; i++) {
 			final Path nodePath = nodeSourcePath(canonicalPath, i);
 			if (Files.exists(nodePath)) {
 				throw terminal(Category.PUBLICATION, "stale node source exists: " + nodePath, null);

@@ -7,9 +7,13 @@ package portcheck
 import (
 	"context"
 	"fmt"
+	"net"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	containertypes "github.com/docker/docker/api/types/container"
@@ -22,6 +26,7 @@ type dockerAPI interface {
 	ContainerStop(ctx context.Context, containerID string, options containertypes.StopOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options containertypes.RemoveOptions) error
 	ContainerInspect(ctx context.Context, containerID string) (containertypes.InspectResponse, error)
+	DaemonHost() string
 	Close() error
 }
 
@@ -74,6 +79,129 @@ func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port
 
 	logging.LogDebug("portcheck", "no containers found using port", "port", port)
 	return nil, nil
+}
+
+// DaemonIsLocal reports whether the Docker daemon is reached through a local
+// socket: a Unix socket, or a named pipe on this machine (npipe:////./pipe/...).
+// A daemon reached over TCP or SSH, even through a forwarded local port, or a pipe
+// on another machine (npipe:////host/pipe/...), may run on another host, so its
+// containers need not hold this host's ports. An address of any other form is not
+// taken as local.
+//
+// The scheme is compared as the Docker client's dialer compares it, letter case
+// included: it reaches a socket only for "unix" and "npipe", and dials any other
+// scheme, "UNIX" too, over TCP. Once the scheme is "npipe", the pipe path is a
+// Windows path, so "//./pipe/" is compared without letter case.
+func (d *DockerContainerFinder) DaemonIsLocal() bool {
+	scheme, path, ok := strings.Cut(d.client.DaemonHost(), "://")
+	if !ok {
+		return false
+	}
+	switch scheme {
+	case "unix":
+		return true
+	case "npipe":
+		return strings.HasPrefix(strings.ToLower(path), "//./pipe/")
+	default:
+		return false
+	}
+}
+
+// FindPublishers returns every running container that publishes TCP port on a
+// binding that covers ip: one on ip itself, or on the wildcard of ip's family
+// (0.0.0.0 for IPv4, :: for IPv6). A binding on another address or of the other
+// family does not accept a connection to ip, and neither does one whose address
+// the daemon does not give.
+func (d *DockerContainerFinder) FindPublishers(ctx context.Context, ip net.IP, port string) ([]*ContainerInfo, error) {
+	if ip == nil {
+		return nil, nil
+	}
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+	var publishers []*ContainerInfo
+	for _, c := range containers {
+		if !containerHoldsPorts(c) {
+			continue
+		}
+		for _, p := range c.Ports {
+			if p.Type == "tcp" && p.PublicPort != 0 && strconv.Itoa(int(p.PublicPort)) == port && bindingCovers(p.IP, ip) {
+				publishers = append(publishers, d.containerToInfo(c))
+				break
+			}
+		}
+	}
+	return publishers, nil
+}
+
+// FindPortNumberPublishers returns every running container that publishes TCP
+// port, whatever the address of the binding, or with none given. It only names
+// candidates in a message: a binding that does not cover the address that
+// answered does not show that its container holds the port.
+func (d *DockerContainerFinder) FindPortNumberPublishers(ctx context.Context, port string) ([]*ContainerInfo, error) {
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+	var publishers []*ContainerInfo
+	for _, c := range containers {
+		if containerHoldsPorts(c) && d.containerUsesPort(c, port) {
+			publishers = append(publishers, d.containerToInfo(c))
+		}
+	}
+	return publishers, nil
+}
+
+// bindingCovers reports whether a published binding on bindIP accepts a
+// connection to ip.
+func bindingCovers(bindIP string, ip net.IP) bool {
+	bound := net.ParseIP(bindIP)
+	if bound == nil {
+		return false
+	}
+	if bound.IsUnspecified() {
+		return (bound.To4() != nil) == (ip.To4() != nil)
+	}
+	return bound.Equal(ip)
+}
+
+// isEngineNodeContainer reports whether SPT labelled the container as an engine node.
+func isEngineNodeContainer(labels map[string]string) bool {
+	return labels[constants.DockerLabelManaged] == "true" && labels[constants.DockerLabelRole] == constants.DockerRoleNode
+}
+
+// FindHostNetworkEngine finds the SPT-managed node container that serves the API
+// on port from the host's network. Such a container publishes no ports, so only
+// its labels, network mode and --run-port argument identify it. A bridge engine
+// with the same argument holds that port only inside its own network and is not
+// returned. Two matches cannot be told apart, so they are an error.
+func (d *DockerContainerFinder) FindHostNetworkEngine(ctx context.Context, port string) (*ContainerInfo, error) {
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	runPortArg := constants.EngineRunPortArgPrefix + port
+	var found *ContainerInfo
+	for _, c := range containers {
+		if !containerHoldsPorts(c) || !isEngineNodeContainer(c.Labels) {
+			continue
+		}
+		inspect, err := d.client.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect container %s: %w", containerutil.ShortID(c.ID), err)
+		}
+		if inspect.ContainerJSONBase == nil || inspect.HostConfig == nil ||
+			!inspect.HostConfig.NetworkMode.IsHost() || !slices.Contains(inspect.Args, runPortArg) {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("more than one host-network SPT engine is set to serve port %s", port)
+		}
+		found = d.containerToInfo(c)
+	}
+	return found, nil
 }
 
 // FindSptContainers finds all containers running Spt images
@@ -254,26 +382,6 @@ func IsSptContainer(container *ContainerInfo) bool {
 	}
 
 	return false
-}
-
-// ForceStopAndRemoveContainer forcefully stops and removes a container
-func (d *DockerContainerFinder) ForceStopAndRemoveContainer(ctx context.Context, containerID string) error {
-	logging.LogInfo("portcheck", "force stopping and removing container",
-		"containerID", containerutil.ShortID(containerID))
-
-	// First try to stop the container
-	if err := d.StopContainer(ctx, containerID); err != nil {
-		logging.LogDebug("portcheck", "normal stop failed, trying force stop",
-			"containerID", containerutil.ShortID(containerID),
-			"error", err.Error())
-	}
-
-	// Then remove it (with force flag)
-	if err := d.RemoveContainer(ctx, containerID, true); err != nil {
-		return fmt.Errorf("failed to force remove container: %w", err)
-	}
-
-	return nil
 }
 
 // WaitForContainerToStop waits for a container to stop within the timeout
