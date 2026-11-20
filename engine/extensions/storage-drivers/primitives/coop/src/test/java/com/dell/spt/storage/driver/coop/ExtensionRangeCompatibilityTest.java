@@ -17,6 +17,7 @@ import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.storage.driver.coop.mock.CoopStorageDriverMock;
 import com.github.akurilov.commons.io.Output;
@@ -306,6 +307,47 @@ final class ExtensionRangeCompatibilityTest {
 					}
 					""";
 
+	/**
+	 * An extension's own interface with default methods of the mark's names, taking the engine's range
+	 * class, as an extension built against 5.17.0 may have.
+	 */
+	private static final String EXTENSION_MARKS = """
+					package fixture.ext;
+
+					import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+
+					public interface ExtensionMarks {
+						default void markFailureRecorded(final PartialDataOperationImpl<?> part) {}
+						default boolean failureRecorded(final PartialDataOperationImpl<?> part) {
+							return true;
+						}
+					}
+					""";
+
+	/**
+	 * A subclass that takes the interface's methods, and calls them on itself, which compiles to calls
+	 * on the subclass that the JVM resolves through its superclasses first.
+	 */
+	private static final String INTERFACE_MARK_RANGE = """
+					package fixture.ext;
+
+					import com.dell.spt.base.item.DataItem;
+					import com.dell.spt.base.item.op.OpType;
+					import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+					import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+
+					public class InterfaceMarkRange<I extends DataItem> extends PartialDataOperationImpl<I>
+									implements ExtensionMarks {
+						public InterfaceMarkRange(final int partNumber, final I part, final CompositeDataOperation<I> parent) {
+							super(0, OpType.READ, part, null, "/bucket", null, partNumber, parent);
+						}
+						public static boolean ownMark(final InterfaceMarkRange<?> range) {
+							range.markFailureRecorded(range);
+							return range.failureRecorded(range);
+						}
+					}
+					""";
+
 	private final List<Operation<Item>> results = Collections.synchronizedList(new ArrayList<>());
 	private DataInput dataInput;
 	private FinishingDriver driver;
@@ -455,8 +497,50 @@ final class ExtensionRangeCompatibilityTest {
 		assertCompilesAgainstThisEngine(STRING_MARK_RANGE);
 	}
 
-	private void assertCompilesAgainstThisEngine(final String source) throws IOException {
-		final var diagnostics = compile(tempDir.resolve("current"), List.of(source));
+	/**
+	 * The engine's range class, its supertypes and the interfaces they implement have no method of the
+	 * mark's names, so none can be resolved in place of an extension's own.
+	 */
+	@Test
+	void theEnginesRangeTypesHaveNoMethodOfTheMarksNames() {
+		final var names = java.util.Set.of("markFailureRecorded", "failureRecorded");
+		final List<Class<?>> types = new ArrayList<>();
+		for (Class<?> type = PartialDataOperationImpl.class; type != null; type = type.getSuperclass()) {
+			types.add(type);
+		}
+		for (var i = 0; i < types.size(); i++) {
+			for (final var implemented : types.get(i).getInterfaces()) {
+				if (!types.contains(implemented)) {
+					types.add(implemented);
+				}
+			}
+		}
+		for (final var type : types) {
+			for (final var method : type.getDeclaredMethods()) {
+				assertTrue(!names.contains(method.getName()), () -> type.getName() + " declares " + method);
+			}
+		}
+	}
+
+	/**
+	 * A subclass that takes default methods of the mark's names from its own interface, compiled
+	 * against 5.17.0, still calls them, and its read ends as in 5.17.0.
+	 */
+	@Test
+	void aSubclassWhoseInterfaceHasMethodsOfTheMarksNamesStillCallsThem() throws Exception {
+		final var classes = compileAgainst5170();
+		final var range = fixtureRanges(classes).apply("InterfaceMarkRange");
+		final var read = read("interface", range);
+		oneRangeFailsEveryAttempt(read);
+
+		final var part = read.subOperations().get(0);
+		final var ownMark = part.getClass().getMethod("ownMark", part.getClass());
+		assertEquals(Boolean.TRUE, ownMark.invoke(null, part), "the interface's own method answers");
+		assertCompilesAgainstThisEngine(EXTENSION_MARKS, INTERFACE_MARK_RANGE);
+	}
+
+	private void assertCompilesAgainstThisEngine(final String... sources) throws IOException {
+		final var diagnostics = compile(tempDir.resolve("current"), List.of(sources));
 		assertEquals("", diagnostics, "the subclass compiles against this engine");
 	}
 
@@ -465,7 +549,13 @@ final class ExtensionRangeCompatibilityTest {
 		final var out = tempDir.resolve("against-5.17.0");
 		final var diagnostics = compile(
 						out,
-						List.of(PARTIAL_OPERATION_5_17_0, PARTIAL_DATA_OPERATION_IMPL_5_17_0, BOOLEAN_MARK_RANGE, STRING_MARK_RANGE));
+						List.of(
+										PARTIAL_OPERATION_5_17_0,
+										PARTIAL_DATA_OPERATION_IMPL_5_17_0,
+										BOOLEAN_MARK_RANGE,
+										STRING_MARK_RANGE,
+										EXTENSION_MARKS,
+										INTERFACE_MARK_RANGE));
 		assertEquals("", diagnostics, "the fixtures compile against 5.17.0");
 		return out;
 	}

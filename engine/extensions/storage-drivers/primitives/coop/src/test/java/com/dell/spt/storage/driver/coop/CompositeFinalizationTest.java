@@ -10,6 +10,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationFailureMark;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -44,7 +45,7 @@ final class CompositeFinalizationTest {
 	/** What the completion of {@code part}, out of retries, records under the read's monitor. */
 	private void recordFailure(final PartialDataOperation<DataItem> part) {
 		read.put("mpuFailure", part.status().name());
-		PartialDataOperationImpl.markFailureRecorded((PartialDataOperationImpl<?>) part);
+		PartialDataOperationFailureMark.markFailureRecorded((PartialDataOperationImpl<?>) part);
 	}
 
 	@Test

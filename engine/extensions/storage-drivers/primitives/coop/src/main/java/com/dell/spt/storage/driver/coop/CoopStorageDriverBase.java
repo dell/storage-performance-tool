@@ -15,6 +15,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationFailureMark;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -1199,7 +1200,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				range.incrementRetryCount();
 			}
 			if (range instanceof PartialDataOperationImpl<?> part) {
-				PartialDataOperationImpl.markFailureRecorded(part);
+				PartialDataOperationFailureMark.markFailureRecorded(part);
 			}
 			// The range never reaches finishResponse(), which settles a sent range.
 			compositeOp.markSubTaskCompleted();
@@ -1336,7 +1337,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						// Only now may the parent end: a sibling's completion that finds this part
 						// settled but unmarked waits for this one, which records the final status.
 						if (subOp instanceof PartialDataOperationImpl<?> part) {
-							PartialDataOperationImpl.markFailureRecorded(part);
+							PartialDataOperationFailureMark.markFailureRecorded(part);
 						}
 						if (rangeRead) {
 							// Range reads are stateless, so there is nothing to abort: the other
@@ -1440,7 +1441,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/** Under {@code parentOp}'s monitor: whether {@code subOp}, a failed part, no longer holds it. */
 	private static boolean failureSettled(final CompositeOperation<?> parentOp, final PartialOperation<?> subOp) {
 		if (subOp instanceof PartialDataOperationImpl<?> part) {
-			return PartialDataOperationImpl.failureRecorded(part);
+			return PartialDataOperationFailureMark.failureRecorded(part);
 		}
 		return parentOp.get("mpuFailure") != null && subOp.retryCount() >= MAX_PART_RETRIES;
 	}
