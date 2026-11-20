@@ -49,6 +49,15 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 			params.SelectionSelectedCount = staged.Completion.SelectedRecordCount
 			params.SelectionSHA256 = staged.Completion.ManifestSHA256
 			params.SelectionOrder = SelectionOrderCanonical
+			params.DeleteSavedItems = nil
+			if staged.Format == integrity.ItemsFileFormatSavedItems {
+				params.DeleteSavedItems = &SavedItemsSource{
+					Rows:        staged.ConvertedRows,
+					Buckets:     staged.Buckets,
+					BucketCount: staged.BucketCount,
+					MoreBuckets: staged.MoreBuckets,
+				}
+			}
 			mounts = append(mounts,
 				FileMount{HostPath: staged.ManifestPath, ContainerPath: params.ItemsFile},
 				FileMount{HostPath: staged.CompletionPath, ContainerPath: containerItemFilesDir + "/" + integrity.VerifyInputCompletionName})

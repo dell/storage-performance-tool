@@ -25,6 +25,17 @@ func stageThroughEveryRoute(
 	t *testing.T, content string, check func(t *testing.T, tempDir, manifest string, err error),
 ) {
 	t.Helper()
+	stageThroughEveryNamedRoute(t, content, func(t *testing.T, _, tempDir, manifest string, err error) {
+		check(t, tempDir, manifest, err)
+	})
+}
+
+// stageThroughEveryNamedRoute is stageThroughEveryRoute, telling check which route ran:
+// "delete" or "read-verify".
+func stageThroughEveryNamedRoute(
+	t *testing.T, content string, check func(t *testing.T, route, tempDir, manifest string, err error),
+) {
+	t.Helper()
 	routes := map[string]func(source string) (dir, manifest string, err error){
 		"delete": func(source string) (string, string, error) {
 			staged, err := StageDeleteInputManifest(source, 324, 0, "")
@@ -44,7 +55,7 @@ func stageThroughEveryRoute(
 				t.Fatal(err)
 			}
 			_, manifest, err := stage(source)
-			check(t, tempDir, manifest, err)
+			check(t, name, tempDir, manifest, err)
 		})
 	}
 }
@@ -104,12 +115,15 @@ func TestStageDeleteChecksSavedItemRowsBeforeBucketAssertion(t *testing.T) {
 	}
 }
 
+// read-verify refuses a file without the canonical header; DELETE reads it as a saved items
+// file, so it accepts a saved items file and refuses the others line by line (deleteWant).
 func TestStageHeaderRefusalExplainsSavedItemsFile(t *testing.T) {
 	const headerMessage = `items file must use exact header ["bucket" "key" "size" "version_id"]`
 	tests := []struct {
-		name    string
-		content string
-		want    string
+		name       string
+		content    string
+		want       string
+		deleteWant string // "" when DELETE accepts the file
 	}{
 		{
 			name:    "saved items file",
@@ -117,25 +131,40 @@ func TestStageHeaderRefusalExplainsSavedItemsFile(t *testing.T) {
 			want:    headerMessage + ": " + savedItemRowMessage("1"),
 		},
 		{
-			name:    "bare-CR saved items file",
-			content: "/b/s0/name,2a0f,1024,0/0\r/b/s0/other,2a10,1024,0/0\r",
-			want:    headerMessage + ": " + savedItemRowMessage("1"),
+			name:       "bare-CR saved items file",
+			content:    "/b/s0/name,2a0f,1024,0/0\r/b/s0/other,2a10,1024,0/0\r",
+			want:       headerMessage + ": " + savedItemRowMessage("1"),
+			deleteWant: savedItemsLineMessage(1, "holds a CR that does not end the line"),
 		},
 		{
-			name:    "header and rows on bare-CR line ends",
-			content: "bucket,key,size,version_id\r/b/s0/name,2a0f,1024,0/0\r",
-			want:    savedItemRowMessage("2"),
+			name:       "header and rows on bare-CR line ends",
+			content:    "bucket,key,size,version_id\r/b/s0/name,2a0f,1024,0/0\r",
+			want:       savedItemRowMessage("2"),
+			deleteWant: savedItemRowMessage("2"),
 		},
-		{name: "canonical rows", content: "b,k,1024,\n", want: headerMessage},
-		{name: "canonical row with hex key", content: "b,2a0f,1024,\n", want: headerMessage},
-		{name: "plain item list", content: "obj-1\n", want: headerMessage},
-		{name: "invalid size", content: "/b/s0/name,2a0f,big,0/0\n", want: headerMessage},
+		{name: "canonical rows", content: "b,k,1024,\n", want: headerMessage, deleteWant: notAnObjectPath(1)},
+		{name: "canonical row with hex key", content: "b,2a0f,1024,\n", want: headerMessage, deleteWant: notAnObjectPath(1)},
+		{name: "plain item list", content: "obj-1\n", want: headerMessage, deleteWant: savedItemsLineMessage(1, "has 1 fields, want 4")},
+		{
+			name: "invalid size", content: "/b/s0/name,2a0f,big,0/0\n", want: headerMessage,
+			deleteWant: savedItemsLineMessage(1, "has a size that is not a nonnegative decimal integer"),
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stageThroughEveryRoute(t, test.content, func(t *testing.T, tempDir, _ string, err error) {
-				if err == nil || err.Error() != test.want {
-					t.Fatalf("error = %v, want %q", err, test.want)
+			stageThroughEveryNamedRoute(t, test.content, func(t *testing.T, route, tempDir, _ string, err error) {
+				want := test.want
+				if route == "delete" {
+					want = test.deleteWant
+				}
+				if want == "" {
+					if err != nil {
+						t.Fatalf("error = %v, want the file accepted", err)
+					}
+					return
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
 				}
 				requireEmptyDir(t, tempDir)
 			})
@@ -145,9 +174,10 @@ func TestStageHeaderRefusalExplainsSavedItemsFile(t *testing.T) {
 
 func TestStageKeepsTheCanonicalReadersErrorWhenNoSavedRowIsFound(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		want    string
+		name       string
+		content    string
+		want       string
+		deleteWant string // when DELETE, which reads a file without the header as saved items, differs
 	}{
 		{
 			name:    "quote inside a canonical key",
@@ -155,9 +185,10 @@ func TestStageKeepsTheCanonicalReadersErrorWhenNoSavedRowIsFound(t *testing.T) {
 			want:    "stage canonical input: parse canonical record 2: unexpected quote in unquoted field",
 		},
 		{
-			name:    "bare-CR canonical rows",
-			content: "bucket,key,size,version_id\rb,k,1024,\r",
-			want:    `items file must use exact header ["bucket" "key" "size" "version_id"]`,
+			name:       "bare-CR canonical rows",
+			content:    "bucket,key,size,version_id\rb,k,1024,\r",
+			want:       `items file must use exact header ["bucket" "key" "size" "version_id"]`,
+			deleteWant: savedItemsLineMessage(1, "holds a CR that does not end the line"),
 		},
 		{
 			name:    "five fields",
@@ -192,9 +223,13 @@ func TestStageKeepsTheCanonicalReadersErrorWhenNoSavedRowIsFound(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stageThroughEveryRoute(t, test.content, func(t *testing.T, tempDir, _ string, err error) {
-				if err == nil || err.Error() != test.want {
-					t.Fatalf("error = %v, want %q", err, test.want)
+			stageThroughEveryNamedRoute(t, test.content, func(t *testing.T, route, tempDir, _ string, err error) {
+				want := test.want
+				if route == "delete" && test.deleteWant != "" {
+					want = test.deleteWant
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
 				}
 				requireEmptyDir(t, tempDir)
 			})
@@ -322,18 +357,21 @@ func TestStageKeepsCanonicalFilesWithCRLFAndQuotedCR(t *testing.T) {
 func TestStageReadsANamedPipeOnce(t *testing.T) {
 	const headerMessage = `items file must use exact header ["bucket" "key" "size" "version_id"]`
 	tests := []struct {
-		name    string
-		content string
-		want    string
+		name       string
+		content    string
+		want       string
+		deleteWant string // when DELETE, which reads a file without the header as saved items, differs
 	}{
-		{"wrong header", "wrong,header\nb,k,1024,\n", headerMessage},
+		{"wrong header", "wrong,header\nb,k,1024,\n", headerMessage, savedItemsLineMessage(1, "has 2 fields, want 4")},
+		{"saved items file", "/b/s0/one,2a0f,1024,0/0\n/b/s0/two,2a10,1024,0/0",
+			headerMessage + ": " + savedItemRowMessage("1"), "accepted"},
 		{"quote inside a canonical key", "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n",
-			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field"},
+			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field", ""},
 		{"blank line after the header", "bucket,key,size,version_id\n\nb,k,1024,\n",
-			"stage canonical input: canonical record 2 has 1 fields, want 4"},
-		{"unterminated quote", `"unterminated`, "read canonical header: unterminated quoted field"},
+			"stage canonical input: canonical record 2 has 1 fields, want 4", ""},
+		{"unterminated quote", `"unterminated`, "read canonical header: unterminated quoted field", ""},
 		{"quote inside a saved object path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
-			savedItemRowMessage("2")},
+			savedItemRowMessage("2"), ""},
 		{
 			// The canonical reader met the end of the stream, so the last row is complete.
 			name:    "final saved row without a line end after a bare CR",
@@ -372,8 +410,18 @@ func TestStageReadsANamedPipeOnce(t *testing.T) {
 				go func() { done <- stage(source) }()
 				select {
 				case err := <-done:
-					if err == nil || err.Error() != test.want {
-						t.Fatalf("error = %v, want %q", err, test.want)
+					want := test.want
+					if name == "delete" && test.deleteWant != "" {
+						want = test.deleteWant
+					}
+					if want == "accepted" {
+						if err != nil {
+							t.Fatalf("error = %v, want the file accepted", err)
+						}
+						return
+					}
+					if err == nil || err.Error() != want {
+						t.Fatalf("error = %v, want %q", err, want)
 					}
 				case <-time.After(10 * time.Second):
 					t.Fatal("staging a named pipe blocked")

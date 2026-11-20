@@ -259,3 +259,95 @@ func TestPrepareExternalItemFilesRefusesSavedItemsAfterAnEarlierBareCRRow(t *tes
 		})
 	}
 }
+
+// DELETE reads a file without the canonical header as the items file an S3 write saved and
+// records what it read; everything after parsing is the canonical selection.
+func TestPrepareExternalItemFilesStagesASavedItemsFileForDelete(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	params, err := PrepareExternalItemFiles(Params{
+		WorkloadType: WorkloadTypeDelete, RunID: 43, DeleteBatchSize: DefaultDeleteBatchSize,
+		Bucket: "b", ObjectCount: 2,
+		ItemsFile: writeItemFile(t, "/b/s0/z,2a0f,10,0/0\n/b/s0/a,2a10,20,0/0\n/b/s0/m,2a11,30,1/0f\n"),
+	})
+	if err != nil {
+		t.Fatalf("PrepareExternalItemFiles() error = %v", err)
+	}
+	t.Cleanup(func() {
+		for _, dir := range params.ItemStagingDirs {
+			_ = os.RemoveAll(dir)
+		}
+	})
+	if params.SelectionSourceCount != 3 || params.SelectionUniqueCount != 3 ||
+		params.SelectionSelectedCount != 2 || params.SelectionOrder != SelectionOrderCanonical ||
+		params.SelectionSHA256 == "" {
+		t.Fatalf("selection = %+v", params)
+	}
+	want := &SavedItemsSource{Rows: 3, Buckets: []string{"b"}, BucketCount: 1}
+	if params.DeleteSavedItems == nil || params.DeleteSavedItems.Rows != want.Rows ||
+		strings.Join(params.DeleteSavedItems.Buckets, ",") != "b" || params.DeleteSavedItems.BucketCount != 1 ||
+		params.DeleteSavedItems.MoreBuckets {
+		t.Fatalf("DeleteSavedItems = %+v, want %+v", params.DeleteSavedItems, want)
+	}
+	if len(params.ItemFileMounts) != 2 {
+		t.Fatalf("item mounts = %+v", params.ItemFileMounts)
+	}
+	staged, err := os.ReadFile(params.ItemFileMounts[0].HostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(staged) != canonicalItemsHeader+"b,s0/a,20,\nb,s0/m,30,\n" {
+		t.Fatalf("staged manifest = %q", staged)
+	}
+}
+
+func TestPrepareExternalItemFilesLeavesACanonicalDeleteUnmarked(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	params, err := PrepareExternalItemFiles(Params{
+		WorkloadType: WorkloadTypeDelete, RunID: 44, DeleteBatchSize: 1,
+		ItemsFile: writeItemFile(t, canonicalItemsHeader+"b,k,10,\n"),
+	})
+	if err != nil {
+		t.Fatalf("PrepareExternalItemFiles() error = %v", err)
+	}
+	t.Cleanup(func() {
+		for _, dir := range params.ItemStagingDirs {
+			_ = os.RemoveAll(dir)
+		}
+	})
+	if params.DeleteSavedItems != nil {
+		t.Fatalf("DeleteSavedItems = %+v, want nil for a canonical manifest", params.DeleteSavedItems)
+	}
+}
+
+func TestPrepareExternalItemFilesRefusesAMultiBucketSavedItemsFileAtTheDefaultBatchSize(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	_, err := PrepareExternalItemFiles(Params{
+		WorkloadType: WorkloadTypeDelete, RunID: 45, DeleteBatchSize: DefaultDeleteBatchSize,
+		ItemsFile: writeItemFile(t, "/b1/s0/k,2a0f,10,0/0\n/b2/s0/k,2a10,10,0/0\n"),
+	})
+	want := "--items-file is a multi-bucket manifest; use --delete-batch-size=1"
+	if err == nil || err.Error() != want {
+		t.Fatalf("PrepareExternalItemFiles() error = %v, want %q", err, want)
+	}
+	if entries, _ := os.ReadDir(tempDir); len(entries) != 0 {
+		t.Fatalf("refused run left staging behind: %v", entries)
+	}
+}
+
+func TestPrepareExternalItemFilesRefusesAnUnsafeSavedItemsFileForDelete(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	_, err := PrepareExternalItemFiles(Params{
+		WorkloadType: WorkloadTypeDelete, RunID: 46, DeleteBatchSize: 1,
+		ItemsFile: writeItemFile(t, "/b/s0/k,2a0f,10,0/0\n/b/s0/k~v1,2a10,10,0/0\n"),
+	})
+	if err == nil || !strings.HasPrefix(err.Error(), "--items-file: items file is neither a canonical manifest") ||
+		!strings.Contains(err.Error(), "line 2 has a \"~\"") {
+		t.Fatalf("PrepareExternalItemFiles() error = %v, want the line 2 refusal", err)
+	}
+	if entries, _ := os.ReadDir(tempDir); len(entries) != 0 {
+		t.Fatalf("refused run left staging behind: %v", entries)
+	}
+}

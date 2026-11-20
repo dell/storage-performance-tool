@@ -12,9 +12,17 @@ import (
 // The rules are the ones the engine's DataItemImpl reads: a signed 64-bit offset, a signed 32-bit
 // layer, and a mask of hex digits in either case that may be empty.
 func IsSavedItemFields(offset, layerMask string) bool {
-	if _, err := strconv.ParseInt(offset, 16, 64); err != nil {
-		return false
-	}
+	return isSavedItemOffset(offset) && isSavedItemLayerMask(layerMask)
+}
+
+// isSavedItemOffset reports whether offset is a saved row's offset: a signed 64-bit hex integer.
+func isSavedItemOffset(offset string) bool {
+	_, err := strconv.ParseInt(offset, 16, 64)
+	return err == nil
+}
+
+// isSavedItemLayerMask reports whether layerMask is a saved row's <hex layer>/<hex mask>.
+func isSavedItemLayerMask(layerMask string) bool {
 	layer, mask, found := strings.Cut(layerMask, "/")
 	if !found {
 		return false

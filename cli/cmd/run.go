@@ -2289,7 +2289,9 @@ Available workload types:
   tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.
 
 DELETE is destructive. With no source flag it safely seeds a run-owned namespace, then deletes
-that frozen inventory. --items-file selects an explicit canonical manifest. Existing data is
+that frozen inventory. --items-file selects an explicit canonical manifest, or the items.csv an
+S3 write --save-items saved, for current-key deletes (--validate-inventory checks that its rows
+name real objects; --verify does not catch wrong keys). Existing data is
 eligible only with --delete-existing plus an exact --bucket and explicitly supplied --prefix;
 whole-bucket selection additionally requires --allow-empty-prefix. DELETE defaults to %d
 seeded %s objects, batches %d targets per logical request, and does not verify removal unless
@@ -2362,6 +2364,9 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		verificationRun := scenario.IsIntegrityWorkload(params)
 		if params.WorkloadType == WorkloadTypeDelete && params.SelectionOrder == scenario.SelectionOrderCanonical {
 			fmt.Println("DELETE selection order: canonical. Cross-tool comparisons may be affected by input ordering.")
+		}
+		if params.WorkloadType == WorkloadTypeDelete && params.DeleteSavedItems != nil {
+			fmt.Println(savedItemsSourceLine(params.DeleteSavedItems))
 		}
 		for _, notice := range integrityCostNotices(params) {
 			fmt.Println(notice)
@@ -2873,7 +2878,7 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Stop the run N seconds after the CLI has connected to the hosts, covering engine start-up, launch and the run; exits 0 if the run was healthy up to the deadline and the stop is confirmed, while a DELETE or verification workload stopped there exits 1 because it did not complete (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read, a canonical manifest for read-verify, or for explicit-manifest DELETE a canonical manifest or an S3 write's saved items.csv (current-key deletes); mutually exclusive with --delete-existing")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
 	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification or guarded-prefix DELETE identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
@@ -3733,6 +3738,8 @@ func formatScenarioParams(params scenario.Params) string {
 			)
 		} else if strings.TrimSpace(params.ItemsFile) == "" {
 			lines = append(lines, "DELETE Source: seeded owned inventory")
+		} else if params.DeleteSavedItems != nil {
+			lines = append(lines, savedItemsSourceLine(params.DeleteSavedItems))
 		} else {
 			lines = append(lines, "DELETE Source: explicit canonical manifest")
 		}
@@ -3757,6 +3764,25 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// savedItemsSourceLine describes a DELETE --items-file read as a saved S3 items file: its format,
+// the rows converted and its distinct buckets.
+func savedItemsSourceLine(source *scenario.SavedItemsSource) string {
+	buckets := strings.Join(source.Buckets, ", ")
+	switch {
+	case source.MoreBuckets:
+		buckets += fmt.Sprintf(", ... (more than %d buckets)", source.BucketCount)
+	case source.BucketCount > len(source.Buckets):
+		buckets += fmt.Sprintf(", ... (%d buckets)", source.BucketCount)
+	}
+	rows := "rows"
+	if source.Rows == 1 {
+		rows = "row"
+	}
+	return fmt.Sprintf(
+		"DELETE Source: saved S3 items file (write --save-items), %d %s converted to current-key deletes; buckets: %s",
+		source.Rows, rows, buckets)
 }
 
 func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {

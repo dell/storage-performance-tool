@@ -31,12 +31,23 @@ type StagedInputManifest struct {
 	CompletionPath  string
 	Completion      Completion
 	MultipleBuckets bool
+	// Format is the format the source was read in. For a saved items file, ConvertedRows is the
+	// number of rows converted, Buckets the first few distinct buckets in file order, BucketCount
+	// the number of distinct buckets and MoreBuckets true when there were more than it counts.
+	Format        ItemsFileFormat
+	ConvertedRows int
+	Buckets       []string
+	BucketCount   int
+	MoreBuckets   bool
 }
 
 type inputManifestStagePolicy struct {
 	maxSelectedRecords int
 	expectedBucket     string
 	requireNonEmpty    bool
+	// acceptSavedItems reads a source without the canonical header as a saved engine items file
+	// (DELETE only).
+	acceptSavedItems bool
 }
 
 // ManifestRecord is one canonical object identity and expected size.
@@ -91,6 +102,7 @@ func StageDeleteInputManifest(
 			maxSelectedRecords: maxSelectedRecords,
 			expectedBucket:     expectedBucket,
 			requireNonEmpty:    true,
+			acceptSavedItems:   true,
 		},
 		&staged,
 		durableOSOperations,
@@ -151,7 +163,13 @@ func stageInputManifestWithPolicyAndOperations(
 		engineCheck.regularFile = info.Mode().IsRegular()
 	}
 	header, err := reader.Read()
-	if err != nil || !equalFields(header, canonicalHeader) {
+	savedItems := false
+	if err == nil && !equalFields(header, canonicalHeader) && policy.acceptSavedItems {
+		if savedErr := savedRowUnderBareCRHeader(reader.Raw()); savedErr != nil {
+			return "", "", "", savedErr
+		}
+		savedItems = true
+	} else if err != nil || !equalFields(header, canonicalHeader) {
 		if savedErr := engineCheck.refusal(reader, 1); savedErr != nil {
 			return "", "", "", savedErr
 		}
@@ -171,7 +189,36 @@ func stageInputManifestWithPolicyAndOperations(
 	sourceCount := 0
 	firstBucket := ""
 	multipleBuckets := false
-	for writeErr == nil {
+	var buckets savedItemsBuckets
+	if savedItems && writeErr == nil {
+		// Read the file again from its start: the first record's bytes, then the rest of the same
+		// open input, so a named pipe is read once.
+		firstRecord := bytes.Clone(reader.Raw())
+		sourceCount, writeErr = readSavedItems(
+			io.MultiReader(bytes.NewReader(firstRecord), reader.Rest()),
+			func(record ManifestRecord, line int) error {
+				if policy.expectedBucket != "" && record.bucket != policy.expectedBucket {
+					return fmt.Errorf("items file line %d bucket %q does not match --bucket %q",
+						line, record.bucket, policy.expectedBucket)
+				}
+				if firstBucket == "" {
+					firstBucket = record.bucket
+				} else if record.bucket != firstBucket {
+					multipleBuckets = true
+				}
+				buckets.add(record.bucket)
+				if err := writer.Write(record.fields()); err != nil {
+					return fmt.Errorf("stage canonical input: %w", err)
+				}
+				return nil
+			})
+		if writeErr != nil {
+			// Returned directly: the message is for the user, without the staging prefix below.
+			_ = raw.Close()
+			return "", "", "", writeErr
+		}
+	}
+	for writeErr == nil && !savedItems {
 		fields, readErr := reader.Read()
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -288,6 +335,14 @@ func stageInputManifestWithPolicyAndOperations(
 	if staged != nil {
 		staged.Completion = marker
 		staged.MultipleBuckets = multipleBuckets
+		staged.Format = ItemsFileFormatCanonical
+		if savedItems {
+			staged.Format = ItemsFileFormatSavedItems
+			staged.ConvertedRows = sourceCount
+			staged.Buckets = buckets.names
+			staged.BucketCount = len(buckets.seen)
+			staged.MoreBuckets = buckets.more
+		}
 	}
 	success = true
 	return stagingDir, manifestPath, completionPath, nil
