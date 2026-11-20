@@ -60,8 +60,8 @@ func TestNoRemovalWhenARunStartsAfterTheDockerStop(t *testing.T) {
 		stopErr error
 		want    string
 	}{
-		{"failed stop, f, idle engine shown", "f", 0, errors.New("daemon error 500"), "run 42 is active on the engine, and no run was shown"},
-		{"restart after the stop, f, idle engine shown", "f", 0, nil, "run 42 is active on the engine, and no run was shown"},
+		{"failed stop, f, idle engine shown", "f", 0, errors.New("daemon error 500"), "run 42 is active on the engine, and detection showed no active run on it, or could not read it"},
+		{"restart after the stop, f, idle engine shown", "f", 0, nil, "run 42 is active on the engine, and detection showed no active run on it, or could not read it"},
 		{"restart after the stop, f, run 41 shown", "f", 41, nil, "run 42 is active on the engine, not run 41"},
 		{"restart after the stop, --force", "--force", 41, nil, "run 42 is active on the engine, not run 41"},
 		{"failed stop, --force", "--force", 41, errors.New("daemon error 500"), "run 42 is active on the engine, not run 41"},
@@ -130,7 +130,7 @@ func TestAnEndedRunIsNotTheRunShown(t *testing.T) {
 	for _, tt := range []struct{ route, want string }{
 		{"--force", "run 41 is active, and detection showed no active run on the engine, or could not read it"},
 		{"g", "run 41 is active, and detection showed no active run on the engine, or could not read it"},
-		{"f", "run 41 is active on the engine, and no run was shown"},
+		{"f", "run 41 is active on the engine, and detection showed no active run on it, or could not read it"},
 	} {
 		t.Run(tt.route, func(t *testing.T) {
 			engine, api, resolver := shownEngine(t)
@@ -337,7 +337,7 @@ func TestAReadIsNotRedirected(t *testing.T) {
 			defer resolver.Close()
 
 			result, _ := resolve(t, context.Background(), resolver)
-			assertRefused(t, result, "answers HTTP, but not as an SPT engine (run status 307)")
+			assertRefused(t, result, "answered the read of its active run (HEAD /run) with a redirect (status 307)")
 			if got := other.received(); len(got) != 0 {
 				t.Errorf("the address redirected to received %+v, want nothing", got)
 			}
@@ -380,6 +380,10 @@ func TestAPortFreedAfterTheStopIsSuccess(t *testing.T) {
 				}
 				if !result.Success || !strings.Contains(printed, "SPT engine stopped - port "+engine.port()+" is now available") {
 					t.Fatalf("result = %+v, printed %q; want the stop's success", result, printed)
+				}
+				// Should fix 4, Fable Low 4: no doubt about the stop before its success.
+				if strings.Contains(printed, "cannot confirm") {
+					t.Errorf("printed %q, want no doubt about a stop that freed the port", printed)
 				}
 			})
 		}

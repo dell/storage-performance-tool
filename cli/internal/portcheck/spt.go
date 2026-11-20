@@ -52,6 +52,7 @@ func NewSptAPIClient(baseURL string, timeout time.Duration) *SptAPIClient {
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		HTTPClient: &http.Client{
 			Timeout:       timeout,
+			Transport:     redirectsAsAnswers(nil),
 			CheckRedirect: noRedirects,
 		},
 		Clock: &RealClock{},
@@ -63,6 +64,37 @@ func NewSptAPIClient(baseURL string, timeout time.Duration) *SptAPIClient {
 // the address checked, so the redirect is the answer.
 func noRedirects(*http.Request, []*http.Request) error {
 	return http.ErrUseLastResponse
+}
+
+// redirectAnswers is the transport of every HTTP client of the port checker,
+// with noRedirects. net/http parses a 3xx answer's Location before it asks
+// CheckRedirect, and a Location it cannot parse becomes an error with no
+// answer. So this drops the Location of every 3xx answer the transport
+// receives: the client then returns the answer itself, and its caller reads
+// the 3xx status, whatever the Location said.
+type redirectAnswers struct{ base http.RoundTripper }
+
+// redirectsAsAnswers wraps base, or http.DefaultTransport when it is nil.
+func redirectsAsAnswers(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &redirectAnswers{base: base}
+}
+
+func (t *redirectAnswers) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err == nil && isRedirect(resp.StatusCode) {
+		resp.Header.Del("Location")
+	}
+	return resp, err
+}
+
+// CloseIdleConnections closes the idle connections of the transport wrapped.
+func (t *redirectAnswers) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // NewSptAPIClientWithClock creates a client with a custom clock (useful for tests)
@@ -204,6 +236,9 @@ func (c *SptAPIClient) activeRunID(ctx context.Context) (runID int64, active boo
 		return 0, false, &unreadableAnswerError{err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if isRedirect(resp.StatusCode) {
+		return 0, false, redirectRefusal("the read of its active run (HEAD /run)", resp.StatusCode)
+	}
 	switch resp.StatusCode {
 	case http.StatusOK:
 		etag := strings.TrimSpace(resp.Header.Get("ETag"))
@@ -275,6 +310,9 @@ func (c *SptAPIClient) getStatusDetail(ctx context.Context) (terminalStatus, err
 		return terminalStatus{}, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if isRedirect(resp.StatusCode) {
+		return terminalStatus{}, redirectRefusal("the read of its status (GET /status)", resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return terminalStatus{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
@@ -302,7 +340,7 @@ func (c *SptAPIClient) Shutdown(ctx context.Context) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if isRedirect(resp.StatusCode) {
-		return redirectRefusal("the shutdown request", resp)
+		return redirectRefusal("the shutdown request", resp.StatusCode)
 	}
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusAccepted, http.StatusNoContent:
@@ -489,7 +527,11 @@ type RunExecution struct {
 // RunIdentityError is a refusal because the active run cannot be shown to be the
 // run expected: the one shown, or the one just stopped. The run is left alone,
 // and so is anything that would end it, such as its container.
-type RunIdentityError struct{ reason string }
+type RunIdentityError struct {
+	reason string
+	// redirect marks a refusal because a request was answered with a redirect.
+	redirect bool
+}
 
 func (e *RunIdentityError) Error() string { return e.reason }
 
@@ -531,6 +573,16 @@ func (c *SptAPIClient) execution(ctx context.Context, runID int64) RunExecution 
 	return executionFromStatus(runID, status)
 }
 
+// redirected returns the refusal when /status was answered with a redirect,
+// which is an answer that is not the engine's, not a status that could not be
+// read, or nil.
+func (e RunExecution) redirected() error {
+	if isRedirectRefusal(e.statusErr) {
+		return e.statusErr
+	}
+	return nil
+}
+
 // noAnswerError is a request that got no answer: the connection was refused,
 // or it broke, ended or timed out before it delivered a byte.
 type noAnswerError struct{ err error }
@@ -540,10 +592,10 @@ func (e *noAnswerError) Error() string { return e.err.Error() }
 func (e *noAnswerError) Unwrap() error { return e.err }
 
 // unreadableAnswerError is an answer to HEAD /run that names no active run and
-// does not say that none is: an HTTP status other than 200 and 204, including a
-// redirect, an ETag that is not a run ID, or bytes that do not make an HTTP
-// answer, such as a status line and then a closed connection. http marks an
-// HTTP answer.
+// does not say that none is: an HTTP status other than 200, 204 and a redirect
+// (see redirectRefusal), an ETag that is not a run ID, or bytes that do not
+// make an HTTP answer, such as a status line and then a closed connection. http
+// marks an HTTP answer.
 type unreadableAnswerError struct {
 	err  error
 	http bool
@@ -632,6 +684,9 @@ func (c *SptAPIClient) StopActiveRun(ctx context.Context, shown RunExecution) (R
 		return RunExecution{}, err
 	}
 	now := c.execution(ctx, runID)
+	if err := now.redirected(); err != nil {
+		return RunExecution{}, err
+	}
 	if !now.Known && shown.Since == "" {
 		now.Worker = shown.Worker
 		return c.stopReportedRun(ctx, now)
@@ -676,6 +731,9 @@ func (c *SptAPIClient) StopShownRun(ctx context.Context, shown RunExecution) (Ru
 		return RunExecution{}, err
 	}
 	now := c.execution(ctx, runID)
+	if err := now.redirected(); err != nil {
+		return RunExecution{}, err
+	}
 	if reason := unconfirmedReason(shown, now, false); reason != "" {
 		return RunExecution{}, identityRefusal("run %d cannot be shown to be the run shown: %s; it was not stopped. "+
 			"Retry, or stop the run yourself", runID, reason)
@@ -694,6 +752,9 @@ func (c *SptAPIClient) StopShownRun(ctx context.Context, shown RunExecution) (Ru
 // seen, nor is a later run that reuses the ID on an engine without start times.
 func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stopped RunExecution) (ended bool, err error) {
 	runID, active, err := c.activeRunID(ctx)
+	if isRedirectRefusal(err) {
+		return false, err
+	}
 	if err != nil {
 		return false, identityRefusal("the engine's active run could not be read again (%v), so another run may be active", err)
 	}
@@ -708,6 +769,9 @@ func (c *SptAPIClient) ConfirmNoOtherRun(ctx context.Context, stopped RunExecuti
 			"no start time was shown for it, so it cannot be shown to be the run stopped", runID)
 	}
 	now := c.execution(ctx, runID)
+	if err := now.redirected(); err != nil {
+		return false, err
+	}
 	if reason := unconfirmedReason(stopped, now, true); reason != "" {
 		return false, identityRefusal("run %d is still active and cannot be shown to be the run stopped: %s", runID, reason)
 	}
@@ -731,9 +795,9 @@ const (
 // run detection showed active (a zero ID for none). No answer at all (not a
 // byte), an idle engine (204) and the identified run are returned as such. The
 // identified run has its ID and, where detection had one, its start time, which
-// must be read again. Another run or a later run with the ID is a
-// RunIdentityError; any other answer, an HTTP status other than 200 and 204, a
-// redirect among them, or bytes that do not make an HTTP answer, is an
+// must be read again. Another run, a later run with the ID, and a redirect of
+// either read are a RunIdentityError; any other answer, an HTTP status other
+// than 200 and 204, or bytes that do not make an HTTP answer, is an
 // *unreadableAnswerError. A run that starts after this check is not seen.
 func (c *SptAPIClient) CheckBeforeRemoval(ctx context.Context, identified RunExecution) (RemovalCheck, error) {
 	runID, active, err := c.activeRunID(ctx)
@@ -741,6 +805,8 @@ func (c *SptAPIClient) CheckBeforeRemoval(ctx context.Context, identified RunExe
 	switch {
 	case errors.As(err, &none):
 		return RemovalNoAnswer, nil
+	case isRedirectRefusal(err):
+		return 0, err
 	case err != nil:
 		var unreadable *unreadableAnswerError
 		if errors.As(err, &unreadable) {
@@ -750,11 +816,15 @@ func (c *SptAPIClient) CheckBeforeRemoval(ctx context.Context, identified RunExe
 	case !active:
 		return RemovalIdle, nil
 	case identified.ID == 0:
-		return 0, identityRefusal("run %d is active on the engine, and no run was shown", runID)
+		return 0, identityRefusal("run %d is active on the engine, and detection showed no active run on it, or "+
+			"could not read it", runID)
 	case runID != identified.ID:
 		return 0, identityRefusal("run %d is active on the engine, not run %d, which was shown", runID, identified.ID)
 	}
 	now := c.execution(ctx, runID)
+	if err := now.redirected(); err != nil {
+		return 0, err
+	}
 	if !now.Known && identified.Since == "" {
 		return RemovalIdentified, nil
 	}
@@ -777,6 +847,9 @@ func (c *SptAPIClient) stopReportedRun(ctx context.Context, execution RunExecuti
 	}
 	// The engine found no matching run: it ended, or another one took over.
 	currentID, active, err := c.activeRunID(ctx)
+	if isRedirectRefusal(err) {
+		return RunExecution{}, err
+	}
 	if err != nil {
 		return RunExecution{}, identityRefusal("the engine found no run %d to stop, and its active run could not be read again (%v)", runID, err)
 	}
@@ -813,7 +886,7 @@ func (c *SptAPIClient) StopRun(ctx context.Context, runID int64) (stopped bool, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if isRedirect(resp.StatusCode) {
-		return false, redirectRefusal("the stop of run "+strconv.FormatInt(runID, 10), resp)
+		return false, redirectRefusal("the stop of run "+strconv.FormatInt(runID, 10), resp.StatusCode)
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -833,18 +906,21 @@ func (c *SptAPIClient) StopRun(ctx context.Context, runID int64) (stopped bool, 
 
 func isRedirect(code int) bool { return code >= 300 && code < 400 }
 
-// redirectRefusal is the RunIdentityError for a write that was answered with a
-// redirect, which an SPT engine does not send: the service on the port may not
-// be the engine shown, so the redirect is not followed and nothing more is sent
-// to it or removed.
-func redirectRefusal(request string, resp *http.Response) error {
-	target := ""
-	if location := resp.Header.Get("Location"); location != "" {
-		target = " to " + strconv.Quote(location)
-	}
-	return identityRefusal("the service on the port answered %s with a redirect (status %d%s), which an SPT "+
-		"engine does not send, so it may not be the engine shown; the redirect was not followed",
-		request, resp.StatusCode, target)
+// redirectRefusal is the RunIdentityError for a request, a write or a read that
+// guards one, that was answered with a redirect, which an SPT engine does not
+// send: the answer is not the engine's, so the redirect is not followed and
+// nothing more is sent or removed. It names the status only: a Location can
+// carry credentials.
+func redirectRefusal(request string, status int) error {
+	return &RunIdentityError{redirect: true, reason: fmt.Sprintf("the service on the port answered %s with a "+
+		"redirect (status %d), which an SPT engine does not send, so the answer is not taken as an SPT "+
+		"engine's; the redirect was not followed", request, status)}
+}
+
+// isRedirectRefusal reports whether err is, or wraps, a redirectRefusal.
+func isRedirectRefusal(err error) bool {
+	var identity *RunIdentityError
+	return errors.As(err, &identity) && identity.redirect
 }
 
 // IsSptAPI checks if the given URL appears to be a Spt API

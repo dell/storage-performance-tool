@@ -68,6 +68,7 @@ func NewPortChecker(port string) *PortChecker {
 		RetryAttempts:  DefaultRetryAttempts,
 		httpClient: &http.Client{
 			Timeout:       DefaultHTTPTimeout,
+			Transport:     redirectsAsAnswers(nil),
 			CheckRedirect: noRedirects,
 		},
 		clock: &RealClock{},
@@ -84,6 +85,7 @@ func NewPortCheckerWithOptions(port, host string, connectTimeout, httpTimeout ti
 		RetryAttempts:  retryAttempts,
 		httpClient: &http.Client{
 			Timeout:       httpTimeout,
+			Transport:     redirectsAsAnswers(nil),
 			CheckRedirect: noRedirects,
 		},
 		clock: &RealClock{},

@@ -243,7 +243,7 @@ func TestForceChecksAnAPIThatAnswersLate(t *testing.T) {
 			assertChanges(t, engine)
 			stopped, removed := api.mutations()
 			if recovers {
-				assertRefused(t, result, "run 42 is active on the engine, and no run was shown")
+				assertRefused(t, result, "run 42 is active on the engine, and detection showed no active run on it, or could not read it")
 				if len(stopped) != 0 || len(removed) != 0 {
 					t.Errorf("stopped %v, removed %v; want none", stopped, removed)
 				}

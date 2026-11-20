@@ -537,19 +537,21 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	}
 
 	if refusal := r.shownContainerRefusal(ctx, info, "shut it down"); refusal != nil {
-		fmt.Println(stopMessage(stopped, false))
 		// The engine may have closed after the stop, as its own CLI closes it at
-		// the run's end. A port that can be bound now is free, and no container
-		// is in doubt; one still held keeps the refusal.
+		// the run's end. A port that can be bound now is free, so the run ended
+		// with it, and no container is in doubt; one still held keeps the refusal.
 		if errors.Is(refusal.Error, errNoPublisher) {
 			held := r.checker.IsPortHeld(ctx)
 			if ctx.Err() != nil {
+				fmt.Println(stopMessage(stopped, false))
 				return r.interrupted(ctx, StrategyGracefulStop, "checking port "+r.Port+" after the stop")
 			}
 			if !held {
+				fmt.Println(stopMessage(stopped, true))
 				return r.waitForPortRelease(ctx, deadline)
 			}
 		}
+		fmt.Println(stopMessage(stopped, false))
 		return refusal
 	}
 	// Shutdown ends whatever runs on the engine, so another run must not be active.
@@ -557,9 +559,10 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 	if ctx.Err() != nil {
 		return r.interrupted(ctx, StrategyGracefulStop, "checking the SPT engine's run before its shutdown")
 	}
-	fmt.Println(stopMessage(stopped, ended))
 	if err != nil {
 		held := r.checker.IsPortHeld(ctx)
+		// A port freed after the stop ended the run with the engine.
+		fmt.Println(stopMessage(stopped, ended || (!held && ctx.Err() == nil)))
 		if ctx.Err() != nil {
 			return r.interrupted(ctx, StrategyGracefulStop, "checking port "+r.Port+" before the shutdown")
 		}
@@ -568,6 +571,7 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 		}
 		return r.waitForPortRelease(ctx, deadline)
 	}
+	fmt.Println(stopMessage(stopped, ended))
 
 	fmt.Printf("Shutting down the SPT engine (waiting up to %s for port %s)...\n",
 		constants.PortConflictGracefulStopTimeout, r.Port)
@@ -595,11 +599,11 @@ func (r *ConflictResolver) executeGracefulStop(ctx context.Context, info *Servic
 // back counts as unanswered.
 func (r *ConflictResolver) apiClient(info *ServiceInfo) *SptAPIClient {
 	client := NewSptAPIClientWithClock(r.checker.apiBaseURL(info.Address), DefaultHTTPTimeout, r.clock)
-	client.HTTPClient.Transport = &http.Transport{
+	client.HTTPClient.Transport = redirectsAsAnswers(&http.Transport{
 		Proxy:             nil,
 		DisableKeepAlives: true,
 		DialContext:       countingDial((&net.Dialer{Timeout: r.checker.ConnectTimeout}).DialContext),
-	}
+	})
 	return client
 }
 
@@ -1003,12 +1007,24 @@ func (r *ConflictResolver) checkRemoval(ctx context.Context, info *ServiceInfo, 
 // removalRefusalReason says why the check before a removal refused, and what
 // to do. An answer that names no run is the SPT engine's only when detection
 // confirmed one and the answer is HTTP; otherwise the service may not be an
-// engine at all.
+// engine at all. A redirect, and a run reported by a service that detection did
+// not confirm as an engine, get the advice for a service that may not be one.
 func (r *ConflictResolver) removalRefusalReason(info *ServiceInfo, target *ContainerInfo, err error, left string) string {
 	var unreadable *unreadableAnswerError
+	notAnEngine := func(why string) string {
+		return fmt.Sprintf("%s, so the CLI can't tell whether it is safe to remove. %s; if it should go, remove it "+
+			"by name (docker rm -f %s), or use --api-port with --rmi-registry-port to run alongside it",
+			why, left, target.Name)
+	}
 	switch {
+	case isRedirectRefusal(err):
+		return notAnEngine(err.Error())
+	case !errors.As(err, &unreadable) && !info.APIConfirmed:
+		return notAnEngine(fmt.Sprintf("the service on port %s did not answer detection as an SPT engine, and "+
+			"now reports a run (%v)", r.Port, err))
 	case !errors.As(err, &unreadable):
-		return fmt.Sprintf("%s. %s; stop the run yourself, then run the command again", err.Error(), left)
+		return fmt.Sprintf("%s. %s; stop the run yourself, or remove the container by name (docker rm -f %s), "+
+			"then run the command again", err.Error(), left, target.Name)
 	case info.APIConfirmed && unreadable.http:
 		return fmt.Sprintf("the SPT engine on port %s answered, but its active run could not be read (%v), so a "+
 			"run may be active. %s; stop the run yourself, or remove the container by name (docker rm -f %s), "+
