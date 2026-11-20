@@ -30,16 +30,27 @@ final class S3AwsDriverHarness {
 
 	private S3AwsDriverHarness() {}
 
-	@SuppressWarnings("unchecked")
 	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(
 					final Path home, final ScriptedS3Server server, final Map<String, Object> overrides) throws Exception {
-		final Config storage = S3AwsMergedConfig.create(home, server.port(), overrides).configVal("storage");
-		return (S3AwsStorageDriver<I, O>) new S3AwsStorageDriverFactory<I, O>().create(
-						"s3-aws-harness",
-						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
-						storage,
-						false,
-						16);
+		return driver(home, server.port(), overrides, CrtShutdownRef.CRT_COUNTER, false);
+	}
+
+	/** A driver for an endpoint on a loopback port whose CRT shutdown references count on {@code crtShutdownRefs}. */
+	@SuppressWarnings("unchecked")
+	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(
+					final Path home,
+					final int port,
+					final Map<String, Object> overrides,
+					final CrtShutdownRef.Counter crtShutdownRefs,
+					final boolean verifyFlag) throws Exception {
+		final Config storage = S3AwsMergedConfig.create(home, port, overrides).configVal("storage");
+		return (S3AwsStorageDriver<I, O>) new S3AwsStorageDriverFactory<I, O>(
+						S3AwsStandaloneDeleteResources::create, crtShutdownRefs).create(
+										"s3-aws-harness",
+										DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+										storage,
+										verifyFlag,
+										16);
 	}
 
 	/** A PUT of an object large enough to be streamed, which the transfer client serves. */
