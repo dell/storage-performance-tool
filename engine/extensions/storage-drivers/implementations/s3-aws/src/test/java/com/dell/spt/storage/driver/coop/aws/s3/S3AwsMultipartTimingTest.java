@@ -196,6 +196,7 @@ final class S3AwsMultipartTimingTest {
 		final Set<String> openUploads = ConcurrentHashMap.newKeySet();
 		volatile IntPredicate failPart = n -> false;
 		volatile Predicate<String> failUpload = uploadId -> false;
+		volatile boolean failCompletion;
 		volatile int failureStatus = 400;
 
 		MultipartStub() {
@@ -233,6 +234,9 @@ final class S3AwsMultipartTimingTest {
 					openUploads.add(uploadId);
 					respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
 									+ "<UploadId>" + uploadId + "</UploadId></InitiateMultipartUploadResult>");
+				} else if ("POST".equals(method) && query.contains("uploadId=") && failCompletion) {
+					final var status = failureStatus;
+					respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
 				} else if ("POST".equals(method) && query.contains("uploadId=")) {
 					completions.incrementAndGet();
 					openUploads.remove(uploadId(query));
@@ -242,6 +246,8 @@ final class S3AwsMultipartTimingTest {
 					aborts.add(exchange.getRequestURI().toString());
 					openUploads.remove(uploadId(query));
 					exchange.sendResponseHeaders(204, -1);
+				} else if ("PUT".equals(method) && exchange.getRequestHeaders().containsKey("x-amz-copy-source")) {
+					respond(exchange, 200, "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>");
 				} else {
 					empty(exchange, 200);
 				}

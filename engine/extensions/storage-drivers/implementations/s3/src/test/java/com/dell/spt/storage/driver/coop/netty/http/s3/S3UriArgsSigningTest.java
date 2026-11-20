@@ -264,7 +264,7 @@ class S3UriArgsSigningTest {
 	 *
 	 * @return the canonical query string the target computed from the sent URI
 	 */
-	private static String verifySigV4(final HttpRequest req) throws Exception {
+	static String verifySigV4(final HttpRequest req) throws Exception {
 		final var auth = req.headers().get(HttpHeaderNames.AUTHORIZATION);
 		assertNotNull(auth, "no Authorization header");
 		final Matcher m = AUTH_V4.matcher(auth);

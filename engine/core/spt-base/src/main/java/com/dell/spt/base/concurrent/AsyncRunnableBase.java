@@ -27,6 +27,8 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	private volatile State state = State.INITIAL;
 	private final Lock stateLock = new ReentrantLock();
 	private final Condition stateChanged = stateLock.newCondition();
+	// The thread inside doStart(), which holds stateLock for as long as the start takes.
+	private volatile Thread starter;
 
 	// ---- State accessors ----
 
@@ -67,7 +69,12 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 		stateLock.lock();
 		try {
 			if (State.INITIAL == state || State.STOPPED == state) {
-				doStart();
+				starter = Thread.currentThread();
+				try {
+					doStart();
+				} finally {
+					starter = null;
+				}
 				state = State.STARTED;
 				stateChanged.signalAll();
 			} else {
@@ -154,6 +161,14 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 		}
 		if (closedHere) {
 			afterClosed();
+		}
+	}
+
+	/** Interrupts the thread running {@link #doStart()}, if another thread is. */
+	final void interruptStarter() {
+		final var thread = starter;
+		if (thread != null && thread != Thread.currentThread()) {
+			thread.interrupt();
 		}
 	}
 

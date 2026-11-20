@@ -51,7 +51,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Part;
 
-import com.github.akurilov.confuse.impl.BasicConfig;
 import org.apache.logging.log4j.Level;
 import org.eclipse.jetty.http.HttpHeader;
 
@@ -156,6 +155,7 @@ public class RunServlet extends HttpServlet {
 			final var run = (Run) new RunImpl(config.stringVal("run-comment"), scenario, scriptEngine, config.longVal("run-id"));
 			final var stepId = config.stringVal("load-step-id");
 			final var runId = config.longVal("run-id");
+			final boolean acceptedBefore = apiStatus.acceptedRun(runId);
 			// Update status before executing
 			apiStatus.setRunning(stepId, runId);
 			final var statusAwareRun = new StatusAwareRun(run, apiStatus);
@@ -167,6 +167,7 @@ public class RunServlet extends HttpServlet {
 			} catch (final RejectedExecutionException e) {
 				// Only this method starts a task and it found the slot free, so this should not happen
 				Loggers.ERR.warn("The scenario executor refused run {} on a node found idle", runId);
+				apiStatus.forgetRefusedRun(runId, acceptedBefore);
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			}
 		} finally {
@@ -475,8 +476,9 @@ public class RunServlet extends HttpServlet {
 		final Config configResult;
 		boolean runVersionOverrideAttempted = false;
 		if (defaultsPart == null) {
-			// NOTE: If custom config hasn't been specified in POST request, set the default one
-			configResult = new BasicConfig(aggregatedConfigWithArgs);
+			// NOTE: If custom config hasn't been specified in POST request, set the default one. The run
+			// gets its own maps and lists: what it sets must not stay on the node for later runs.
+			configResult = ConfigUtil.copyOf(aggregatedConfigWithArgs);
 		} else {
 			final var configIncoming = configFromPart(defaultsPart, resp, aggregatedConfigWithArgs.schema());
 			runVersionOverrideAttempted = containsRunVersion(configIncoming);

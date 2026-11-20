@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.tables;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.Item;
@@ -43,8 +44,13 @@ import javax.crypto.spec.SecretKeySpec;
 import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3Api;
 
+/**
+ * Has no composite (multipart) support: every operation runs through the configured opMode, never
+ * the inherited S3 multipart route, so a step refuses a ranges threshold here.
+ */
 public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
-				extends S3StorageDriver<I, O> {
+				extends S3StorageDriver<I, O>
+				implements CompositeOperationsUnsupported {
 
 	static final String OP_MODE_PROVISION = "provision";
 	static final String OP_MODE_TABLE_WRITE = "tableWrite";
@@ -418,12 +424,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, bodyBytes.length);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyDataPlaneAuthHeaders(headers, HttpMethod.PUT, s3Path);
+		final String requestPath = requestPath(s3Path);
+		applyDataPlaneAuthHeaders(headers, HttpMethod.PUT, requestPath);
 
 		final FullHttpRequest req = new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
 						HttpMethod.PUT,
-						s3Path,
+						requestPath,
 						Unpooled.wrappedBuffer(bodyBytes),
 						headers,
 						EmptyHttpHeaders.INSTANCE);
@@ -465,12 +472,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyDataPlaneAuthHeaders(headers, HttpMethod.GET, s3Path);
+		final String requestPath = requestPath(s3Path);
+		applyDataPlaneAuthHeaders(headers, HttpMethod.GET, requestPath);
 
 		final FullHttpRequest req = new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
 						HttpMethod.GET,
-						s3Path,
+						requestPath,
 						Unpooled.EMPTY_BUFFER,
 						headers,
 						EmptyHttpHeaders.INSTANCE);

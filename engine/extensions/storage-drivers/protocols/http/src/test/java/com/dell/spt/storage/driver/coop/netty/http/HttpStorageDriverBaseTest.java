@@ -367,6 +367,19 @@ class HttpStorageDriverBaseTest {
 						"the base default (Atmos, Swift) must keep signing the bare path");
 	}
 
+	/** The base keeps the request path as built, so Atmos and Swift send a key as they did. */
+	@Test
+	void defaultRequestPathIsThePathItself() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var path = "/bucket/a?b#c";
+		assertSame(path, drv.requestPath(path));
+		final var req = drv.httpRequest(
+						new DataOperationImpl<>(0, OpType.READ, new DataItemImpl("a?b#c", 0, 0), null, "/bucket", null, null, 0),
+						"127.0.0.1");
+		assertEquals(path, req.uri());
+		assertEquals(List.of(path), drv.signedUris());
+	}
+
 	@Test
 	void sendRequest_create_writesPayload_whenNoSrcPath() throws Exception {
 		final var cfg = baseConfig();

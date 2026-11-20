@@ -1,21 +1,24 @@
 package com.dell.spt.load.step.mixed;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
-import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -50,7 +53,6 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -371,30 +373,53 @@ class MixedLoadStepCountLimitTest {
 	}
 
 	/**
-	 * A cooperative driver that leaves an aborted upload's finalization a success, as the file system
-	 * driver does. Once the cooperative base ends such an upload without sending its unsent parts,
-	 * the step ends on its count; how the upload is counted is still to be decided, and this test
-	 * expects it counted once, as a failure.
+	 * A driver without composite support refuses, at step start, a ranges threshold that would make
+	 * composite operations: a mix with uploads, and a mix with GETs, fails before it sends anything.
 	 */
 	@Test
-	@Disabled("an aborted fs-style upload never ends on the coop base: .scratch/coop-aborted-upload-left-success/issues/01-an-aborted-upload-published-as-success-sends-its-unsent-parts.md")
-	void aStepWhoseUploadsAbortEndsOnItsCount() throws Exception {
-		final String stepId = newStepId("multipart-abort");
-		final Config config = multipartStepConfig(stepId, 2);
-		// One part in flight per upload: the first part runs out of retries, and the upload is
-		// aborted before its second part is sent, so the abort's result is unfinished.
-		config.val("storage-driver-limit-multipart-parts", 1);
-		nioDrivers.failParts.set(true);
+	void aThresholdOnADriverWithoutCompositeSupportFailsAtStart() throws Exception {
+		nioDrivers.noCompositeSupport.set(true);
+		for (final String mix : List.of("put", "get")) {
+			final String stepId = newStepId("no-composite-" + mix);
+			final Config config = multipartStepConfig(stepId, 50);
+			if (mix.equals("get")) {
+				config.val("load-op-weights-get", 10000);
+				config.val("load-op-weights-put", 0);
+			}
+
+			final var failure = assertThrows(RuntimeException.class, () -> run(config), mix);
+
+			final Throwable cause = rootCause(failure);
+			assertInstanceOf(IllegalConfigurationException.class, cause, mix);
+			assertTrue(cause.getMessage().contains("\"" + NioDriverFactory.TYPE + "\""), cause.getMessage());
+			assertTrue(cause.getMessage().contains("item.data.ranges.threshold=512"), cause.getMessage());
+			assertTrue(cause.getMessage().contains(mix.equals("get") ? "composite READ" : "composite CREATE"), cause.getMessage());
+		}
+		assertEquals(0, nioDrivers.invoked.sum(), "operations the refused steps sent");
+		assertTrue(nioDrivers.created.sum() > 0, "drivers created");
+		assertEquals(nioDrivers.created.sum(), nioDrivers.closed.sum(), "drivers closed of those created");
+	}
+
+	/** The same driver with the threshold at 0 runs its uploads as plain operations, as before. */
+	@Test
+	void aDriverWithoutCompositeSupportRunsWithTheThresholdAtZero() throws Exception {
+		nioDrivers.noCompositeSupport.set(true);
+		final String stepId = newStepId("no-composite-zero");
+		final Config config = multipartStepConfig(stepId, 50);
+		config.val("item-data-ranges-threshold", 0);
 
 		final long elapsedMillis = run(config);
 
-		// Each upload's first part: one attempt and three retries (the step's one STAT in 10,001 runs
-		// no part).
-		final long failedParts = nioDrivers.failedParts.sum();
-		assertTrue(failedParts > 0 && failedParts % 4 == 0, "failed part attempts: " + failedParts);
-		assertEquals(0, nioDrivers.laterParts.sum(), "second parts sent after their upload was aborted");
-		assertEquals(failedParts / 4, metrics.counted(stepId, OpType.CREATE), "aborted uploads the step counted");
+		assertEquals(50, counted(stepId), "uploads the step counted");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	private static Throwable rootCause(final Throwable failure) {
+		Throwable cause = failure;
+		while (cause.getCause() != null && cause.getCause() != cause) {
+			cause = cause.getCause();
+		}
+		return cause;
 	}
 
 	/**
@@ -627,19 +652,22 @@ class MixedLoadStepCountLimitTest {
 		final LongAdder paused = new LongAdder();
 		/** Whether the driver's lifecycle tracker held an operation when the pause ran. */
 		final AtomicReference<Boolean> outstandingAtPause = new AtomicReference<>();
-		final AtomicBoolean failParts = new AtomicBoolean();
+		/** Whether the driver says it has no composite support, as the file system driver does. */
+		final AtomicBoolean noCompositeSupport = new AtomicBoolean();
 		/** Whether the driver is wrapped in a decorator that does not declare its composite results. */
 		final AtomicBoolean undeclaredDecorator = new AtomicBoolean();
 		/** Whether the driver is wrapped in a decorator that forwards everything, to record its output. */
 		final AtomicBoolean recordResultOutput = new AtomicBoolean();
 		/** The result output the step installed through a decorator. */
 		final AtomicReference<Object> resultOutput = new AtomicReference<>();
-		final LongAdder failedParts = new LongAdder();
 		/** Whether the driver publishes every STAT as {@code INTERRUPTED}, which the step does not count. */
 		final AtomicBoolean interruptStats = new AtomicBoolean();
 		final LongAdder interruptedStats = new LongAdder();
-		/** Parts after the first that the driver sent. */
-		final LongAdder laterParts = new LongAdder();
+		/** Operations the driver ran. */
+		final LongAdder invoked = new LongAdder();
+		/** Drivers created, and closed. */
+		final LongAdder created = new LongAdder();
+		final LongAdder closed = new LongAdder();
 
 		@Override
 		public String id() {
@@ -663,7 +691,10 @@ class MixedLoadStepCountLimitTest {
 		public StorageDriver create(
 						final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 						final int batchSize) {
-			final ProbeDriver driver = new ProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			final ProbeDriver driver = noCompositeSupport.get()
+							? new NoCompositeProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize)
+							: new ProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			created.increment();
 			if (pauseFirstCompletion.get()) {
 				// handleCompleted counts the completion between publishing its result and enqueueing
 				// a multipart upload's parts, so the count's increment is where the pause goes.
@@ -713,7 +744,7 @@ class MixedLoadStepCountLimitTest {
 		/** The NIO mock, whose parts fail with {@code FAIL_IO}, and whose STATs are interrupted, when asked to. */
 		@SuppressWarnings({"rawtypes", "unchecked"
 		})
-		private final class ProbeDriver extends NioStorageDriverMock {
+		private class ProbeDriver extends NioStorageDriverMock {
 
 			ProbeDriver(
 							final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
@@ -722,19 +753,30 @@ class MixedLoadStepCountLimitTest {
 			}
 
 			@Override
+			protected void doClose() throws IOException {
+				closed.increment();
+				super.doClose();
+			}
+
+			@Override
 			protected void invokeNio(final Operation op) {
+				invoked.increment();
 				super.invokeNio(op);
-				if (op instanceof PartialOperation<?> part && part.partNumber() > 0) {
-					laterParts.increment();
-				}
-				if (failParts.get() && op instanceof PartialOperation) {
-					failedParts.increment();
-					op.status(Operation.Status.FAIL_IO);
-				}
 				if (interruptStats.get() && op.type() == OpType.STAT) {
 					interruptedStats.increment();
 					op.status(Operation.Status.INTERRUPTED);
 				}
+			}
+		}
+
+		/** The probe driver, declaring no composite support, as {@code fs} and {@code atmos} do. */
+		@SuppressWarnings("rawtypes")
+		private final class NoCompositeProbeDriver extends ProbeDriver implements CompositeOperationsUnsupported {
+
+			NoCompositeProbeDriver(
+							final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
+							final int batchSize) {
+				super(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 			}
 		}
 

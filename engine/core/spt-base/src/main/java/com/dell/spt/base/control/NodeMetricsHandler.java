@@ -13,8 +13,16 @@ public final class NodeMetricsHandler extends HttpServlet {
 
 	private final MetricsJsonResponder responder;
 
+	/** A handler for a node that serves no {@code /run}: every node row reads {@code worker}. */
 	public NodeMetricsHandler(final MetricsManager metricsManager, final Config config) {
 		this.responder = new MetricsJsonResponder(metricsManager, config);
+	}
+
+	/**
+	 * @param apiStatus the {@code /status} holder {@code POST /run} updates; it gives each node row its role
+	 */
+	public NodeMetricsHandler(final MetricsManager metricsManager, final Config config, final ApiStatus apiStatus) {
+		this.responder = new MetricsJsonResponder(metricsManager, config, apiStatus);
 	}
 
 	@Override

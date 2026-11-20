@@ -13,6 +13,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.io.ItemInfoFileOutput;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.TransferConvertBuffer;
+import com.dell.spt.base.load.step.local.ContextInitResources;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
@@ -144,13 +145,16 @@ public class PipelineLoadStepLocal
 
 				final int batchSize = loadConfig.intVal("batch-size");
 
-				try {
+				// Set while the context being built is not in stepContexts: a failure then also closes the earlier contexts.
+				boolean contextPending = true;
+				try (final var pending = new ContextInitResources()) {
 
 					NicSetConfig.requireSupportedWorkload(
 									storageConfig, opType, itemConfig.configVal("input").stringVal("path"));
 					final StorageDriver driver = StorageDriver.instance(
 									extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 									com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
+					pending.hold(driver);
 
 					final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 					final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
@@ -174,6 +178,7 @@ public class PipelineLoadStepLocal
 							generatorBuilder.itemInput(nextItemBuff);
 						}
 						final LoadGenerator generator = generatorBuilder.build();
+						pending.hold(generator);
 
 						final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 						final LoadStepContext stepCtx = new LoadStepContextImpl<>(
@@ -184,9 +189,12 @@ public class PipelineLoadStepLocal
 										loadConfig,
 										outputConfig.boolVal("metrics-trace-persist"),
 										shardMetrics);
+						pending.ownedBy(stepCtx, generator, driver);
 						((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
 										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
+						pending.handedOver();
+						contextPending = false;
 
 						final var itemOutputConfig = itemConfig.configVal("output");
 						if (originIndex < subStepCount - 1) {
@@ -225,9 +233,14 @@ public class PipelineLoadStepLocal
 						throw new IllegalStateException("Failed to initialize the load generator", e);
 					}
 				} catch (final IllegalConfigurationException e) {
-					throw new IllegalStateException("Failed to initialize the storage driver", e);
+					throw closeAfterInitFailure(
+									new IllegalStateException("Failed to initialize the storage driver", e), contextPending);
 				} catch (final InterruptedException e) {
-					throwUnchecked(e);
+					throwUnchecked(closeAfterInitFailure(e, contextPending));
+				} catch (final RuntimeException e) {
+					throw closeAfterInitFailure(e, contextPending);
+				} catch (final Error e) {
+					throw closeAfterInitFailure(e, contextPending);
 				}
 			} catch (final IOException e) {
 				throw new IllegalStateException("Failed to initialize the data input", e);

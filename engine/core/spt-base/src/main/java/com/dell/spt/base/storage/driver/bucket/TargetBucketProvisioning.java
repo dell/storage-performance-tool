@@ -4,6 +4,7 @@ import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
+import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.control.run.RunScope;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.Extension;
@@ -186,8 +187,10 @@ public final class TargetBucketProvisioning {
 
 	private static void provision(final String stepId, final DriverTargets driverTargets) {
 		final TargetBucketControl control;
-		try {
+		// The control client can be a storage driver, built outside StorageDriver.instance.
+		try (final var construction = DaemonBase.openConstructionScope()) {
 			control = driverTargets.factory.openTargetBucketControl(stepId, driverTargets.storageConfig);
+			construction.succeeded();
 		} catch (final InterruptedException e) {
 			Thread.currentThread().interrupt();
 			throwUnchecked(e);

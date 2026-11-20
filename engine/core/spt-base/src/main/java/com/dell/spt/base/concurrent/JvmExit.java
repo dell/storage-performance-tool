@@ -1,5 +1,7 @@
 package com.dell.spt.base.concurrent;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * Whether the JVM has begun to exit. The engine's shutdown hook sets this before it closes the
  * daemons, and it stays set until the JVM halts: the hook's log drain can take seconds, and no load
@@ -8,6 +10,7 @@ package com.dell.spt.base.concurrent;
  */
 public final class JvmExit {
 
+	private static final AtomicBoolean START_STOP_REPORTED = new AtomicBoolean();
 	private static volatile boolean begun;
 
 	private JvmExit() {}
@@ -21,8 +24,17 @@ public final class JvmExit {
 		return begun;
 	}
 
-	/** For tests: the flag is process-wide and a test JVM runs on after a test sets it. */
+	/**
+	 * Whether the caller, whose step start has just been stopped, is the one to report that the exit
+	 * stopped it. A step's start runs its local slice's inside it, and the exit stops both.
+	 */
+	public static boolean claimStartStopReport() {
+		return begun && START_STOP_REPORTED.compareAndSet(false, true);
+	}
+
+	/** For tests: the state is process-wide and a test JVM runs on after a test sets it. */
 	static void reset() {
 		begun = false;
+		START_STOP_REPORTED.set(false);
 	}
 }

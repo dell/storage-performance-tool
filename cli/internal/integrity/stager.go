@@ -2,6 +2,7 @@
 package integrity
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -144,12 +145,19 @@ func stageInputManifestWithPolicyAndOperations(
 		return "", "", "", fmt.Errorf("open input manifest: %w", err)
 	}
 	defer func() { _ = in.Close() }()
-	reader := newIdentityCSVReader(in)
-	header, err := reader.Read()
-	if err != nil {
-		return "", "", "", fmt.Errorf("read canonical header: %w", err)
+	reader := newStagingCSVReader(in)
+	var engineCheck stagingEngineCheck
+	if info, statErr := in.Stat(); statErr == nil {
+		engineCheck.regularFile = info.Mode().IsRegular()
 	}
-	if !equalFields(header, canonicalHeader) {
+	header, err := reader.Read()
+	if err != nil || !equalFields(header, canonicalHeader) {
+		if savedErr := engineCheck.refusal(reader, 1); savedErr != nil {
+			return "", "", "", savedErr
+		}
+		if err != nil {
+			return "", "", "", fmt.Errorf("read canonical header: %w", err)
+		}
 		return "", "", "", fmt.Errorf("items file must use exact header %q", canonicalHeader)
 	}
 
@@ -170,13 +178,30 @@ func stageInputManifestWithPolicyAndOperations(
 		}
 		if readErr != nil {
 			writeErr = fmt.Errorf("parse canonical record %d: %w", sourceCount+2, readErr)
+			if savedErr := engineCheck.refusal(reader, sourceCount+2); savedErr != nil {
+				_ = raw.Close()
+				return "", "", "", savedErr
+			}
 			break
 		}
 		sourceCount++
 		record, parseErr := parseManifestRecord(fields, sourceCount+1)
 		if parseErr != nil {
 			writeErr = parseErr
+			if savedErr := engineCheck.refusal(reader, sourceCount+1); savedErr != nil {
+				_ = raw.Close()
+				return "", "", "", savedErr
+			}
 			break
+		}
+		// Returned directly: the message is for the user, without the staging prefix below.
+		if IsSavedItemFields(record.key, record.version) {
+			_ = raw.Close()
+			return "", "", "", savedItemRowError(engineCheck.engineRecord(sourceCount + 1))
+		}
+		if savedErr := engineCheck.accepted(reader, sourceCount+1); savedErr != nil {
+			_ = raw.Close()
+			return "", "", "", savedErr
 		}
 		if policy.expectedBucket != "" && record.bucket != policy.expectedBucket {
 			writeErr = fmt.Errorf(
@@ -266,6 +291,89 @@ func stageInputManifestWithPolicyAndOperations(
 	}
 	success = true
 	return stagingDir, manifestPath, completionPath, nil
+}
+
+// stagingRescanTailBytes bounds what a refusal reads from a regular file past the bytes the
+// canonical reader read: enough for the rest of the record that holds the byte the canonical reader
+// refused and for the records after it. The bound counts from the byte after the canonical reader
+// stopped, which can be inside the refused record. A record whose line end is the bound's last byte
+// is judged; one whose end is not seen within the bound, such as a last record without a line end
+// that reaches it, is not.
+const stagingRescanTailBytes = maxCanonicalCSVRecordBytes
+
+// stagingEngineCheck judges the stager's input by the engine's CSV rules where they part from the
+// canonical reader's, without opening the source again: it reads the bytes of the record the
+// canonical reader just read (Raw) and, after a refusal, the input that follows them. The two
+// readers end records at the same LF or CRLF outside quotes; the engine also ends one at a bare
+// CR, which the canonical reader keeps in a field. extra counts the records the engine reads beyond
+// the canonical reader's so far, so that a refusal gives the engine's record number. regularFile
+// says the source is a regular file, whose reads end; on any other source a refusal reads only
+// what is already buffered, so it never waits for a writer.
+type stagingEngineCheck struct {
+	extra       int
+	regularFile bool
+}
+
+// engineRecord returns the engine's number for the canonical reader's record number.
+func (check *stagingEngineCheck) engineRecord(canonicalRecord int) int {
+	return canonicalRecord + check.extra
+}
+
+// accepted judges a record the canonical reader read and parsed, and will publish. Only a record
+// with a bare CR in an unquoted field reads differently for the engine, as more than one record;
+// when one of them is a saved engine items row, it returns the saved-row refusal. Every such
+// record is judged, whatever the engine made of earlier ones: the engine reads the stager's copy,
+// not the source.
+func (check *stagingEngineCheck) accepted(reader *canonicalCSVReader, canonicalRecord int) error {
+	if !reader.RecordHasBareCR() {
+		return nil
+	}
+	verdict := scanAsEngineReads(bytes.NewReader(reader.Raw()), engineScan{
+		firstRecord: check.engineRecord(canonicalRecord),
+		everyRecord: true,
+	})
+	if verdict.found {
+		return savedItemRowError(verdict.record)
+	}
+	check.extra += verdict.records - 1
+	return nil
+}
+
+// refusal explains a record the canonical reader refused, when the engine's CSV rules find a saved
+// engine items row from that record's start on: under the canonical header, the saved-row refusal
+// with the engine's record number; without the header, the header refusal with the saved-row
+// explanation. It returns nil when they find none, and the caller keeps its own error. On a
+// regular file it reads at most stagingRescanTailBytes more; on a pipe or other stream, only the
+// bytes already buffered, so a row not yet buffered keeps the caller's error.
+func (check *stagingEngineCheck) refusal(reader *canonicalCSVReader, canonicalRecord int) error {
+	read := reader.Raw()
+	if len(read) == 0 {
+		return nil
+	}
+	var rest io.Reader
+	var cut func() bool
+	if check.regularFile {
+		tail := &cappedReader{input: reader.Rest(), left: stagingRescanTailBytes}
+		rest, cut = tail, func() bool { return tail.capped }
+	} else {
+		// Unless the canonical reader met the end, whether the stream goes on is unknown without
+		// another read: treat it as cut. So a record is judged here only when its line end is
+		// already buffered: a last record without one is not, even after the writer closed.
+		rest, cut = bytes.NewReader(reader.Buffered()), func() bool { return !reader.done }
+	}
+	verdict := scanAsEngineReads(io.MultiReader(bytes.NewReader(read), rest), engineScan{
+		firstRecord: check.engineRecord(canonicalRecord),
+		fileStart:   canonicalRecord == 1,
+		cut:         cut,
+	})
+	switch {
+	case !verdict.found:
+		return nil
+	case verdict.underHeader:
+		return savedItemRowError(verdict.record)
+	default:
+		return fmt.Errorf("items file must use exact header %q: %w", canonicalHeader, savedItemRowError(verdict.record))
+	}
 }
 
 func selectCanonicalManifestPrefix(path, tempDir string, maxRecords int) (string, error) {

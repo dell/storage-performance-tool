@@ -303,6 +303,7 @@ Additionally, JSON-formatted endpoints are available for clients that prefer str
 
 - `GET /metrics/json` (always present) returns per-node metrics. Each array element includes:
   - Metadata: `metrics_schema` (currently `5`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, `cluster_id` for configured active runs, and `sample_ts` (RFC3339 timestamp). The public CLI supplies one nonempty cluster identity to every participant from the preallocated run ID.
+  - Role: a live or terminal row is `entry` when this node runs the row's run as its entry (the node accepted that run through `POST /run`), and `worker` for every row of a slice an entry started on it. A row keeps its role from its first appearance until it expires (the node remembers the 16 latest runs it accepted; a row outlived by 16 later runs reads `worker`), and a node that holds its own step and another entry's slice gives each row its own role. The idle sample is `entry` while a distributed context is live or a distributed terminal entry is retained on the node, otherwise `worker`.
   - Step data: `step_id`, `op_type`, `timestamp`, `elapsed_time_seconds`, `test_state`.
   - Metric groups: `operations{success_count,failed_count,success_rate_last,failed_rate_last}`, `bandwidth{bytes_total,bytes_rate_last}`, `timing`, `concurrency{current,mean}`.
   - Timing: schema 4 retains the schema 2/3 compatibility fields `timing.latency_mean_us` and `timing.duration_mean_us`, and the nested `timing.latency` and `timing.duration` objects with `count`, `mean_us`, `min_us`, `p50_us`, `p90_us`, `p99_us`, `p999_us`, `max_us`, and `overflow_count`.
@@ -579,7 +580,7 @@ Response:
 ```
 
 Notes:
-- `role` is `entry` on the entry node (when distributed contexts are present), otherwise `worker`.
+- `role` is `entry` on the entry node while a distributed context is present, otherwise `worker`. An idle node, including an entry between runs (and at the start of each step, before its distributed context registers), reports `worker`. `/metrics/json` labels its rows by a different rule ([§4.2.4](#424-metrics)).
 - `node_id` defaults to `<hostname[:port]>` if not configured.
 
 ### 4.2.8 Readiness
