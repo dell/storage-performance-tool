@@ -131,7 +131,7 @@ func TestAFinishedRunIsJudgedInWhateverStateTheTrackerLastSaw(t *testing.T) {
 
 func TestASavedSummaryOfAPhaseThatAllFailedReachesTheExitCode(t *testing.T) {
 	runDir := writeAllFailedRunDir(t)
-	runSummary, err := generateRunSummary(context.Background(), runDir, io.Discard)
+	runSummary, err := generateRunSummary(context.Background(), runDir, io.Discard, summary.RunEndCompleted)
 	if err != nil {
 		t.Fatalf("generate summary: %v", err)
 	}
