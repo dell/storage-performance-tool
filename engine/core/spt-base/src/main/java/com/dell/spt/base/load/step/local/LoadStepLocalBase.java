@@ -855,7 +855,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		boolean countLimitConfigured = false;
 		boolean countLimitApplied = false;
 		try {
-			final long countLimit = this.config.longVal("load-op-limit-count");
+			// A mixed step counts against every sub-load over the base; other step types keep the base's
+			// count here, which the CLI's completion detection reads.
+			final Config countConfig = mixesOperations() ? effectiveConfig(originIndex) : this.config;
+			final long countLimit = countConfig.longVal("load-op-limit-count");
 			countLimitConfigured = true;
 			metricsCtx.metadata().put(MetricsConstants.METADATA_LIMIT_OP_COUNT, countLimit);
 			countLimitApplied = true;

@@ -68,6 +68,12 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return true;
 	}
 
+	/** Every metrics row is an operation type of the one context, which runs on every sub-load over the base. */
+	@Override
+	protected Config effectiveConfig(final int originIndex) {
+		return MixedLoadStepLocal.mergedConfig(config, ctxConfigs);
+	}
+
 	/**
 	 * Append merges a mixed context's map as before 5.17.1. The slice takes the step id from the base
 	 * and reads no context's flag, so marking a context would change nothing the step resolves.
