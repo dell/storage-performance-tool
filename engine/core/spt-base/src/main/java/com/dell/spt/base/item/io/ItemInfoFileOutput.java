@@ -115,10 +115,7 @@ public final class ItemInfoFileOutput<O extends Operation> implements Output<O> 
 	 * reads back as another path, as a plain item's does. A rooted key under a relative CREATE path
 	 * that it holds, such as {@code /dst/k1} under {@code dst}, is written as the key: right for an HTTP
 	 * driver, which requests {@code /dst/k1}, while the filesystem driver creates {@code dst/dst/k1}.
-	 * The row is the one written before manifest rows held a path. With an output path ending in a
-	 * slash, {@code s3-aws} keeps an extra slash after it in the key ({@code /dir/k2} under {@code
-	 * /dst/}, {@code pre//dir/k2} under {@code /dst/pre/}), which the row does not hold, as for a
-	 * plain item.
+	 * The row is the one written before manifest rows held a path.
 	 */
 	private static String manifestItemPath(
 					final Operation<?> ioResult, final IntegrityManifestDataItem manifestItem) {

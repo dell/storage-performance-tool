@@ -288,7 +288,7 @@ func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
 		newResultsFetcherFunc = originalFetcher
 		generateRunSummaryFunc = originalSummary
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {

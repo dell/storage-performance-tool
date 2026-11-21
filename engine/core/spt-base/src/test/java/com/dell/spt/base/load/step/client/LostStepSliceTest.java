@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.client;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -14,6 +15,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mockStatic;
 
+import com.dell.spt.base.concurrent.JvmExit;
+import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.run.RunTerminalException;
@@ -64,12 +67,16 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
@@ -181,6 +188,8 @@ class LostStepSliceTest {
 	private final Map<String, Integer> stops = new ConcurrentHashMap<>();
 	/** The worker services by node address, so that a test can take a worker down. */
 	private final Map<String, List<AutoCloseable>> workerServices = new ConcurrentHashMap<>();
+	/** Optional per-node interceptor for {@code await} calls, used to pause polling deterministically. */
+	private final Map<String, AwaitHook> awaitHooks = new ConcurrentHashMap<>();
 	private final List<String> addrs = new ArrayList<>();
 	private String stepId;
 	private String originalRmiHostname;
@@ -1050,6 +1059,67 @@ class LostStepSliceTest {
 		config.val("load-step-limit-time", 0);
 	}
 
+	@Test
+	void exitHookCloseDuringAwaitDoesNotRecordALostSlice() throws Exception {
+		final String worker = addrs.get(0);
+		config.val("load-step-node-addrs", List.of(worker));
+		config.val("load-op-limit-count", 10_000L);
+		config.val("load-op-limit-rate", 10.0);
+		final CountDownLatch secondAwaitEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSecondAwait = new CountDownLatch(1);
+		final AtomicInteger awaitCount = new AtomicInteger();
+		final AtomicReference<Throwable> observedAwaitFailure = new AtomicReference<>();
+		awaitHooks.put(worker, new AwaitHook() {
+			@Override
+			public void beforeAwait() throws InterruptedException {
+				if (awaitCount.incrementAndGet() >= 2) {
+					secondAwaitEntered.countDown();
+					assertTrue(releaseSecondAwait.await(15, TimeUnit.SECONDS), "the test released the await poll");
+				}
+			}
+
+			@Override
+			public void onFailure(final Throwable cause) {
+				observedAwaitFailure.compareAndSet(null, cause);
+			}
+		});
+		final LinearLoadStepClient client = newClient();
+		final CompletableFuture<Boolean> awaited = new CompletableFuture<>();
+		try {
+			try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+				client.start();
+			}
+			Thread.ofPlatform().name("scenario").daemon(true).start(() -> {
+				try {
+					awaited.complete(client.await(1, TimeUnit.MINUTES));
+				} catch (final Throwable e) {
+					awaited.completeExceptionally(e);
+				}
+			});
+			assertTrue(secondAwaitEntered.await(15, TimeUnit.SECONDS), "the scenario thread polled the worker slice");
+
+			JvmExit.markBegun();
+			assertDoesNotThrow(client::close);
+			assertTrue(client.isClosed());
+
+			releaseSecondAwait.countDown();
+			final ExecutionException failure = assertThrows(
+							ExecutionException.class, () -> awaited.get(15, TimeUnit.SECONDS));
+			assertInstanceOf(InterruptedException.class, failure.getCause(), String.valueOf(failure.getCause()));
+			assertEquals(client.loadStepId() + ": stopped, the engine is exiting", failure.getCause().getMessage());
+			assertInstanceOf(
+							NoSuchObjectException.class,
+							observedAwaitFailure.get(),
+							String.valueOf(observedAwaitFailure.get()));
+			LogUtil.flushAll();
+			Thread.sleep(200);
+			assertEquals(List.of(), lostNodes(), "the exit-hook close must not record a lost slice");
+		} finally {
+			releaseSecondAwait.countDown();
+			JvmExitTestSupport.reset();
+		}
+	}
+
 	private RunTerminalException runFailing() throws Exception {
 		final LinearLoadStepClient client = newClient();
 		final RunTerminalException failure;
@@ -1304,6 +1374,12 @@ class LostStepSliceTest {
 			if ("stop".equals(name) && filesGoneAtStop.contains(addr)) {
 				workerServices.get(addr).get(1).close();
 			}
+			if ("await".equals(name)) {
+				final AwaitHook hook = awaitHooks.get(addr);
+				if (hook != null) {
+					hook.beforeAwait();
+				}
+			}
 			final RemoteException fault = sliceFaults.get(name);
 			if (fault != null) {
 				throw fault;
@@ -1337,6 +1413,12 @@ class LostStepSliceTest {
 				try {
 					result = method.invoke(stub, args);
 				} catch (final InvocationTargetException e) {
+					if ("await".equals(name)) {
+						final AwaitHook hook = awaitHooks.get(addr);
+						if (hook != null) {
+							hook.onFailure(e.getCause());
+						}
+					}
 					throw e.getCause();
 				}
 				final Long stopReplyMillis = slowStopReplies.get(addr);
@@ -1358,6 +1440,12 @@ class LostStepSliceTest {
 		return (LoadStepService) Proxy.newProxyInstance(
 						LoadStepService.class.getClassLoader(), new Class<?>[]{LoadStepService.class
 						}, handler);
+	}
+
+	private interface AwaitHook {
+		void beforeAwait() throws InterruptedException;
+
+		void onFailure(Throwable cause);
 	}
 
 	/** A remote call to the slice, made by the relay's server side; see {@link #relay}. */

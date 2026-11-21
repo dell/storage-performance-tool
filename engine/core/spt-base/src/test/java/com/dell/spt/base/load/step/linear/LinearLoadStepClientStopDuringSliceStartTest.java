@@ -13,6 +13,9 @@ import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStepManagerService;
+import com.dell.spt.base.load.step.client.StepIdReuseAtStartTest;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.LoadStepService;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
@@ -22,6 +25,8 @@ import com.dell.spt.base.svc.ServiceBase;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
 import java.net.ServerSocket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import org.apache.commons.csv.CSVFormat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -70,6 +76,7 @@ class LinearLoadStepClientStopDuringSliceStartTest {
 	private LoadStepManagerServiceImpl liveManager;
 	private FileManagerServiceImpl heldFiles;
 	private HeldStepManager heldManager;
+	private int heldPort;
 	private LinearLoadStepClient client;
 
 	@BeforeEach
@@ -77,7 +84,7 @@ class LinearLoadStepClientStopDuringSliceStartTest {
 		originalRmiHostname = System.getProperty(RMI_HOSTNAME);
 		System.setProperty(RMI_HOSTNAME, "127.0.0.1");
 		final int livePort = freePort();
-		final int heldPort = freePort();
+		heldPort = freePort();
 		liveFiles = new FileManagerServiceImpl(livePort);
 		liveFiles.start();
 		liveManager = new LoadStepManagerServiceImpl(livePort, extensions(), workerMgr);
@@ -172,6 +179,59 @@ class LinearLoadStepClientStopDuringSliceStartTest {
 		assertTrue(startedSlice.isClosed(), "the slice started before the stop stayed open: " + startedSlice.state());
 		synchronized (closeFailures) {
 			assertEquals(List.of(), closeFailures);
+		}
+	}
+
+	@Test
+	void theExitStopsACreateStartAndPublishesTheLifecycleOfTheStartedSliceOnly() throws Exception {
+		// The entry's own slice starts, publishing operation lifecycle evidence, and the node's never does.
+		config.val("load-op-type", "create");
+		config.val("load-op-limit-rate", 20);
+		config.val("load-step-node-addrs", List.of("127.0.0.1:" + heldPort));
+		final Path lifecycle = Path.of(FileManager.INSTANCE.logFileName(
+						Loggers.OPERATION_LIFECYCLE.getName(), config.stringVal("load-step-id"))).toAbsolutePath();
+		try {
+			client = new LinearLoadStepClient(config, extensions(), List.of(), entryMgr);
+			final var runOutcome = new AtomicReference<Throwable>();
+			final var runThread = new Thread(() -> {
+				try {
+					client.run();
+				} catch (final Throwable e) {
+					runOutcome.set(e);
+				}
+			}, "stop-during-create-slice-start-run");
+			runThread.setDaemon(true);
+			runThread.start();
+			assertTrue(heldManager.entered.await(WAIT_SECONDS, TimeUnit.SECONDS), "the step did not reach the node");
+
+			JvmExit.markBegun();
+			final var hook = new Thread(DaemonBase::closeAll, "stop-during-create-slice-start-hook");
+			hook.setDaemon(true);
+			hook.start();
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
+			while (!runThread.isInterrupted()) {
+				assertTrue(System.nanoTime() < deadline, "the hook did not interrupt the starting thread");
+				Thread.sleep(10);
+			}
+			heldManager.release.countDown();
+			runThread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+			hook.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+
+			assertFalse(runThread.isAlive(), "the run did not end");
+			assertFalse(hook.isAlive(), "closeAll did not end");
+			assertInstanceOf(InterruptedException.class, runOutcome.get());
+			assertTrue(client.isClosed());
+			synchronized (closeFailures) {
+				assertEquals(List.of(), closeFailures);
+			}
+			try (var parser = CSVFormat.RFC4180.builder().setHeader().get().parse(Files.newBufferedReader(lifecycle))) {
+				assertEquals(1, parser.getRecords().size(), "the started slice's lifecycle row only");
+			}
+			assertTrue(Files.isRegularFile(lifecycle.resolveSibling("operation.lifecycle.node-000.csv")));
+			assertFalse(Files.exists(lifecycle.resolveSibling("operation.lifecycle.node-001.csv")),
+							"the node whose slice never started had a file fetched");
+		} finally {
+			StepIdReuseAtStartTest.removeFolder(lifecycle.getParent());
 		}
 	}
 

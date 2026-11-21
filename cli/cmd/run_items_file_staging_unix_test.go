@@ -102,7 +102,7 @@ func TestRunCmdItemsFileStagesOverSCPOnlyOnRemoteHosts(t *testing.T) {
 				resolvePortConflictFunc = previousPort
 				startLocalHeadlessRunFunc = previousLocal
 			})
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			errLocalRoute := errors.New("local route inspected")

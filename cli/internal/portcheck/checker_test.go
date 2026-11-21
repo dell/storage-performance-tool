@@ -233,7 +233,7 @@ func detectOn(t *testing.T, paths []string, status int, body string) (*SptStatus
 	checker := NewPortCheckerWithOptions(port, "127.0.0.1", 100*time.Millisecond, 500*time.Millisecond, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return checker.detectSptService(ctx)
+	return checker.detectSptService(ctx, checker.apiBaseURL(nil))
 }
 
 func TestPortChecker_detectSptService(t *testing.T) {
@@ -289,7 +289,7 @@ func TestPortChecker_detectSptService(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		status, err := checker.detectSptService(ctx)
+		status, err := checker.detectSptService(ctx, checker.apiBaseURL(nil))
 		if err == nil {
 			t.Errorf("detectSptService() error = nil, want error")
 		}

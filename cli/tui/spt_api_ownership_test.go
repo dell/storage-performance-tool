@@ -20,7 +20,7 @@ func TestReconciliationDoesNotAdoptUnrelatedRunForStop(t *testing.T) {
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":78}`))
 		case request.URL.Path == "/run" && request.Method == http.MethodDelete:
-			stoppedRunID = request.URL.Query().Get("runId")
+			stoppedRunID = request.Header.Get("If-Match")
 			writer.WriteHeader(http.StatusNoContent)
 		default:
 			writer.WriteHeader(http.StatusNotFound)
@@ -110,7 +110,7 @@ func TestOrdinaryStatusPollingDoesNotRetargetStop(t *testing.T) {
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{"state":"RUNNING","run_id":78}`))
 		case request.URL.Path == "/run" && request.Method == http.MethodDelete:
-			stoppedRunID = request.URL.Query().Get("runId")
+			stoppedRunID = request.Header.Get("If-Match")
 			writer.WriteHeader(http.StatusNoContent)
 		default:
 			writer.WriteHeader(http.StatusNotFound)
