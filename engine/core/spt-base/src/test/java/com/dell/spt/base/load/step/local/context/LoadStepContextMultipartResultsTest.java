@@ -55,6 +55,8 @@ final class LoadStepContextMultipartResultsTest {
 	private final LoadGenerator<DataItem, Operation<DataItem>> generator = retryCapableGenerator();
 	/** The step's count of results toward the count limit, after the last {@link #put}. */
 	private long counted;
+	/** Whether the next {@link #context} has {@code load-op-recycle-mode} on. */
+	private boolean recycle;
 
 	static Stream<Arguments> forms() {
 		return Stream.of(
@@ -182,6 +184,30 @@ final class LoadStepContextMultipartResultsTest {
 		verify(generator, never()).recycle(any());
 	}
 
+	@ParameterizedTest(name = "batch={0}, retry={1}")
+	@MethodSource("forms")
+	void aRecycledUploadStartsAgainAsANewUpload(final boolean batch, final boolean retry) {
+		final var upload = new Published(OpType.CREATE).starts(Status.SUCC);
+		for (var part = 0; part < PARTS; part++) {
+			upload.partSucceeds(part);
+		}
+		upload.ends(Status.SUCC);
+		recycle = true;
+
+		put(context(retry), batch, upload);
+
+		assertOutcome(1, 0, 0);
+		@SuppressWarnings("unchecked")
+		final ArgumentCaptor<Operation<DataItem>> recycled = ArgumentCaptor.forClass(Operation.class);
+		verify(generator).recycle(recycled.capture());
+		final var whole = assertInstanceOf(CompositeOperation.class, recycled.getValue(), "the operation, not a part, is recycled");
+		// It starts again: no part settled, no upload ID, and every part again.
+		assertFalse(whole.allSubOperationsDone(), "the recycled upload starts from the beginning");
+		assertNull(whole.get("uploadId"));
+		assertEquals(PARTS, whole.subOperations().size());
+		assertFalse(whole.allSubOperationsDone(), "every part is unsettled again");
+	}
+
 	private void assertFailedOnceOrRetriedAsAWhole(final boolean retry) {
 		if (!retry) {
 			assertOutcome(0, 1, 0);
@@ -221,7 +247,7 @@ final class LoadStepContextMultipartResultsTest {
 	private LoadStepContextImpl<DataItem, Operation<DataItem>> context(final boolean retry) {
 		config.val("load-op-retry", retry);
 		config.val("load-op-retryLimit", 2);
-		config.val("load-op-recycle-mode", false);
+		config.val("load-op-recycle-mode", recycle);
 		@SuppressWarnings("unchecked")
 		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
 		final var context = new LoadStepContextImpl<>(
