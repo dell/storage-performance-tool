@@ -8,19 +8,25 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.ToLongFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -76,6 +82,68 @@ public class FileStorageDriverTest {
 					OpType type, String name, long size, String srcPath, String dstPath) {
 		DataItemImpl item = new DataItemImpl(name, 0, size);
 		return new DataOperationImpl<>(0, type, item, srcPath, dstPath, null, null, 0);
+	}
+
+	/**
+	 * A READ of a FIFO with no writer blocks its I/O worker in the file open, inside the open-files
+	 * map's computeIfAbsent, where an interrupt does not reach it (as a stalled mount would). The
+	 * stop warns and goes on, and the close must not wait on the map slot that open holds.
+	 */
+	@Test
+	@Timeout(60)
+	public void closeReturnsWhileAWorkerIsBlockedOpeningAFifo() throws Exception {
+		assumeTrue(File.separatorChar == '/', "POSIX only");
+		final Path fifo = tempDir.resolve("no-writer.fifo");
+		final int mkfifo;
+		try {
+			mkfifo = new ProcessBuilder("mkfifo", fifo.toString()).inheritIO().start().waitFor();
+		} catch (final IOException e) {
+			assumeTrue(false, "mkfifo is not available: " + e);
+			return;
+		}
+		assumeTrue(mkfifo == 0 && Files.exists(fifo), "mkfifo failed");
+		final var drv = newDriver(false);
+		final var closed = new CountDownLatch(1);
+		final var closeFailure = new AtomicReference<Throwable>();
+		try {
+			drv.operationResultOutput(new CollectingOpOutput<>());
+			drv.start();
+			final var op = newOp(OpType.READ, fifo.getFileName().toString(), 1, tempDir.toString(), null);
+			assertTrue(drv.put(op));
+			final long dispatchDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+			while (drv.operationLifecycle().stateOf(op) != OperationLifecycleState.DISPATCHED
+							&& System.nanoTime() < dispatchDeadline) {
+				Thread.sleep(1);
+			}
+			assertEquals(OperationLifecycleState.DISPATCHED, drv.operationLifecycle().stateOf(op));
+			// Give the worker time to enter the open that blocks.
+			Thread.sleep(200);
+			drv.operationLifecycle().resolveOutstandingAsUnresolved();
+
+			final var closer = new Thread(() -> {
+				try {
+					drv.stop();
+					drv.close();
+				} catch (final Throwable t) {
+					closeFailure.set(t);
+				} finally {
+					closed.countDown();
+				}
+			}, "fifo-close");
+			closer.setDaemon(true);
+			closer.start();
+			assertTrue(closed.await(15, TimeUnit.SECONDS), "the stop and close must return behind a worker blocked in open()");
+			assertNull(closeFailure.get(), () -> "the stop or close threw " + closeFailure.get());
+			assertTrue(drv.isClosed());
+		} finally {
+			// Open the FIFO for writing (read-write does not block on Linux), which ends the blocked
+			// open; otherwise the worker stays in open() for the rest of the test JVM.
+			try (var writer = new RandomAccessFile(fifo.toFile(), "rw")) {
+				assertNotNull(writer);
+			}
+			closed.await(15, TimeUnit.SECONDS);
+			drv.close();
+		}
 	}
 
 	@Test

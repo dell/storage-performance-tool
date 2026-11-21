@@ -357,7 +357,7 @@ Key points:
 - Workers must already be running the Spt API (`--run-node`) and listening on the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - Preflight checks tolerate expected port usage on worker hosts but continue to flag unknown listeners.
 - Attached workers remain unmanaged during shutdown—`spt` stops the entry node but leaves prestarted workers running.
-- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step keeps running for a while: only a count limit stops a worker's step on its own. Otherwise the worker stops and closes it 120 seconds after the entry's last call, and a run whose entry loses its step on a worker fails, since that worker's last operations are missing from the totals. `POST /shutdown`, the end of the worker process, or `DELETE /run` on the worker naming that run stop it sooner, and are the only way to stop a step whose entry died before its first call after starting that step. After a failed or interrupted attach run, check the workers and restart them before the next run.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step keeps running for a while: only a count limit stops a worker's step on its own. Otherwise the worker stops and closes it 120 seconds after the entry's last call, and a run whose entry loses its step on a worker fails, since the totals can leave out all of that worker's operations. `POST /shutdown`, the end of the worker process, or `DELETE /run` on the worker naming that run stop it sooner, and are the only way to stop a step whose entry died before its first call after starting that step. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - The host list must include at least two entries (entry + worker). `spt` enforces this and fails fast otherwise.
 - Verification workloads reject `--attach-existing` because SPT cannot establish trusted runtime identity for unmanaged workers.
 
@@ -555,7 +555,7 @@ Executes a benchmark test with the specified workload type.
 - `--range-align`: Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. A fixed offset must be divisible by the effective alignment. Offset/alignment require `--range-size`. A positive `--part-size` conflicts with partial reads.
 
 - `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based standalone DELETE (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`. A file that can't be opened, has no items, or has a blank or invalid line ends the run with an error naming the file or line, before any requests from it
+- `--items-file`: Path to a saved `items.csv` for `read`, a canonical manifest for `read-verify`, or, for explicit-manifest DELETE, a canonical manifest or the `items.csv` an S3 `write --save-items` saved. Mutually exclusive with `--delete-existing`. A file that can't be opened, has no items, or has a blank or invalid line ends the run with an error naming the file or line, before any requests from it
 - `--delete-batch-size`: Standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
 - `--delete-existing`: Destructive DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
 - `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection
@@ -585,8 +585,8 @@ See [Partial-object READs](docs/PARTIAL_READS.md) for examples, response rules, 
 
 Partial reads apply only to the READ phase. Size must be positive and the inclusive endpoint must fit a signed 64-bit integer. Fixed spans are sent unchanged, including out-of-bounds spans; random selection fails locally when the recorded object size is too small. Success requires a structurally valid, complete HTTP 206 response with the exact requested bytes. Inventory size is preserved when objects change, and content is not verified. READ-VERIFY, MIXED, AWS S3, and native S3-RDMA are unsupported. Count and duration runs recycle successful partial reads; failures retire the item. When range flags are enabled, merged engine overrides must keep legacy ranges, verification, metadata-only reads, tagging, and recycled content updates disabled, and any explicit network timeout must be positive. Set the partial-read policy with the range flags; global `load.op.read.range` overrides would also affect preparation and cleanup. Ordinary READ and WRITE runs (range flags omitted) showed no regression in the v5.15.2 release performance check against v5.14.2, the last release before partial reads; that check does not isolate the partial-read cost or include partial-read workloads, and no partial-read performance figures are published. See the feature guide for current limitations.
 
-The public `delete` command's explicit-manifest mode requires the exact CSV header
-`bucket,key,size,version_id`, performs strict
+The public `delete` command's explicit-manifest mode takes a canonical manifest with the exact CSV
+header `bucket,key,size,version_id`, or a saved S3 items file (below), performs strict
 CSV validation and identity conflict checks before orchestration, de-duplicates identical rows,
 and rejects an empty selection. An optional `--bucket` value asserts every source row; omitting it
 allows multiple buckets when `--delete-batch-size=1`. `--object-count` caps objects only after the
@@ -600,7 +600,8 @@ convert it. A row counts as saved when its `key` is a hexadecimal offset that fi
 integer and its `version_id` is `<layer>/<mask>`: the layer a hexadecimal number that fits a signed
 32-bit integer, the mask hexadecimal digits or none, so `0/` counts. Either number may carry a sign,
 and digits may be upper or lower case. `delete --items-file` and `read-verify --items-file` refuse
-any such row before anything starts, with exit 1, and explain this when a saved file has no header.
+any such row under the header before anything starts, with exit 1; `read-verify` also explains this
+when a saved file has no header, which `delete` reads as a saved items file (below).
 `read --items-file`, `mixed --read-items-file` and `mixed --delete-items-file` still take a saved
 `items.csv` as it is; given the header, they refuse a local regular file whose first data row is
 saved. Both checks split rows as the engine's CSV parser does, so a quote inside an object path or a
@@ -611,6 +612,34 @@ not see within 1 MiB after it stops reading a row it cannot parse, or, on a name
 stream, one whose line end is not yet in the CLI's buffer. The first two flags then stop with exit 1 and the CLI's own error for the file; the
 other three run. A real object with such a key and version ID would be refused too; no S3 server
 tried issues such an ID.
+
+`delete --items-file` also takes the `items.csv` that an S3 `spt run write --save-items` saves, as
+it is, with no header. The CLI reads a file whose first record is not the canonical header as such
+a file and converts each row `/<bucket>/<key>,<hex offset>,<size>,<layer>/<mask>` to
+`<bucket>,<key>,<size>,` (bucket = the first path segment, key = the rest, verbatim), then applies
+the same canonical selection, de-duplication, `--bucket` assertion, `--object-count` cap and
+provenance as for a manifest; the run prints the format, the rows converted and the buckets. A
+write and its later update collapse to one object. These are **current-key deletes only**: on a
+versioned bucket the data versions stay and each DELETE adds a delete marker; exact versions need a
+canonical manifest. One row that can't be mapped safely to one object refuses the whole file before
+anything starts, with exit 1 and the line number: a name that does not start with `/` (an `fs` or
+mock-driver row, or a canonical file without its header), an empty bucket or key, a key starting
+with `/`, a `~` anywhere in the key (a versioned write's `key~versionId`, whose version ID can hold
+`/`), a `%` anywhere in the name (a Netty write can store a `%XX` escape decoded, a known 5.17.1
+limit), a `+` anywhere in the name (a Netty write sends it raw, which a target can read as a space,
+while DELETE encodes it), a comma in the key (more than four fields), a quote in the name, a line over 1 MiB, a blank
+line, a bare CR, invalid UTF-8, or a malformed offset, size or layer/mask; convert a file refused
+for `~`, `%` or `+` by hand to a canonical manifest of the stored keys. The error gives the line number
+and reason, never the row's bucket or key. The file must come from an S3 write: an absolute `fs`
+path reads as an S3 path, so pass `--bucket`, which is a recommended check and must be the first
+path segment of the saved names (`b` for a write with `--bucket b/sub/`). The CLI cannot see whether
+a row names a real object (for example rows that an `s3-aws` write before 5.17.1 saved with a
+trailing-slash bucket, which stored other keys): `--validate-inventory` checks that every selected
+key exists before the timed phase, and `--verify` does not catch wrong keys, because a 404 for a
+selected key counts it as verified absent, not as deleted. A
+multi-bucket file needs `--delete-batch-size=1`. `--object-count` caps after the canonical sort, not
+in file order. Rows saved by a manifest-driven read of a key that starts with `/` lose that slash.
+`read-verify --items-file` still takes canonical manifests only.
 
 Existing-prefix mode is mutually exclusive with `--items-file`. It requires
 `--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
@@ -827,6 +856,7 @@ Auto Results and Shutdown
 - `--auto-results` (default: true): automatically discovers step IDs, waits for terminal state via `/status` + idle JSON, then fetches artifacts (preferring per-step `/logs/<stepId>/index.json`).
 - When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained. Its rate table shows each phase's steady-state IOPS and bandwidth from `metrics.steady.total.csv` beside the whole-step Avg values, or "n/a" with the reason when the window is not `valid` or the engine predates 5.17; see [steady-state window](../engine/core/spt-base/doc/usage/output/README.md#25-steady-state-window).
 - The summary shows each phase's failed requests in a `Failed` column, and as a warning when any failed. A `read`, `write`, `mixed` or `tables` run that finished cleanly exits 1 if every request of a phase failed: no successes and at least one failure. In a `mixed` phase this applies to each operation too. A `list` run exits 1 if it found no objects and at least one request failed, since that listing can't show the prefix is empty. A `--cleanup` phase doesn't count, because cleanup is best-effort. A run stopped before its phases finish keeps its exit code, but a stop that only cuts the pause after them doesn't change this check. A `mixed` run with `--delete-items-file` full of keys that don't exist exits 1 on a target that answers 404 to those DELETEs, because every DELETE failed. Partial failures don't change the exit code, and an outage after earlier successes still exits 0, so read the `Failed` column and the warnings. Without auto-results the CLI has no counts, so this check doesn't run.
+- A phase that the engine stopped at its failure limit (`load.op.limit.fail.count`, default 100,000, or `load.op.limit.fail.rate`) is named in the warnings, for example `Create: stopped at its failure limit after 28 failed requests (load.op.limit.fail.count 20), 694ms into its 12s time limit`; the run still exits 0 unless the phase had no successes. The engine doesn't report why a step ended, so the CLI infers it from the step's `config.yaml`: the failures passed the count limit, or the rate limit was on and the phase had failures, and the phase ended more than 1 second before its time limit or short of its request count. A rate-limit stop is worded as likely, not certain. A run ended by `--auto-terminate-seconds`, Ctrl-C or a failed step gets no such warning, nor does a DELETE phase (standalone or `--cleanup`), a `list` run, a seed phase, a step bounded by `load.step.limit.size`, or a weighted or pipeline step (through `spt replay`). In a distributed run the entry's `config.yaml` holds one engine's share of `load.op.limit.count` and `load.op.limit.fail.count`, not the fleet's, while the summary's counts are the fleet's, so a distributed phase gets no failure-limit warning. A stop that only some engines reached can go unnamed.
 - A phase's steady window can be `valid` with its rate falling inside it, because `valid` tests coverage, not stability. The summary warns when a valid window's `SteadyTrend[%]` is -50 or lower, or its `SteadyCV` is 0.5 or higher. The status and the steady rate don't change. These cutoffs are uncalibrated, and a rising ramp alone won't warn.
 - `--results-dir`: directory where fetched artifacts and a manifest `index.json` are saved.
 - Engine provenance is recorded in one run-level `engine.info.json` and shown with the separate CLI identity in the Environment section. See [`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md).
