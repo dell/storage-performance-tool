@@ -154,6 +154,10 @@ type autoResultsOutcome struct {
 	// engine to stop the run. AutoTerminateStop says how that stop ended.
 	AutoTerminated    bool
 	AutoTerminateStop autoTerminateStopResult
+	// Interrupted marks a run whose tracking Ctrl-C or a cancelled parent context ended, other
+	// than at the auto-terminate deadline. It stays set when a later reconciliation clears
+	// TrackerErr.
+	Interrupted bool
 
 	// LiveCorruptionUnobserved marks a completed verification READ that the live step list never
 	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
@@ -1044,6 +1048,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			// owned run before deciding which artifacts and roles are applicable.
 			interruptedTracking := parentCtx.Err() != nil && outcome.TrackerErr != nil
 			outcome.AutoTerminated = interruptedTracking && autoTerminateRequested.Load()
+			outcome.Interrupted = interruptedTracking && !outcome.AutoTerminated
 			if outcome.AutoTerminated {
 				outcome.AutoTerminateStop = stopRunAtAutoTerminate()
 				if outcome.AutoTerminateStop == autoTerminateStopUnconfirmed && shutdownOn {
@@ -1346,7 +1351,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				writer = traceOutput
 			}
 		}
-		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer)
+		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer, summaryRunEnd(&outcome))
 		if err != nil {
 			outcome.SummaryErr = errors.Join(outcome.SummaryErr, err)
 		}
