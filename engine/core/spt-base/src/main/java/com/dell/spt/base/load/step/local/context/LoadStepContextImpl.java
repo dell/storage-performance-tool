@@ -1156,6 +1156,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * intentional contract for this status, unrelated to {@code load-op-retry}'s own
 	 * bounded-attempts-at-a-genuine-failure semantics.
 	 */
+	private void recyclePendingOp(final O opResult) {
+		if (!recycleFlag && retryFlag) {
+			generator.retry(opResult);
+		} else {
+			generator.recycle(opResult);
+			counterResults.increment();
+		}
+	}
+
 	/**
 	 * A finished composite's result copy keeps its count of unsettled parts, 0, but not its parts or
 	 * its context (such as the upload ID): recycled as it is, it would reach the driver looking already
@@ -1165,15 +1174,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private static void resetRecycledComposite(final Operation<?> opResult) {
 		if (opResult instanceof CompositeOperation<?> recycledComposite) {
 			recycledComposite.resetSubOperations();
-		}
-	}
-
-	private void recyclePendingOp(final O opResult) {
-		if (!recycleFlag && retryFlag) {
-			generator.retry(opResult);
-		} else {
-			generator.recycle(opResult);
-			counterResults.increment();
 		}
 	}
 
