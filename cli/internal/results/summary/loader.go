@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,7 +50,25 @@ type RunData struct {
 	EngineInfo                  *engineinfo.Manifest
 	EngineInfoPath              string
 	EngineInfoUnavailableReason string
+	// End is how the run ended, as the CLI saw it. The loader leaves it unknown; the caller sets it.
+	End RunEnd
 }
+
+// RunEnd is how a run ended, as the CLI that ran it saw it.
+type RunEnd string
+
+const (
+	// RunEndUnknown is a run whose end the caller did not say: no warning that depends on it fires.
+	RunEndUnknown RunEnd = ""
+	// RunEndCompleted is a run the engine ended on its own and reported as completed.
+	RunEndCompleted RunEnd = "completed"
+	// RunEndAutoTerminated is a run the CLI stopped at its auto-terminate deadline.
+	RunEndAutoTerminated RunEnd = "auto-terminated"
+	// RunEndInterrupted is a run ended by Ctrl-C or a lost tracker.
+	RunEndInterrupted RunEnd = "interrupted"
+	// RunEndFailed is a run the engine reported as failed, or one stopped outside the CLI.
+	RunEndFailed RunEnd = "failed"
+)
 
 // StepData captures per-step artifact availability and metrics totals.
 type StepData struct {
@@ -73,6 +93,8 @@ type StepData struct {
 	Notes             []string
 	// UnresolvedOperations is the step's count in neither Success nor Failed; 0 when unavailable.
 	UnresolvedOperations int64
+	// Limits is the step's own limits from its config.yaml; nil when that file is absent or unreadable.
+	Limits *StepLimits
 }
 
 // StepStatus indicates ingestion completeness for a step.
@@ -203,7 +225,9 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			Delete:      params.DeleteMetrics[sm.StepID],
 			DriverStats: params.DriverStats[sm.StepID],
 		}
-		step.MetricsSuppressed = l.metricsSummaryPersistSuppressed(runDir, sm)
+		stepConfig := l.readStepConfig(runDir, sm)
+		step.MetricsSuppressed = stepConfig.metricsSummaryPersistSuppressed()
+		step.Limits = stepConfig.stepLimits()
 		required, optional := l.categorizeMissing(sm)
 		if len(required) > 0 {
 			step.MissingRequired = append([]string(nil), required...)
@@ -487,22 +511,124 @@ type stepConfigProbe struct {
 			} `yaml:"summary"`
 		} `yaml:"metrics"`
 	} `yaml:"output"`
+	Load struct {
+		Op struct {
+			Limit struct {
+				Count *int64 `yaml:"count"`
+				Fail  struct {
+					Count *int64 `yaml:"count"`
+					Rate  *bool  `yaml:"rate"`
+				} `yaml:"fail"`
+			} `yaml:"limit"`
+		} `yaml:"op"`
+		Step struct {
+			Limit struct {
+				Time any `yaml:"time"`
+			} `yaml:"limit"`
+		} `yaml:"step"`
+	} `yaml:"load"`
 }
 
-func (l *Loader) metricsSummaryPersistSuppressed(runDir string, sm *results.StepManifest) bool {
+// StepLimits holds the step's own limits from its fetched config.yaml, for the failure-limit
+// warning. A zero value means the limit is off or was not given.
+type StepLimits struct {
+	// FailCount is load.op.limit.fail.count.
+	FailCount int64
+	// FailRate is load.op.limit.fail.rate.
+	FailRate bool
+	// OpCount is load.op.limit.count.
+	OpCount int64
+	// TimeSeconds is load.step.limit.time in seconds; 0 when off or not parseable.
+	TimeSeconds float64
+}
+
+// readStepConfig parses the step's fetched config.yaml once; nil when it is absent or unreadable.
+func (l *Loader) readStepConfig(runDir string, sm *results.StepManifest) *stepConfigProbe {
 	entry := l.findConfigEntry(sm)
 	if entry == nil || entry.Status != fileStatusOK {
-		return false
+		return nil
 	}
 	content, err := os.ReadFile(filepath.Join(runDir, entry.Name)) // #nosec G304 -- path restricted to fetched results directory
 	if err != nil {
-		return false
+		return nil
 	}
 	var config stepConfigProbe
 	if err := yaml.Unmarshal(content, &config); err != nil {
-		return false
+		return nil
 	}
-	return config.Output.Metrics.Summary.Persist != nil && !*config.Output.Metrics.Summary.Persist
+	return &config
+}
+
+func (c *stepConfigProbe) metricsSummaryPersistSuppressed() bool {
+	return c != nil && c.Output.Metrics.Summary.Persist != nil && !*c.Output.Metrics.Summary.Persist
+}
+
+// stepLimits is nil when the step has no readable config.yaml.
+func (c *stepConfigProbe) stepLimits() *StepLimits {
+	if c == nil {
+		return nil
+	}
+	limits := &StepLimits{}
+	if v := c.Load.Op.Limit.Fail.Count; v != nil && *v > 0 {
+		limits.FailCount = *v
+	}
+	if v := c.Load.Op.Limit.Fail.Rate; v != nil {
+		limits.FailRate = *v
+	}
+	if v := c.Load.Op.Limit.Count; v != nil && *v > 0 {
+		limits.OpCount = *v
+	}
+	if seconds, ok := engineTimeSeconds(c.Load.Step.Limit.Time); ok && seconds > 0 {
+		limits.TimeSeconds = seconds
+	}
+	return limits
+}
+
+var (
+	engineTimePattern       = regexp.MustCompile(`^([0-9]*)([smhdSMHD]?)$`)
+	engineTimeCompatPattern = regexp.MustCompile(`^([0-9]*)\.([a-zA-Z]{4,7})$`)
+	engineTimeUnitSeconds   = map[string]float64{
+		"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400,
+		// The older form's 4 to 7 letters admit only these TimeUnit names.
+		"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400,
+	}
+)
+
+// engineTimeSeconds reads a time value as the engine's TimeUtil.getTimeInSeconds does: a number
+// of seconds, "<n>[s|m|h|d]", or the older "<n>.<TimeUnit>". ok is false when it does not parse.
+func engineTimeSeconds(raw any) (float64, bool) {
+	switch v := raw.(type) {
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case float64:
+		return v, true
+	case string:
+		text := strings.TrimSpace(v)
+		match := engineTimePattern.FindStringSubmatch(text)
+		if match == nil {
+			match = engineTimeCompatPattern.FindStringSubmatch(text)
+		}
+		if match == nil {
+			return 0, false
+		}
+		unit, known := engineTimeUnitSeconds[strings.ToLower(match[2])]
+		if !known {
+			return 0, false
+		}
+		if match[1] == "" {
+			return 0, true
+		}
+		value, err := strconv.ParseInt(match[1], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return float64(value) * unit, true
+	}
+	return 0, false
 }
 
 func appendUnique(list []string, value string) []string {

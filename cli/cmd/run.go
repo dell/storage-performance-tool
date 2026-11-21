@@ -1345,7 +1345,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				writer = traceOutput
 			}
 		}
-		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer)
+		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer, summaryRunEnd(&outcome))
 		if err != nil {
 			outcome.SummaryErr = errors.Join(outcome.SummaryErr, err)
 		}

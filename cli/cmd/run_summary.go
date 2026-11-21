@@ -78,14 +78,16 @@ func usesCompactSummaryOutput(out io.Writer) bool {
 }
 
 // generateRunSummary loads run artifacts from runDir, produces a summary report file,
-// and writes a console-friendly snippet to out. Non-fatal errors are logged and
-// returned so callers can surface warnings without aborting the workflow.
-func generateRunSummary(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
+// and writes a console-friendly snippet to out. end is how the run ended, which the
+// artifacts do not say. Non-fatal errors are logged and returned so callers can
+// surface warnings without aborting the workflow.
+func generateRunSummary(ctx context.Context, runDir string, out io.Writer, end summary.RunEnd) (*summary.RunSummary, error) {
 	loader := summary.NewLoader()
 	runData, err := loader.Load(ctx, runDir)
 	if err != nil {
 		return nil, fmt.Errorf("load results: %w", err)
 	}
+	runData.End = end
 	agg, err := summary.Aggregate(runData)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate summary: %w", err)
@@ -146,4 +148,28 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 	return nil
+}
+
+// summaryRunEnd is how the run ended, for summary warnings that only fit a run the engine
+// ended on its own. Completion tracking returns an error when Ctrl-C or the auto-terminate
+// deadline ends it, so a tracker error marks an interrupted run.
+func summaryRunEnd(outcome *autoResultsOutcome) summary.RunEnd {
+	switch {
+	case outcome == nil:
+		return summary.RunEndUnknown
+	case outcome.AutoTerminated:
+		return summary.RunEndAutoTerminated
+	case outcome.TrackerErr != nil:
+		return summary.RunEndInterrupted
+	case outcome.Tracker == nil:
+		return summary.RunEndUnknown
+	}
+	switch outcome.Tracker.FinalState {
+	case constants.StateCompleted, constants.StateIdle:
+		// An engine without /run state is tracked to idle, which is its ordinary end.
+		return summary.RunEndCompleted
+	default:
+		// FAILED, or STOPPED by something other than this CLI.
+		return summary.RunEndFailed
+	}
 }
