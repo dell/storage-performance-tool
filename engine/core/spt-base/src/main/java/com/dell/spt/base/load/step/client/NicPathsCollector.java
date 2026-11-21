@@ -171,6 +171,8 @@ final class NicPathsCollector implements AutoCloseable {
 				Files.write(target, bytes, StandardOpenOption.APPEND);
 				offset += bytes.length;
 			}
+		} catch (final LostNodeFileManager.NotCollected notRead) {
+			throw new IOException("the file was not collected, as the entry lost its node's step slice: " + remoteName, notRead);
 		} catch (final EOFException expected) {
 			// FileManager signals normal EOF with this exception.
 		} catch (final Exception e) {
