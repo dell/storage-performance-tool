@@ -161,4 +161,29 @@ class CsvLoggerArtifactAggregatorTest {
 						IntegrityCsvArtifacts.FAILURES_HEADER);
 		assertThrows(IntegrityTerminalException.class, aggregator::close);
 	}
+
+	@Test
+	void aLostNodesArtifactFailsAsNotCollectedInsteadOfEmpty() throws Exception {
+		final Path dir = Files.createTempDirectory("integrity-logger-aggregation-");
+		final Path canonical = dir.resolve(IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME);
+		Files.writeString(canonical, IntegrityCsvArtifacts.PERFORMANCE_HEADER + "\r\n", StandardCharsets.UTF_8);
+		final FileManager localManager = mock(FileManager.class);
+		final FileManager remoteManager = mock(FileManager.class);
+		when(localManager.logFileName("logger", "step")).thenReturn(canonical.toString());
+		when(remoteManager.logFileName("logger", "step")).thenReturn("/remote/integrity.performance.csv");
+		// The guard's answer for a node whose step slice the entry lost.
+		when(remoteManager.readFromFile("/remote/integrity.performance.csv", 0)).thenThrow(new LostNodeFileManager.NotCollected());
+		final var aggregator = new CsvLoggerArtifactAggregator(
+						"step",
+						List.of(localManager, remoteManager),
+						"logger",
+						IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME,
+						IntegrityCsvArtifacts.PERFORMANCE_HEADER);
+
+		final IntegrityTerminalException failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals(
+						"remote logger artifact was not collected, as the entry lost its node's step slice: /remote/integrity.performance.csv",
+						failure.getCause().getMessage());
+	}
 }

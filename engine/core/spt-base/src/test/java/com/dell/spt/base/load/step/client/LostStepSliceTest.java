@@ -114,6 +114,7 @@ class LostStepSliceTest {
 	private static final String CLOSE_WARNING = "failed to close the step service";
 	private static final String AWAIT_WARNING = "did not answer its await within the RMI response timeout";
 	private static final String METRICS_FETCH = "metricsSnapshots";
+	private static final String FILES_NOT_COLLECTED = "the entry collects none of the files of node ";
 	/** The key of the entry's own slice in the call times. */
 	private static final String ENTRY = "entry";
 	/** How soon a step whose slice is lost must end: the ticket's 10 s, less the test's own setup. */
@@ -332,6 +333,8 @@ class LostStepSliceTest {
 		assertEquals(List.of(lost), lostNodes());
 		assertTrue(errors.messages().stream().anyMatch(message -> message.contains(" at its close (")),
 						errors.messages().toString());
+		// Its close was its one close: the loss sends it no second one.
+		assertEquals(List.of(), callsAfterLoss(lost), "no call after a loss at the close");
 	}
 
 	@Test
@@ -625,6 +628,10 @@ class LostStepSliceTest {
 		assertOnlyOneCloseAfterLoss(lost);
 		final String other = addrs.get(0);
 		assertTrue(calls(other).containsAll(List.of("stop", "close")), "the other slice stops and closes: " + calls(other));
+		// One warning for the lost node's files, however many of them the close skipped.
+		final List<String> notCollected = errors.messages().stream().filter(message -> message.contains(FILES_NOT_COLLECTED)).toList();
+		assertEquals(1, notCollected.size(), "one warning for the lost node's files: " + notCollected);
+		assertTrue(notCollected.getFirst().contains(FILES_NOT_COLLECTED + lost + ","), notCollected.getFirst());
 	}
 
 	@Test

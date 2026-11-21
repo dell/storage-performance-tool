@@ -411,6 +411,8 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 				}
 				offset += bytes.length;
 			}
+		} catch (final LostNodeFileManager.NotCollected notRead) {
+			throw new IOException("remote manifest source was not collected, as the entry lost its node's step slice: " + remoteName, notRead);
 		} catch (final EOFException expected) {
 			// The file-manager contract signals normal EOF with this exception.
 		} catch (final Exception e) {

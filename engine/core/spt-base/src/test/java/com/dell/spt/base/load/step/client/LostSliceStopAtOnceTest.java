@@ -14,12 +14,15 @@ import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.bucket.BucketRows;
 import com.github.akurilov.confuse.Config;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.SocketTimeoutException;
 import java.rmi.ConnectException;
 import java.rmi.UnmarshalException;
@@ -49,6 +52,8 @@ class LostSliceStopAtOnceTest {
 	private static final String STOP_AT_ONCE_THREAD = "spt-lost-slice-stop-";
 	private static final String LOST_CLOSE_THREAD = "spt-lost-slice-close-";
 	private static final Duration BOUND = Duration.ofSeconds(30);
+	/** How long a blocked close of the lost slice waits for its interrupt before it gives up and answers. */
+	private static final long BLOCKED_CLOSE_MILLIS = 5_000;
 
 	/** The name of each thread that stopped each slice, by slice index. */
 	private final List<List<String>> stoppedBy = List.of(
@@ -69,6 +74,12 @@ class LostSliceStopAtOnceTest {
 	private volatile int failLoadStepIdAtOnceSlice = -1;
 	/** When that failed loadStepId call ended. */
 	private volatile long failedLoadStepIdEndNanos;
+	/** Whether the lost slice's close blocks until it is interrupted, for at most BLOCKED_CLOSE_MILLIS. */
+	private volatile boolean lostCloseBlocks;
+	/** Whether that blocked close ended by its interrupt. */
+	private volatile boolean lostCloseInterrupted;
+	/** The bound on the lost slice's one close; 0 keeps the step's own. */
+	private volatile long lostCloseBoundMillis;
 
 	@Test
 	void everySliceButTheLostOneGetsOneStopAtOnceAndTheLostOneItsOneClose() throws Exception {
@@ -202,6 +213,80 @@ class LostSliceStopAtOnceTest {
 		assertFalse(stoppedBy.get(2).isEmpty(), "the reachable slice is still stopped");
 	}
 
+	@Test
+	void theStepsCloseWaitsForALostSlicesCloseUntilItsBoundAndThenInterruptsIt() throws Exception {
+		lostCloseBlocks = true;
+		lostCloseBoundMillis = 300;
+		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
+		awaitFailing(client);
+		awaitClose(1);
+
+		final long began = System.nanoTime();
+		assertTimeoutPreemptively(BOUND, client::doClose);
+		final long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began);
+
+		// The bound runs from the loss, so the step's close waits for at most its rest.
+		assertTrue(tookMillis < BLOCKED_CLOSE_MILLIS / 2,
+						"the step's close stops waiting for the lost slice's close at its bound: " + tookMillis + " ms");
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		while (!lostCloseInterrupted && System.nanoTime() < deadline) {
+			Thread.sleep(5);
+		}
+		assertTrue(lostCloseInterrupted, "the lost slice's close is interrupted at its bound");
+		assertEquals(1, closedBy.get(1).size(), "the lost slice gets its one close only: " + closedBy.get(1));
+	}
+
+	@Test
+	void aStandaloneDeletesLostSliceGetsItsStopAndCloseAndNoCloseAtItsLoss() throws Exception {
+		final TestLoadStepClient client = client(standaloneDelete(), 0, false);
+
+		awaitFailing(client);
+		Thread.sleep(200);
+		assertEquals(List.of(), closedBy.get(1), "no close of the lost slice at its loss");
+		assertFalse(stoppedBy.get(1).isEmpty(), "the lost slice is still stopped after the await");
+
+		assertTimeoutPreemptively(BOUND, () -> {
+			try {
+				client.doClose();
+			} catch (final IntegrityTerminalException expected) {
+				// The mock slices report no terminal object counters, which fails the DELETE's budget.
+			}
+		});
+		assertEquals(1, closedBy.get(1).size(), "the step's close closes the lost slice once: " + closedBy.get(1));
+		assertFalse(closedBy.get(1).getFirst().startsWith(LOST_CLOSE_THREAD), closedBy.get(1).toString());
+	}
+
+	@Test
+	void theBucketMetricsAreNotFetchedFromALostSlice() throws Exception {
+		final TestLoadStepClient client = client(TestConfigBuilder.config(), 0, false);
+		awaitFailing(client);
+
+		final Method fetch = LoadStepClientBase.class.getDeclaredMethod("fetchBucketMetrics");
+		fetch.setAccessible(true);
+		@SuppressWarnings("unchecked")
+		final List<BucketRows.Contribution> contributions = (List<BucketRows.Contribution>) fetch.invoke(client);
+
+		assertEquals(3, contributions.size(), contributions.toString());
+		assertTrue(contributions.get(1).failure().contains("the entry lost this node's step slice"),
+						contributions.get(1).toString());
+		for (var i = 0; i < 3; i++) {
+			final boolean fetched = mockingDetails(slices.get(i)).getInvocations().stream()
+							.anyMatch(invocation -> "bucketMetrics".equals(invocation.getMethod().getName()));
+			assertEquals(i != 1, fetched, "slice " + i + " fetched its bucket metrics: " + fetched);
+		}
+	}
+
+	private static Config standaloneDelete() {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "lost-slice-standalone-delete");
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-op-limit-count", 10L);
+		config.val("load-step-limit-time", "0s");
+		return config;
+	}
+
 	private RunTerminalException awaitFailing(final TestLoadStepClient client) {
 		// Three pollers, one per slice, whatever the host's CPU count.
 		final ForkJoinPool pollers = new ForkJoinPool(3);
@@ -249,7 +334,12 @@ class LostSliceStopAtOnceTest {
 	 */
 	private TestLoadStepClient client(final Config config, final long slowStopMillis, final boolean timingOut)
 					throws Exception {
-		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), mock(MetricsManager.class));
+		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), mock(MetricsManager.class)) {
+			@Override
+			long lostSliceCloseBoundNanos() {
+				return lostCloseBoundMillis > 0 ? TimeUnit.MILLISECONDS.toNanos(lostCloseBoundMillis) : super.lostSliceCloseBoundNanos();
+			}
+		};
 		final CountDownLatch slice2StopBegun = new CountDownLatch(1);
 		final CountDownLatch slice2StopEnded = new CountDownLatch(1);
 		for (var i = 0; i < 3; i++) {
@@ -316,6 +406,15 @@ class LostSliceStopAtOnceTest {
 			}).when(slice).stop();
 			doAnswer(invocation -> {
 				closedBy.get(index).add(Thread.currentThread().getName());
+				if (index == 1 && lostCloseBlocks) {
+					// As an RMI call to a frozen worker, which an interrupt of its virtual thread ends.
+					try {
+						Thread.sleep(BLOCKED_CLOSE_MILLIS);
+					} catch (final InterruptedException e) {
+						lostCloseInterrupted = true;
+						throw new java.rmi.RemoteException("injected: the close was interrupted", e);
+					}
+				}
 				return null;
 			}).when(slice).close();
 			slices.add(slice);

@@ -158,6 +158,8 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 				sawData = true;
 				offset += bytes.length;
 			}
+		} catch (final LostNodeFileManager.NotCollected notRead) {
+			throw new IOException("remote logger artifact was not collected, as the entry lost its node's step slice: " + remoteName, notRead);
 		} catch (final EOFException expected) {
 			// FileManager signals normal EOF with this exception.
 		} catch (final Exception e) {

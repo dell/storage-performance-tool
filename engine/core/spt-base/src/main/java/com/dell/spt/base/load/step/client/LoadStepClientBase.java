@@ -167,8 +167,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 */
 	private boolean lostSliceStopsAtOnce;
 	/**
-	 * The stop at once of each started slice at the first loss in the await, the entry's own and the
-	 * lost ones among them, by slice: set once, then read only. The step's own stop stops these slices
+	 * The stop at once of each started slice at the first loss in the await, the entry's own among
+	 * them and the lost ones not, by slice: set once, then read only. The step's own stop stops these slices
 	 * again only when their stop at once failed before it was sent. Guarded by lostSliceLock.
 	 */
 	private IdentityHashMap<LoadStep, Thread> stopsAtOnce;
@@ -748,7 +748,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			// A lost slice's node gets no further file call: its files are not collected.
 			final int sliceIndex = fileMgrsDst.size();
-			fileMgrsDst.add(LostNodeFileManager.guard(fileMgr, () -> lostNodeIndexes.contains(sliceIndex)));
+			fileMgrsDst.add(LostNodeFileManager.guard(
+							fileMgr,
+							() -> lostNodeIndexes.contains(sliceIndex),
+							() -> Loggers.ERR.warn(
+											"{}: the entry collects none of the files of node {}, whose step slice it lost: the item output and the other results leave that node out, and an artifact that needs every node's file, such as operation.lifecycle.csv, is not published",
+											loadStepId(),
+											nodeAddr)));
 		}
 	}
 
@@ -1438,9 +1444,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * failed in RMI, or the worker no longer exports it. The entry no longer fetches that worker's
 	 * metrics, so the step's totals can leave out all of its operations, and the step fails. In
 	 * the await of an ordinary distributed step the first loss stops the whole step at once: every
-	 * started slice, the entry's own and the lost ones included, is stopped there and then, each from a
+	 * started slice that is not lost, the entry's own included, is stopped there and then, each from a
 	 * thread of its own, since a worker's await answers only once its stop has drained, and the
-	 * entry's own slice may be draining inside its await. The await's stop then waits for those stops
+	 * entry's own slice may be draining inside its await; a lost slice gets its one close instead. The await's stop then waits for those stops
 	 * and fails. A slice whose contact comes back stays lost. Each slice is recorded and logged once.
 	 * <p>Once a slice is lost the entry stops calling it, as a frozen worker would hold each call for
 	 * its connection's handshake: the slice gets no stop, shutdown, await poll, metrics fetch or file
@@ -1568,7 +1574,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * How long a lost slice's one close may take: the RMI response timeout when it is set above 0,
 	 * otherwise 10 s, the shipped one.
 	 */
-	static long lostSliceCloseBoundNanos() {
+	long lostSliceCloseBoundNanos() {
 		final long responseTimeoutMillis = Long.getLong("sun.rmi.transport.tcp.responseTimeout", 0);
 		return TimeUnit.MILLISECONDS.toNanos(responseTimeoutMillis > 0 ? responseTimeoutMillis : 10_000);
 	}
@@ -1716,7 +1722,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							Loggers.ERR,
 							Level.WARN,
 							cause,
-							"{}: the step slice \"{}\" did not answer its await within the RMI response timeout; the entry no longer awaits it and goes on to stop and close it",
+							"{}: the step slice \"{}\" did not answer its await within the RMI response timeout; the entry no longer awaits it, and stops and closes it later, or only closes it once it has lost it",
 							loadStepId(),
 							slice);
 			return;
