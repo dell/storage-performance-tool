@@ -98,6 +98,7 @@ import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -176,6 +177,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
+	// The step ids that already have a timing or a trace aggregator: each engine writes one file per id.
+	private final Set<String> timingMetricsStepIds = new HashSet<>();
+	private final Set<String> opTraceStepIds = new HashSet<>();
 	private final List<AutoCloseable> deleteArtifactAggregators = new ArrayList<>();
 	private final List<AutoCloseable> storageAuthFileSlicers = new ArrayList<>();
 	private final static int MAX_SLEEP_TIME_MILLIS = 120_000; // 2min.
@@ -382,9 +386,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			// Before the base or any context lists an item input.
 			refuseCompositeInAppendedContexts();
 			final Runnable distribution = () -> {
-				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG), controlsOperations(BASE_CONFIG));
+				addFileClients(
+								config, configSlices, suppliesItems(BASE_CONFIG), controlsOperations(BASE_CONFIG), loadStepId());
 				for (var i = 0; i < slicesByCtxConfig.size(); i++) {
-					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i), controlsOperations(i));
+					addFileClients(
+									ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i), controlsOperations(i),
+									contextOutputStepId(i));
 				}
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
@@ -862,7 +869,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void addFileClients(
 					final Config config, final List<Config> configSlices, final boolean suppliesItems,
-					final boolean controlsOperations) {
+					final boolean controlsOperations, final String outputStepId) {
 		// Before the input path is listed into the engines' items files, while it is still a path. A
 		// mixed step keeps the default create type, but its listed items are only the GET and STAT
 		// pool, and its PUTs name new items, so it never copies a listed item.
@@ -1012,15 +1019,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.debug("{}: item output file aggregator initialized", loadStepId());
 		}
 
-		if (config.boolVal("output-metrics-timing-persist")) {
+		// One aggregator per step id: the first collects and deletes each engine's file of that id.
+		if (config.boolVal("output-metrics-timing-persist") && timingMetricsStepIds.add(outputStepId)) {
 			itemTimingMetricsOutputFileAggregators.add(
-							new ItemTimingMetricOutputFileAggregator(loadStepId(), fileMgrs));
-			Loggers.MSG.debug("{}: item metrics output file aggregator initialized", loadStepId());
+							new ItemTimingMetricOutputFileAggregator(outputStepId, fileMgrs));
+			Loggers.MSG.debug("{}: item metrics output file aggregator initialized", outputStepId);
 		}
 
-		if (config.boolVal("output-metrics-trace-persist")) {
-			opTraceLogFileAggregators.add(new OpTraceLogFileAggregator(loadStepId(), fileMgrs));
-			Loggers.MSG.debug("{}: operation traces log file aggregator initialized", loadStepId());
+		if (config.boolVal("output-metrics-trace-persist") && opTraceStepIds.add(outputStepId)) {
+			opTraceLogFileAggregators.add(new OpTraceLogFileAggregator(outputStepId, fileMgrs));
+			Loggers.MSG.debug("{}: operation traces log file aggregator initialized", outputStepId);
 		}
 		final var storageAuthFile = storageConfig.stringVal("auth-file");
 		if (storageAuthFile != null && !storageAuthFile.isEmpty()) {
@@ -3188,6 +3196,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		});
 		itemTimingMetricsOutputFileAggregators.clear();
+		timingMetricsStepIds.clear();
 		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
 			failureBudgetMetricsOutputDeferred = true;
 			return;
@@ -3611,6 +3620,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			opTraceLogFileAggregators.clear();
+			opTraceStepIds.clear();
 			for (final var storageAuthFileSlicer : storageAuthFileSlicers) {
 				try {
 					storageAuthFileSlicer.close();
@@ -3946,6 +3956,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 */
 	protected boolean marksSetContextStepIds() {
 		return true;
+	}
+
+	/**
+	 * The step id that every engine writes the operation traces and timing metrics of context
+	 * {@code ctxIndex} under, so the step collects each engine's file of that id once. The default is
+	 * the step's id: a linear, mixed or pipeline slice writes all its records under it. A step type
+	 * whose contexts run under their own ids, as the weighted step's do, returns the context's id.
+	 */
+	protected String contextOutputStepId(final int ctxIndex) {
+		return loadStepId();
 	}
 
 	/** Whether this step's one driver mixes operations by weight, which only the mixed step type does. */

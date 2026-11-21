@@ -58,6 +58,22 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 		}
 	}
 
+	/**
+	 * Each sub-load writes its operation traces and timing metrics under its context's id on every
+	 * engine: the id {@link #init} left in the context, or the step's for a context without one, which
+	 * the engine's merge then gives the step's.
+	 */
+	@Override
+	protected String contextOutputStepId(final int ctxIndex) {
+		String ctxStepId = null;
+		try {
+			ctxStepId = ctxConfigs.get(ctxIndex).stringVal("load-step-id");
+		} catch (final RuntimeException e) {
+			// No load.step section, or no string id there: the merge gives the context the step's.
+		}
+		return ctxStepId == null || ctxStepId.isEmpty() ? loadStepId() : ctxStepId;
+	}
+
 	@Override
 	protected WeightedLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
 		return new WeightedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);

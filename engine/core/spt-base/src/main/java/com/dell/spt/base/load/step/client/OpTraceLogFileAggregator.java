@@ -19,6 +19,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.NoSuchFileException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -85,7 +86,9 @@ public class OpTraceLogFileAggregator implements Closeable {
 																entry -> {
 																	final var fileMgr = entry.getKey();
 																	final var remoteIoTraceLogFileName = entry.getValue();
-																	transferToLocal(fileMgr, remoteIoTraceLogFileName, byteCounter);
+																	if (!transferToLocal(fileMgr, remoteIoTraceLogFileName, byteCounter)) {
+																		return;
+																	}
 																	try {
 																		fileMgr.deleteFile(remoteIoTraceLogFileName);
 																	} catch (final Exception e) {
@@ -130,7 +133,12 @@ public class OpTraceLogFileAggregator implements Closeable {
 		}
 	}
 
-	private static void transferToLocal(
+	/**
+	 * Copies the remote file into the local operation traces log. Returns {@code false} when the
+	 * remote file does not exist: the engine traced nothing under this step id, so there is nothing
+	 * to delete either.
+	 */
+	private static boolean transferToLocal(
 					final FileManager fileMgr,
 					final String remoteIoTraceLogFileName,
 					final LongAdder byteCounter) {
@@ -151,6 +159,12 @@ public class OpTraceLogFileAggregator implements Closeable {
 							BinarySizeFormat.formatFixedSize(transferredByteCount));
 		} catch (final RemoteException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to read the data from the remote file");
+		} catch (final NoSuchFileException absent) {
+			Loggers.MSG.debug(
+							"No operation trace file '{}' @ '{}': that engine traced no operations",
+							remoteIoTraceLogFileName,
+							fileMgr);
+			return false;
 		} catch (final IOException e) {
 			LogUtil.exception(Level.ERROR, e, "Unexpected I/O exception");
 		} finally {
@@ -160,6 +174,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 							remoteIoTraceLogFileName,
 							fileMgr);
 		}
+		return true;
 	}
 
 	@Override
