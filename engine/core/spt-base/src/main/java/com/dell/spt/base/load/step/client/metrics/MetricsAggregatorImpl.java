@@ -7,6 +7,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.concurrent.AsyncRunnableBase;
+import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -21,10 +22,32 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 	private final int count;
 
 	public MetricsAggregatorImpl(final String loadStepId, final List<LoadStep> stepSlices, final Config metricsConfig) {
+		this(loadStepId, stepSlices, metricsConfig, null);
+	}
+
+	/** The entry's record of the step slices it lost. A lost slice gets no further metrics fetch. */
+	public interface SliceLoss {
+
+		/** Whether the slice is lost, by any of the entry's calls to it; called before each fetch. */
+		boolean isLost(LoadStep slice);
+
+		/** Told of a fetch from the slice that failed in RMI; answers whether that lost the slice. */
+		boolean fetchFailed(LoadStep slice, RemoteException failure);
+	}
+
+	/**
+	 * @param sliceLoss the entry's record of its lost slices; null when no fetch failure loses a
+	 *     slice
+	 */
+	public MetricsAggregatorImpl(
+					final String loadStepId,
+					final List<LoadStep> stepSlices,
+					final Config metricsConfig,
+					final SliceLoss sliceLoss) {
 		this.loadStepId = loadStepId;
 		snapshotSuppliers = stepSlices
 						.stream()
-						.map(slice -> new MetricsSnapshotsSupplierTaskImpl(slice, metricsConfig))
+						.map(slice -> new MetricsSnapshotsSupplierTaskImpl(slice, metricsConfig, sliceLoss))
 						.collect(Collectors.toList())
 						.toArray(new MetricsSnapshotsSupplierTask[]{});
 		count = snapshotSuppliers.length;
