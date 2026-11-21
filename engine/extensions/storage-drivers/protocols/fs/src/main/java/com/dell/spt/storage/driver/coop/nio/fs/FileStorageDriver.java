@@ -404,7 +404,11 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void doClose()
 					throws IOException {
-
+		// Close the open channels but do not clear the maps: an I/O worker that outlived the stop
+		// (for example one blocked in a file open inside computeIfAbsent) holds its map slot, and
+		// clear() would wait on that slot for good. Iterating the values does not wait; the maps go
+		// with the driver. A late READ or UPDATE open closes its own channel when its operation ends;
+		// a late CREATE open keeps its channel open until the driver is collected.
 		srcOpenFiles
 						.values()
 						.stream()
@@ -417,7 +421,6 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 												LogUtil.exception(Level.WARN, e, "Failed to close the source file channel {}", channel);
 											}
 										});
-		srcOpenFiles.clear();
 
 		dstOpenFiles
 						.values()
@@ -431,7 +434,6 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 												LogUtil.exception(Level.WARN, e, "Failed to close the source file channel {}", channel);
 											}
 										});
-		dstOpenFiles.clear();
 
 		super.doClose();
 	}
