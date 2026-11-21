@@ -106,16 +106,21 @@ class RetryDelaySchedulerTest {
 
 	@Test
 	void anEmptyProducerContextLeavesNoKeyBehind() throws Exception {
+		final var saved = ThreadContext.getImmutableContext();
 		ThreadContext.clearMap();
-		final var changed = new CompletableFuture<Void>();
-		final var next = new CompletableFuture<String>();
-		runSoon(() -> {
-			ThreadContext.put(LOG_KEY, "left-by-a-task");
-			changed.complete(null);
-		});
-		changed.get(10, TimeUnit.SECONDS);
-		runSoon(() -> next.complete(ThreadContext.get(LOG_KEY)));
-		assertNull(next.get(10, TimeUnit.SECONDS), "a task from an empty context must see no key");
+		try {
+			final var changed = new CompletableFuture<Void>();
+			final var next = new CompletableFuture<String>();
+			runSoon(() -> {
+				ThreadContext.put(LOG_KEY, "left-by-a-task");
+				changed.complete(null);
+			});
+			changed.get(10, TimeUnit.SECONDS);
+			runSoon(() -> next.complete(ThreadContext.get(LOG_KEY)));
+			assertNull(next.get(10, TimeUnit.SECONDS), "a task from an empty context must see no key");
+		} finally {
+			ThreadContext.putAll(saved);
+		}
 	}
 
 	@Test

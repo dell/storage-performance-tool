@@ -83,7 +83,7 @@ class LoadStepContextRetryDelayTest {
 			step.context.close();
 		}
 		assertEquals(1, delayed.size(), "contexts that were started, stopped and closed must share one thread");
-		assertTrue(schedulerThreads().contains(delayed.iterator().next()), "the shared thread must still run");
+		assertEquals(List.of(delayed.iterator().next()), schedulerThreads(), "the shared thread must still run, alone");
 	}
 
 	@Test
