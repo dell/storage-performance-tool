@@ -106,9 +106,16 @@ public class OpTraceLogFileAggregatorTest {
 	/**
 	 * The WARN and ERROR messages about {@code token} (in the message or its cause) that the message
 	 * and error loggers received while {@code action} ran, each prefixed with its level. Other
-	 * messages, as from threads of other tests in this JVM, are left out.
+	 * messages, as from threads of other tests in this JVM, are left out. Both loggers let WARN
+	 * through meanwhile, whatever level an earlier test in this JVM left them at.
 	 */
 	private static List<String> warningsWhile(final String token, final Runnable action) throws InterruptedException {
+		try (var levels = LoggerLevels.atMost(Level.WARN, Loggers.MSG.getName(), Loggers.ERR.getName())) {
+			return capturedWhile(token, action);
+		}
+	}
+
+	private static List<String> capturedWhile(final String token, final Runnable action) throws InterruptedException {
 		final var context = LoggerContext.getContext(false);
 		final Logger messages = context.getLogger(Loggers.MSG.getName());
 		final Logger errors = context.getLogger(Loggers.ERR.getName());
@@ -152,7 +159,7 @@ public class OpTraceLogFileAggregatorTest {
 			}
 			final String message = event.getMessage().getFormattedMessage();
 			final Throwable thrown = event.getThrown();
-			if (message.contains(token) || thrown != null && String.valueOf(thrown).contains(token)) {
+			if (message.contains(token) || (thrown != null && String.valueOf(thrown).contains(token))) {
 				lines.add(event.getLevel() + " " + message);
 			}
 		}
