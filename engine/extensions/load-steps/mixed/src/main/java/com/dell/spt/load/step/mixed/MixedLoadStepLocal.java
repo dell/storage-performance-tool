@@ -136,6 +136,22 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		}
 	}
 
+	/**
+	 * Warns once, at the step's start on this engine, that the step does not apply its rate limit:
+	 * the mixed generator has no rate throttle, so the step runs unpaced. The rate is read from the
+	 * merged configuration, so with appended contexts it is the last context's value, as for every
+	 * other mixed setting. Only a log line; the step's load is unchanged.
+	 */
+	static void warnIfRateLimitSet(final String stepId, final double rate) {
+		if (rate > 0) {
+			Loggers.ERR.warn(
+							"{}: a mixed step does not apply load.op.limit.rate; the rate limit of {} operations per"
+											+ " second is ignored, and the step runs its operations without a rate limit",
+							stepId,
+							rate);
+		}
+	}
+
 	@Override
 	protected void init() {
 		try (final var pending = new ContextInitResources()) {
@@ -187,6 +203,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final Config dataInputConfig = dataConfig.configVal("input");
 		final Config dataLayerConfig = dataInputConfig.configVal("layer");
 		final int concurrencyLimit = storageConfig.intVal("driver-limit-concurrency");
+		warnIfRateLimitSet(stepId, loadConfig.configVal("op").configVal("limit").doubleVal("rate"));
 
 		final Object itemDataSizeRaw = mergedConfig.val("item-data-size");
 		final SizeInBytes itemDataSize = itemDataSizeRaw instanceof String
