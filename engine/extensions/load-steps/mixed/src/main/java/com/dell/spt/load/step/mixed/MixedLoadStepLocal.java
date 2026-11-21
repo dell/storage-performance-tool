@@ -203,7 +203,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final Config dataInputConfig = dataConfig.configVal("input");
 		final Config dataLayerConfig = dataInputConfig.configVal("layer");
 		final int concurrencyLimit = storageConfig.intVal("driver-limit-concurrency");
-		warnIfRateLimitSet(stepId, loadConfig.configVal("op").configVal("limit").doubleVal("rate"));
+		final double rateLimit = loadConfig.configVal("op").configVal("limit").doubleVal("rate");
 
 		final Object itemDataSizeRaw = mergedConfig.val("item-data-size");
 		final SizeInBytes itemDataSize = itemDataSizeRaw instanceof String
@@ -465,6 +465,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 		stepContexts.add(stepCtx);
 		pending.handedOver();
+		warnIfRateLimitSet(stepId, rateLimit);
 
 		// ── 15. Wire operation results output (for put-remaining routing) ──
 		stepCtx.operationsResultsOutput(new Output() {
