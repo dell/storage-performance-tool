@@ -2812,10 +2812,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/**
 	 * Whether the exit hook has stopped and closed this step, or is closing it: the JVM exits, and
-	 * the step is closed or has no slices left after its start. A step still in its initial state is not; one the exit closed before it started is treated as stopped.
+	 * the step is closed, is closing its slices, or has no slices left after its start. A step still in its initial state is not; one the exit closed before it started is treated as stopped.
 	 */
 	private boolean closedAtJvmExit(final int stepSliceCount) {
-		return JvmExit.begun() && (stopCloseDone || isClosed() || (0 == stepSliceCount && !isInitial()));
+		return JvmExit.begun()
+						&& (slicesClosing || stopCloseDone || isClosed() || (0 == stepSliceCount && !isInitial()));
 	}
 
 	private InterruptedException stoppedAtJvmExit() {
@@ -3829,7 +3830,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final int slicesStarted = startedSliceCount;
 			if (!durationMode || (durationSlicesClosed && terminalCause == null)) {
 				stepSlices.clear();
-				startedSliceCount = 0;
 				sliceLost = false;
 			}
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();

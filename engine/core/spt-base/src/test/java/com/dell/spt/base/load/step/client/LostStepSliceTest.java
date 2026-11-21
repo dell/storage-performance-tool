@@ -190,6 +190,7 @@ class LostStepSliceTest {
 	private final Map<String, List<AutoCloseable>> workerServices = new ConcurrentHashMap<>();
 	/** Optional per-node interceptor for {@code await} calls, used to pause polling deterministically. */
 	private final Map<String, AwaitHook> awaitHooks = new ConcurrentHashMap<>();
+	private final Map<String, Runnable> closeHooks = new ConcurrentHashMap<>();
 	private final List<String> addrs = new ArrayList<>();
 	private String stepId;
 	private String originalRmiHostname;
@@ -1120,6 +1121,92 @@ class LostStepSliceTest {
 		}
 	}
 
+	@Test
+	void anExitHookCloseInProgressDuringAwaitRecordsNoLostSlice() throws Exception {
+		final String first = addrs.get(0);
+		final String second = addrs.get(1);
+		config.val("load-op-limit-count", 10_000L);
+		config.val("load-op-limit-rate", 10.0);
+		final CountDownLatch secondAwaitEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSecondAwait = new CountDownLatch(1);
+		final CountDownLatch awaitFailed = new CountDownLatch(1);
+		final CountDownLatch closeEntered = new CountDownLatch(1);
+		final CountDownLatch releaseClose = new CountDownLatch(1);
+		final AtomicInteger awaitCount = new AtomicInteger();
+		final AtomicReference<Throwable> observedAwaitFailure = new AtomicReference<>();
+		awaitHooks.put(first, new AwaitHook() {
+			@Override
+			public void beforeAwait() throws InterruptedException {
+				if (awaitCount.incrementAndGet() >= 2) {
+					secondAwaitEntered.countDown();
+					assertTrue(releaseSecondAwait.await(40, TimeUnit.SECONDS), "the test released the await poll");
+				}
+			}
+
+			@Override
+			public void onFailure(final Throwable cause) {
+				observedAwaitFailure.compareAndSet(null, cause);
+				awaitFailed.countDown();
+			}
+		});
+		closeHooks.put(second, () -> {
+			closeEntered.countDown();
+			try {
+				releaseClose.await(40, TimeUnit.SECONDS);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		final LinearLoadStepClient client = newClient();
+		final CompletableFuture<Boolean> awaited = new CompletableFuture<>();
+		final CompletableFuture<String> closed = new CompletableFuture<>();
+		try {
+			try (MockedStatic<LoadStepSliceUtil> util = recordingSlices()) {
+				client.start();
+			}
+			Thread.ofPlatform().name("scenario").daemon(true).start(() -> {
+				try {
+					awaited.complete(client.await(1, TimeUnit.MINUTES));
+				} catch (final Throwable e) {
+					awaited.completeExceptionally(e);
+				}
+			});
+			assertTrue(secondAwaitEntered.await(15, TimeUnit.SECONDS), "the scenario thread polled the first worker's slice");
+			JvmExit.markBegun();
+			Thread.ofPlatform().name("exit-hook").daemon(true).start(() -> {
+				try {
+					client.close();
+					closed.complete("closed without a failure");
+				} catch (final Throwable e) {
+					closed.complete("close failed: " + e);
+				}
+			});
+			assertTrue(closeEntered.await(30, TimeUnit.SECONDS), "the close reached the second worker's slice");
+			// Here the first worker's slice is closed, and the close has not yet cleared the slices.
+			releaseSecondAwait.countDown();
+			assertTrue(awaitFailed.await(15, TimeUnit.SECONDS), "the await poll of the closed slice failed");
+			Thread.sleep(500);
+			releaseClose.countDown();
+			final String closeOutcome = closed.get(40, TimeUnit.SECONDS);
+			String awaitOutcome;
+			try {
+				awaitOutcome = "returned " + awaited.get(30, TimeUnit.SECONDS);
+			} catch (final ExecutionException e) {
+				awaitOutcome = "threw " + e.getCause();
+			}
+			LogUtil.flushAll();
+			Thread.sleep(200);
+			System.out.println("PROBE-RESULT lostNodes=" + lostNodes() + " | close: " + closeOutcome + " | await: " + awaitOutcome
+							+ " | await poll failure: " + observedAwaitFailure.get());
+			assertEquals(List.of(), lostNodes(), "the exit hook's close in progress must not record a lost slice");
+			assertEquals("closed without a failure", closeOutcome);
+		} finally {
+			releaseSecondAwait.countDown();
+			releaseClose.countDown();
+			JvmExitTestSupport.reset();
+		}
+	}
+
 	private RunTerminalException runFailing() throws Exception {
 		final LinearLoadStepClient client = newClient();
 		final RunTerminalException failure;
@@ -1378,6 +1465,12 @@ class LostStepSliceTest {
 				final AwaitHook hook = awaitHooks.get(addr);
 				if (hook != null) {
 					hook.beforeAwait();
+				}
+			}
+			if ("close".equals(name)) {
+				final Runnable closeHook = closeHooks.get(addr);
+				if (closeHook != null) {
+					closeHook.run();
 				}
 			}
 			final RemoteException fault = sliceFaults.get(name);
