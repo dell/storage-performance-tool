@@ -1,6 +1,7 @@
 package com.dell.spt.load.step.weighted;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConfigFormat;
@@ -62,6 +63,16 @@ class WeightedContextOutputStepIdTest {
 		assertEquals("configured", step.loadStepId());
 		assertEquals("wA", step.contextOutputStepId(0));
 		assertEquals("configured", step.contextOutputStepId(1));
+	}
+
+	/** Only a context without an id falls back to the step's: an index that names no context is a bug. */
+	@Test
+	void anIndexThatNamesNoContextFails() throws Exception {
+		final WeightedLoadStepClient step = prototype(false).append(withId("wA")).append(withId("wB"));
+		step.init();
+
+		assertThrows(IndexOutOfBoundsException.class, () -> step.contextOutputStepId(2));
+		assertThrows(IndexOutOfBoundsException.class, () -> step.contextOutputStepId(-1));
 	}
 
 	private static Map<String, Object> context() {

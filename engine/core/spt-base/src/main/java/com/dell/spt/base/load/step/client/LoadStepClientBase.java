@@ -3963,6 +3963,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * {@code ctxIndex} under, so the step collects each engine's file of that id once. The default is
 	 * the step's id: a linear, mixed or pipeline slice writes all its records under it. A step type
 	 * whose contexts run under their own ids, as the weighted step's do, returns the context's id.
+	 * Called once per context at the step's start, after {@link #init()}; the step's other collected
+	 * files are collected under {@link #loadStepId()} whatever this returns.
 	 */
 	protected String contextOutputStepId(final int ctxIndex) {
 		return loadStepId();

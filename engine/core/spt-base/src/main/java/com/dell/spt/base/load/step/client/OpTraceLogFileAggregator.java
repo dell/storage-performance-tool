@@ -135,8 +135,9 @@ public class OpTraceLogFileAggregator implements Closeable {
 
 	/**
 	 * Copies the remote file into the local operation traces log. Returns {@code false} when the
-	 * remote file does not exist: the engine traced nothing under this step id, so there is nothing
-	 * to delete either.
+	 * remote file does not exist before anything was copied: the engine traced nothing under this
+	 * step id, so there is nothing to delete either. A file that goes away after a part was copied
+	 * leaves an incomplete trace, and is an error.
 	 */
 	private static boolean transferToLocal(
 					final FileManager fileMgr,
@@ -160,6 +161,10 @@ public class OpTraceLogFileAggregator implements Closeable {
 		} catch (final RemoteException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to read the data from the remote file");
 		} catch (final NoSuchFileException absent) {
+			if (transferredByteCount > 0) {
+				LogUtil.exception(Level.ERROR, absent, "Unexpected I/O exception");
+				return true;
+			}
 			Loggers.MSG.debug(
 							"No operation trace file '{}' @ '{}': that engine traced no operations",
 							remoteIoTraceLogFileName,

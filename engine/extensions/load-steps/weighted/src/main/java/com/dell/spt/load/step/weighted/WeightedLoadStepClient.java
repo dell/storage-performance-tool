@@ -68,8 +68,9 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 		String ctxStepId = null;
 		try {
 			ctxStepId = ctxConfigs.get(ctxIndex).stringVal("load-step-id");
-		} catch (final RuntimeException e) {
-			// No load.step section, or no string id there: the merge gives the context the step's.
+		} catch (final NoSuchElementException | IllegalArgumentException | ClassCastException e) {
+			// No load.step section (NoSuchElementException, InvalidValuePathException), or no string id
+			// there (ClassCastException): the merge gives the context the step's.
 		}
 		return ctxStepId == null || ctxStepId.isEmpty() ? loadStepId() : ctxStepId;
 	}

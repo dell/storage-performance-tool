@@ -122,6 +122,33 @@ class DistributedOpTraceCollectionTest {
 		}
 	}
 
+	/** A step whose contexts run under their own ids fetches each id's timing metrics file once. */
+	@Test
+	void contextsWithTheirOwnIdsCollectOneTimingFilePerId() throws Exception {
+		final String idA = stepId + "-wA";
+		final FileManagerService worker = workerFiles(Set.of(idA, stepId));
+		final Config config = config();
+		config.val("output-metrics-trace-persist", false);
+		config.val("output-metrics-timing-persist", true);
+		final List<Config> contexts = List.of(baseConfig(), baseConfig());
+		contexts.forEach(context -> context.val("output-metrics-timing-persist", true));
+		try {
+			run(config, contexts, List.of(idA, stepId), worker);
+
+			for (final String id : List.of(idA, stepId)) {
+				verify(worker, times(2)).readFromFile(eq(timingFile(id)), anyLong());
+				verify(worker, times(1)).deleteFile(timingFile(id));
+				assertEquals(1, localTimingCopies(id).size(), localTimingCopies(id).toString());
+			}
+		} finally {
+			for (final String id : List.of(idA, stepId)) {
+				for (final Path copy : localTimingCopies(id)) {
+					Files.deleteIfExists(copy);
+				}
+			}
+		}
+	}
+
 	/** A worker that traced nothing has no file: nothing to delete, and nothing to warn about. */
 	@Test
 	void aWorkerThatTracedNothingIsNotAskedToDeleteItsTraceFile() throws Exception {
@@ -216,12 +243,17 @@ class DistributedOpTraceCollectionTest {
 
 	/** The local copies the entry fetched of the worker's timing metrics file of this step. */
 	private List<Path> localTimingCopies() throws IOException {
+		return localTimingCopies(stepId);
+	}
+
+	/** The local copies the entry fetched of the worker's timing metrics file of step {@code id}. */
+	private static List<Path> localTimingCopies(final String id) throws IOException {
 		final Path dir = Path.of(System.getProperty("java.io.tmpdir"), "spt");
 		if (!Files.isDirectory(dir)) {
 			return List.of();
 		}
 		try (Stream<Path> files = Files.list(dir)) {
-			return files.filter(file -> file.getFileName().toString().startsWith("timingMetrics_" + stepId + "_")).toList();
+			return files.filter(file -> file.getFileName().toString().startsWith("timingMetrics_" + id + "_")).toList();
 		}
 	}
 
