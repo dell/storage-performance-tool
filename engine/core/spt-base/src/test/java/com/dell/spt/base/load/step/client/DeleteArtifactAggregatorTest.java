@@ -15,6 +15,7 @@ import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleSnapshot;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
@@ -67,6 +68,35 @@ class DeleteArtifactAggregatorTest {
 			assertFalse(Files.readString(DeleteArtifactAggregator.nodeSourcePath(output.resolve(artifact), 0)).isBlank());
 			assertFalse(Files.readString(DeleteArtifactAggregator.nodeSourcePath(output.resolve(artifact), 1)).isBlank());
 		}
+	}
+
+	@Test
+	void aStoppedStartFetchesTheStartedContributorsOnlyAndPublishesNothingWithoutOne() throws Exception {
+		final Path output = temp.resolve("log/step");
+		Files.createDirectories(output);
+		final FileManager local = mock(FileManager.class);
+		final FileManager remote = mock(FileManager.class);
+		final NodeArtifacts localArtifacts = nodeArtifacts(output, 0, "local");
+		final NodeArtifacts remoteArtifacts = nodeArtifacts(temp.resolve("remote"), 1, "worker-a");
+		register(local, localArtifacts);
+		register(remote, remoteArtifacts);
+		final var aggregator = new DeleteArtifactAggregator(
+						"step", List.of(local, remote), List.of("local", "worker-a"), selection(), completion());
+
+		aggregator.closeAfterStoppedStart(0);
+		try (var files = Files.list(output)) {
+			assertEquals(List.of(), files.toList(), "a step whose slices never started published DELETE evidence");
+		}
+		assertThrows(IllegalArgumentException.class, () -> aggregator.closeAfterStoppedStart(3));
+
+		// The other node's slice never started, so nothing is fetched from it; evidence that does not
+		// cover the whole selection is still refused, never published as complete.
+		write(localArtifacts);
+		final var incomplete = assertThrows(IntegrityTerminalException.class, () -> aggregator.closeAfterStoppedStart(1));
+		assertEquals("DELETE frozen selection count does not match terminal evidence", incomplete.getMessage());
+		assertFalse(Files.exists(DeleteArtifactAggregator.nodeSourcePath(
+						output.resolve(DeleteArtifacts.METRICS_FILE_NAME), 1)));
+		assertFalse(Files.exists(output.resolve(DeleteArtifacts.COMPLETION_FILE_NAME)));
 	}
 
 	@Test

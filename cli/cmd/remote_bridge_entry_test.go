@@ -39,7 +39,7 @@ func TestRunCmdStartsABridgeRemoteEntryThroughTheOrchestrator(t *testing.T) {
 				startMultiHostHeadlessRunFunc = previousRemote
 			})
 			var localCalls, remoteCalls int
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }

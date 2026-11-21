@@ -265,7 +265,7 @@ func TestReplayCommandExitsOneWhenAScenarioStepHasNoResults(t *testing.T) {
 		startReplayAutoResultsMonitor = origStartAutoResults
 		shouldReplayRunHeadless = origShouldHeadless
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
@@ -317,7 +317,7 @@ func TestReplayCommandSharesPositiveRunIdentityWithLaunchAndCompletionMonitor(t 
 		shouldReplayRunHeadless = origShouldHeadless
 		newReplayRunID = origNewRunID
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
@@ -943,7 +943,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 				shouldReplayRunHeadless = origShouldHeadless
 				requestShutdownAllFunc = origShutdown
 			})
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
@@ -1160,7 +1160,7 @@ func TestReplayCommandReleasesLaunchersOnAuthoritativeWorkloadTerminal(t *testin
 				newResultsFetcherFunc = origFetcher
 				generateRunSummaryFunc = origSummary
 			})
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }

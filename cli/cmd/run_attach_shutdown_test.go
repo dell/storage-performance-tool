@@ -247,7 +247,7 @@ func TestReplayCommandAttachShutdownReachesEntryOnly(t *testing.T) {
 				replayLocalEnginePlan = origLocalPlan
 				replayDistributedEnginePlan = origDistributedPlan
 			})
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }

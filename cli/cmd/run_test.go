@@ -135,7 +135,7 @@ func TestRunCmdSingleRemoteHostUsesOrchestratorAndSkipsControllerPortCheck(t *te
 
 	previousPortResolver := resolvePortConflictFunc
 	controllerPortChecks := 0
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		controllerPortChecks++
 		return nil, errors.New("controller port preflight must not run for a remote host")
 	}
@@ -234,7 +234,7 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			var portCalls, connectCalls, prepareCalls, localCalls, multiCalls, autoResultsCalls int
 			var launchedParams scenario.Params
 			var autoResultsContext context.Context
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				portCalls++
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
@@ -329,7 +329,7 @@ func TestRunCmdDeleteFailedTrackerReturnsWorkloadFailureEveryTopology(t *testing
 		startAutoResultsFunc = previousAutoResults
 	})
 	validateRunWorkloadTypeFunc = func(string) error { return nil }
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
@@ -418,7 +418,7 @@ func TestRunCmdOrdinaryLocalJoinsSessionFinalizer(t *testing.T) {
 		startLocalHeadlessRunFunc = previousLocal
 		startAutoResultsFunc = previousAutoResults
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 
@@ -513,7 +513,7 @@ func TestRunCmdZeroWriteReturnsStructuredProducerFailure(t *testing.T) {
 		startLocalHeadlessRunFunc = previousLocal
 		startAutoResultsFunc = previousAutoResults
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
@@ -615,7 +615,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						startMultiHostTUIRunFunc = originalRemoteTUI
 						startAutoResultsFunc = originalAutoResults
 					})
-					resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+					resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 						return &portcheck.ResolutionResult{Success: true}, nil
 					}
 					connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }

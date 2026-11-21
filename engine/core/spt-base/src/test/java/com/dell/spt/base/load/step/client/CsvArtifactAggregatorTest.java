@@ -36,6 +36,22 @@ class CsvArtifactAggregatorTest {
 	Path tempDir;
 
 	@Test
+	void aStoppedStartWithNoSliceStartedPublishesNoManifestAndAStartedSliceStillNeedsItsSource() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		final var aggregator = new CsvArtifactAggregator(
+						"create-step", List.of(FileManager.INSTANCE), List.of(), manifest.toString(), 99, 0);
+
+		aggregator.closeAfterStoppedStart(0, 0);
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+		assertFalse(Files.exists(CsvArtifactAggregator.nodeSourcePath(manifest, 0)));
+		assertThrows(IllegalArgumentException.class, () -> aggregator.closeAfterStoppedStart(0, 2));
+
+		final var missing = assertThrows(IntegrityTerminalException.class, () -> aggregator.closeAfterStoppedStart(0, 1));
+		assertTrue(missing.getMessage().contains("entry-node manifest source is missing"), missing.getMessage());
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
 	void publishesSingleNodeSourceAndCompletionWithoutLosingCsvRecords() throws Exception {
 		final Path manifest = tempDir.resolve("written.csv");
 		Files.writeString(

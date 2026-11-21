@@ -106,7 +106,7 @@ Partial configurations may omit `run` or provide only `run.id`. `run.version` is
 after the submitted configuration is merged with local defaults. A submitted `run.version` is ignored with a warning and cannot
 redefine the executing engine build.
 
-If successful, the response will contain the ETag header with the decimal timestamp (Unix epoch time in milliseconds):
+If successful, the response will contain the ETag header with the run id, a decimal number (the run's start time in Unix epoch milliseconds):
 ```bash
 ...
 < HTTP/1.1 202 Accepted
@@ -130,7 +130,7 @@ curl -v -X HEAD http://localhost:9999/run
 ...
 ```
 
-The `If-Match` header with the decimal run id value may be used also:
+The `GET` and `DELETE` requests require the `If-Match` header with the decimal run id value:
 
 Checking the run state:
 ```bash
@@ -150,6 +150,9 @@ curl -v -X DELETE -H "If-Match: 1543257350274" http://localhost:9999/run
 < Date: Mon, 26 Nov 2018 18:41:26 GMT
 < Content-Length: 0
 ```
+
+`DELETE` answers 200 when the stop was requested, 204 when no run is active, and 404 when the active run has another id.
+Without a valid `If-Match` value it answers 400.
 
 A busy node answers `POST /run` with `409 Conflict`, and the request changes nothing: not the run in progress, its
 configuration or `/status`. A node is busy while a run is in progress or finishing its cleanup, or while a worker slice

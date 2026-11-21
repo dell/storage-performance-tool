@@ -97,7 +97,7 @@ func TestRunCmdWriteFailedTrackerReturnsWorkloadFailureEveryTopology(t *testing.
 		startAutoResultsFunc = previousAutoResults
 	})
 	validateRunWorkloadTypeFunc = func(string) error { return nil }
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {

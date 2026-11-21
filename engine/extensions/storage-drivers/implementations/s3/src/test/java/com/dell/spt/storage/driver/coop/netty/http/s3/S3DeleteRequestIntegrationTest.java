@@ -26,7 +26,9 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilderImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
@@ -40,6 +42,8 @@ import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.TerminalStepEntry;
+import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -49,6 +53,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.netty.handler.codec.http.HttpRequest;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
@@ -58,6 +63,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -164,6 +170,59 @@ final class S3DeleteRequestIntegrationTest {
 		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());
 		assertTrue(heads.stream().allMatch(
 						request -> request.authorization().startsWith(S3Api.AUTH_V4_PREFIX)));
+	}
+
+	private static DeleteTarget targetIn(final String bucket, final String key) {
+		return new DeleteTarget(new IntegrityManifestDataItem(bucket, key, 0, null));
+	}
+
+	private static DeleteRequestOperation operationIn(final String bucket, final DeleteTarget... targets) {
+		return new DeleteRequestOperationImpl(
+						0, new DeleteRequest(bucket, S3DeleteRequestTestFixture.CREDENTIAL, List.of(targets)));
+	}
+
+	@Test
+	void manifestBucketEndingInASlashAddressesOneObjectWithOneSlash() throws Exception {
+		try (final var driver = newDriver()) {
+			final DeleteRequestOperation result = execute(
+							driver, operationIn("r2ts/", targetIn("r2ts/", "k1")));
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, result.deleteResult().outcome());
+			assertEquals(DeleteVerificationProbe.Presence.PRESENT, driver.presence(targetIn("r2ts/", "k1")));
+		}
+		assertEquals("/r2ts/k1", onlyDeleteRequest().rawPath());
+		assertEquals(
+						List.of("/r2ts/k1"),
+						requests.stream().filter(S3DeleteRequestIntegrationTest::isObjectHead)
+										.map(CapturedRequest::rawPath).toList());
+	}
+
+	@Test
+	void verificationHeadOfABucketEndingInASlashSignsWithThatBucketsCredential() throws Exception {
+		final Field credentials = StorageDriverBase.class.getDeclaredField("pathToCredMap");
+		credentials.setAccessible(true);
+		try (final var driver = newDriver()) {
+			driver.start();
+			@SuppressWarnings("unchecked")
+			final Map<String, Credential> byBucket = (Map<String, Credential>) credentials.get(driver);
+			byBucket.put("/r2ts", Credential.getInstance("bucket-user", "bucket-secret"));
+			driver.presence(targetIn("r2ts/", "k1"));
+		}
+		final CapturedRequest head = requests.stream()
+						.filter(S3DeleteRequestIntegrationTest::isObjectHead).findFirst().orElseThrow();
+		assertTrue(head.authorization().contains("Credential=bucket-user/"), head.authorization());
+	}
+
+	@Test
+	void manifestBucketWithoutATrailingSlashAddressesTheSameObject() throws Exception {
+		try (final var driver = newDriver()) {
+			execute(driver, operationIn("r2ts", targetIn("r2ts", "k1")));
+			driver.presence(targetIn("r2ts", "k1"));
+		}
+		assertEquals("/r2ts/k1", onlyDeleteRequest().rawPath());
+		assertEquals(
+						List.of("/r2ts/k1"),
+						requests.stream().filter(S3DeleteRequestIntegrationTest::isObjectHead)
+										.map(CapturedRequest::rawPath).toList());
 	}
 
 	/**

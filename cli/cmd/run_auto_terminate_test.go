@@ -516,7 +516,7 @@ func TestReplayCommandAutoTerminateStopsTheRun(t *testing.T) {
 				t.Cleanup(installReplayEngineInfoSeams(t))
 				origEvaluate := evaluateEngineIdentityGate
 				t.Cleanup(func() { evaluateEngineIdentityGate = origEvaluate })
-				resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 					return &portcheck.ResolutionResult{Success: true}, nil
 				}
 				connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
