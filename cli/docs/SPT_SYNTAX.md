@@ -89,7 +89,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--provision-target-bucket` | | `true` | Create a missing target bucket before the phase that writes the run's objects. `false` still checks that every target bucket exists and is accessible. Never clears or deletes a bucket. See [Target Buckets](TARGET_BUCKETS.md) |
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
-| `--bucket` | `-b` | *(required unless a list names the buckets)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
+| `--bucket` | `-b` | *(required unless a list names the buckets)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row, recommended for a saved items file; omit it to permit multiple buckets |
 | `--bucket-count` | | `1` | Spread the run's new objects over `N` buckets `<bucket>-0` ... `<bucket>-<N-1>` (1 to 1000). Existing objects keep the bucket their items file records. For `write`, `write-verify`, seeded `read`, seeded `delete` (with `--delete-batch-size=1`) and `mixed`. See [Target Buckets](TARGET_BUCKETS.md#bucket-sets) |
 | `--buckets` | | from `S3_BUCKETS` | Spread the run's new objects over these buckets, comma-separated or repeated (1 to 1000), used as written and in this order. Missing ones are created unless `--provision-target-bucket=false`. Excludes `--bucket`, `--bucket-count` (even `1`) and `--buckets-file`. One name is the same as `--bucket NAME`; two or more allow the workloads of `--bucket-count`. See [Bucket lists](TARGET_BUCKETS.md#bucket-lists) |
 | `--buckets-file` | | | Read the `--buckets` names from a regular file, one per line; blank lines and lines starting with `#` are ignored. Same rules and exclusions as `--buckets` |
@@ -130,7 +130,7 @@ objects have been removed; those entries therefore no longer refer to readable o
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
 | `--object-data-dedupable` | | `true` | Whether generated data remains dedupe-friendly. Set `false` to stamp every 4KB with a 16-byte object-id + offset header that practically eliminates inline deduplication. Incompatible with file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`) |
 | `--save-items` | | `false` | Save `items.csv` listing created objects (`write` only) |
-| `--items-file` | | `""` | Path to an item manifest for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Omit it for owned seeded DELETE; mutually exclusive with `--delete-existing` |
+| `--items-file` | | `""` | Path to an item manifest for `read`, a canonical manifest for `read-verify`, or, for explicit-manifest DELETE, a canonical manifest or the `items.csv` an S3 `write --save-items` saved (current-key deletes; see [S3 DELETE](S3_DELETE.md#saved-s3-items-file)). Omit it for owned seeded DELETE; mutually exclusive with `--delete-existing` |
 | `--delete-batch-size` | | `100` | Standalone DELETE canonical identities per logical request (`1` through `1000`); multi-bucket manifests require `1` |
 | `--delete-existing` | | `false` | Destructive DELETE opt-in: discover and freeze current keys under the exact `--bucket` and explicitly supplied `--prefix` before timing |
 | `--allow-empty-prefix` | | `false` | Second destructive opt-in required with `--delete-existing --prefix=''` to select an entire bucket; a prompt cannot replace it |
@@ -217,6 +217,16 @@ remain one field; `size` is a non-negative integer and `version_id` may be empty
 version. Before orchestration, the CLI rejects malformed rows, an empty selection, identical
 identities with conflicting sizes, and any row that violates an optional `--bucket` assertion.
 Identical canonical identities with the same size collapse to one record.
+
+A file without that header is read as the `items.csv` an S3 `write --save-items` saved: each row
+`/<bucket>/<key>,<hex offset>,<size>,<layer>/<mask>` becomes the current-key row
+`<bucket>,<key>,<size>,`, and the rest of this section applies unchanged. It deletes current keys
+only, so a versioned bucket keeps its data versions and gets delete markers. A row that can't be
+mapped safely to one object, such as a name without a leading `/`, a `~` anywhere in the key, a `%`
+or `+` anywhere in the name or a comma in the key, refuses the whole file with its line number. Pass
+`--bucket` (the first path segment of the saved names) as a check, and
+`--validate-inventory` to check that the rows name real objects; `--verify` does not catch wrong
+keys. See [S3 DELETE](S3_DELETE.md#saved-s3-items-file).
 
 The private staged manifest is sorted by canonical identity, then `--object-count` selects the
 global prefix (`0` means all). The CLI records source, unique, and selected counts plus the staged
@@ -1294,7 +1304,7 @@ spt run write \
 Notes:
 - Workers must already serve the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - `spt` still launches and manages the entry node; worker containers remain untouched during shutdown. At the end of a run, normal or interrupted, `--shutdown-on-complete` asks only the entry node to shut down, which ends its run, so the attached workers keep running and the next run can attach to them again. Whoever started a worker stops it.
-- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step keeps running for a while: only a count limit stops a worker's step on its own. Otherwise the worker stops and closes it 120 seconds after the entry's last call, and a run whose entry loses its step on a worker fails, since that worker's last operations are missing from the totals. `POST /shutdown`, the end of the worker process, or `DELETE /run` on the worker naming that run stop it sooner, and are the only way to stop a step whose entry died before its first call after starting that step. After a failed or interrupted attach run, check the workers and restart them before the next run.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step keeps running for a while: only a count limit stops a worker's step on its own. Otherwise the worker stops and closes it 120 seconds after the entry's last call, and a run whose entry loses its step on a worker fails, since the totals can leave out all of that worker's operations. `POST /shutdown`, the end of the worker process, or `DELETE /run` on the worker naming that run stop it sooner, and are the only way to stop a step whose entry died before its first call after starting that step. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - `--items-file` and the other item files are copied only to the entry node, not to the attached workers.
 - `spt` does not check or pull the engine image on attached worker hosts; the engine identity check still compares the build of each attached worker that takes part in the run.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
