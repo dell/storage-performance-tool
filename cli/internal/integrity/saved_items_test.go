@@ -14,6 +14,21 @@ func savedItemRowMessage(record string) string {
 		"Give each object as <bucket>,<key>,<size>,<version_id or empty>"
 }
 
+// deleteSavedItemRowMessage is savedItemRowMessage as DELETE gives it, with its advice that
+// removing the header line works.
+func deleteSavedItemRowMessage(record string) string {
+	return savedItemRowMessage(record) + ", or remove the header line: delete --items-file reads a " +
+		"saved S3 items file as it is saved, without a header"
+}
+
+// savedItemRowMessageOn is the saved-row refusal on route, "delete" or "read-verify".
+func savedItemRowMessageOn(route, record string) string {
+	if route == "delete" {
+		return deleteSavedItemRowMessage(record)
+	}
+	return savedItemRowMessage(record)
+}
+
 func TestIsSavedItemFields(t *testing.T) {
 	tests := []struct {
 		name      string
