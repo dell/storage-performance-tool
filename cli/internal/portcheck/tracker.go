@@ -43,8 +43,12 @@ func (t *RunTracker) SetExpectedRunID(runID int64) {
 func NewRunTracker(baseURL string) *RunTracker {
 	api := NewSptAPIClient(baseURL, DefaultHTTPTimeout)
 	return &RunTracker{
-		Client:              api,
-		HTTPClient:          &http.Client{Timeout: DefaultHTTPTimeout},
+		Client: api,
+		HTTPClient: &http.Client{
+			Timeout:       DefaultHTTPTimeout,
+			Transport:     redirectsAsAnswers(nil),
+			CheckRedirect: noRedirects,
+		},
 		PollInterval:        constants.AutoResultsTrackerPollInterval,
 		IdleGrace:           constants.AutoResultsTrackerIdleGrace,
 		StartupTimeout:      constants.AutoResultsStartupTimeout,

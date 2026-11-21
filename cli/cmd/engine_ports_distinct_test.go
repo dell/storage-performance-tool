@@ -54,7 +54,7 @@ func TestRunCmdRefusesEqualAPIAndRegistryPortsOnEveryRoute(t *testing.T) {
 				})
 				var calls int
 				errReached := errors.New("the run reached its route")
-				resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 					calls++
 					return nil, errReached
 				}

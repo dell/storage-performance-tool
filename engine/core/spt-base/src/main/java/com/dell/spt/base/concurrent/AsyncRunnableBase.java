@@ -147,15 +147,20 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	@Override
 	public void close() throws IOException {
 		stop();
+		final boolean closedHere;
 		stateLock.lock();
 		try {
-			if (State.CLOSED != state) {
+			closedHere = State.CLOSED != state;
+			if (closedHere) {
 				doClose();
 				state = State.CLOSED;
 				stateChanged.signalAll();
 			}
 		} finally {
 			stateLock.unlock();
+		}
+		if (closedHere) {
+			afterCloseTransition();
 		}
 	}
 
@@ -176,4 +181,10 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	protected void doStop() {}
 
 	protected void doClose() throws IOException {}
+
+	/**
+	 * Called once, by the close that closed this, after the state became closed and outside the
+	 * state lock. What it throws is that close's failure; this stays closed.
+	 */
+	protected void afterCloseTransition() throws IOException {}
 }

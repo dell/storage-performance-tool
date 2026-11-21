@@ -14,6 +14,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/buildinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/terminal"
 	updater "github.com/dell/storage-performance-tool/cli/internal/update"
 	"github.com/spf13/cobra"
 )
@@ -301,16 +302,10 @@ func confirmUpdateIfNeeded(cmd *cobra.Command, opts *updateOptions, latest, targ
 	return nil
 }
 
+// isTerminalInput reports whether r is a terminal, which /dev/null is not.
 func isTerminalInput(r io.Reader) bool {
 	f, ok := r.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return ok && terminal.IsTerminal(f.Fd())
 }
 
 func updateUserError(cmd *cobra.Command, format string, args ...any) error {

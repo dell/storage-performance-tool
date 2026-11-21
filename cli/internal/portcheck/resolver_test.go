@@ -23,7 +23,7 @@ import (
 
 func TestNewConflictResolver(t *testing.T) {
 	t.Run("create resolver successfully", func(t *testing.T) {
-		resolver, err := NewConflictResolver(constants.SptAPIPort, false)
+		resolver, err := NewConflictResolver(constants.SptAPIPort, ResolveOptions{})
 		if err != nil {
 			t.Errorf("NewConflictResolver() error = %v, want nil", err)
 		}
@@ -41,7 +41,7 @@ func TestNewConflictResolver(t *testing.T) {
 	})
 
 	t.Run("create resolver with force mode", func(t *testing.T) {
-		resolver, err := NewConflictResolver("8080", true)
+		resolver, err := NewConflictResolver("8080", ResolveOptions{Force: true})
 		if err != nil {
 			t.Errorf("NewConflictResolver() error = %v, want nil", err)
 		}
@@ -54,7 +54,7 @@ func TestNewConflictResolver(t *testing.T) {
 }
 
 func TestConflictResolver_CheckAndResolveConflicts_NoConflict(t *testing.T) {
-	resolver, err := NewConflictResolver("0", false) // Port 0 should be available
+	resolver, err := NewConflictResolver("0", ResolveOptions{}) // Port 0 should be available
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -89,7 +89,7 @@ func TestConflictResolver_CheckAndResolveConflicts_WithConflict(t *testing.T) {
 		t.Fatalf("Failed to extract port: %v", err)
 	}
 
-	resolver, err := NewConflictResolver(port, true) // Use force mode to avoid interactive prompts
+	resolver, err := NewConflictResolver(port, ResolveOptions{Force: true}) // Use force mode to avoid interactive prompts
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -140,7 +140,7 @@ func TestConflictResolver_ForceResolution(t *testing.T) {
 		t.Fatalf("Failed to extract port: %v", err)
 	}
 
-	resolver, err := NewConflictResolver(port, true) // Force mode
+	resolver, err := NewConflictResolver(port, ResolveOptions{Force: true}) // Force mode
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -204,7 +204,7 @@ func TestConflictResolver_ExecuteGracefulStop(t *testing.T) {
 			t.Fatalf("Failed to extract port: %v", err)
 		}
 
-		resolver, err := NewConflictResolver(port, false)
+		resolver, err := NewConflictResolver(port, ResolveOptions{})
 		if err != nil {
 			t.Fatalf("NewConflictResolver() error = %v", err)
 		}
@@ -213,9 +213,10 @@ func TestConflictResolver_ExecuteGracefulStop(t *testing.T) {
 		resolver.clock = NewFakeClock()
 
 		serviceInfo := &ServiceInfo{
-			IsListening: true,
-			IsSpt:       true,
-			Status:      &SptStatus{RunID: "test-123", State: "RUNNING"},
+			IsListening:  true,
+			IsSpt:        true,
+			APIConfirmed: true,
+			Status:       &SptStatus{RunID: "123", State: "RUNNING"},
 		}
 
 		ctx := context.Background()
@@ -230,7 +231,7 @@ func TestConflictResolver_ExecuteGracefulStop(t *testing.T) {
 	})
 
 	t.Run("graceful stop non-spt service", func(t *testing.T) {
-		resolver, err := NewConflictResolver(constants.SptAPIPort, false)
+		resolver, err := NewConflictResolver(constants.SptAPIPort, ResolveOptions{})
 		if err != nil {
 			t.Fatalf("NewConflictResolver() error = %v", err)
 		}
@@ -256,7 +257,7 @@ func TestConflictResolver_ExecuteGracefulStop(t *testing.T) {
 
 func TestConflictResolver_ExecuteRetry(t *testing.T) {
 	t.Run("retry with port now available", func(t *testing.T) {
-		resolver, err := NewConflictResolver("0", false) // Port 0 should be available
+		resolver, err := NewConflictResolver("0", ResolveOptions{}) // Port 0 should be available
 		if err != nil {
 			t.Fatalf("NewConflictResolver() error = %v", err)
 		}
@@ -291,7 +292,7 @@ func TestConflictResolver_ExecuteRetry(t *testing.T) {
 			t.Fatalf("Failed to extract port: %v", err)
 		}
 
-		resolver, err := NewConflictResolver(port, false)
+		resolver, err := NewConflictResolver(port, ResolveOptions{})
 		if err != nil {
 			t.Fatalf("NewConflictResolver() error = %v", err)
 		}
@@ -322,7 +323,7 @@ func TestConflictResolver_ExecuteRetry(t *testing.T) {
 }
 
 func TestConflictResolver_ExecuteAbort(t *testing.T) {
-	resolver, err := NewConflictResolver(constants.SptAPIPort, false)
+	resolver, err := NewConflictResolver(constants.SptAPIPort, ResolveOptions{})
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -349,7 +350,7 @@ func TestConflictResolver_ExecuteAbort(t *testing.T) {
 }
 
 func TestConflictResolver_displayConflictInfo(t *testing.T) {
-	resolver, err := NewConflictResolver(constants.SptAPIPort, false)
+	resolver, err := NewConflictResolver(constants.SptAPIPort, ResolveOptions{})
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -405,20 +406,23 @@ func TestResolutionStrategy_String(t *testing.T) {
 	}
 }
 
-func TestConflictResolver_IsInteractiveMode(t *testing.T) {
-	// This is tricky to test because it depends on the actual stdin
-	// We can at least verify the function doesn't panic
-	result := isInteractiveMode()
-
-	// In test environment, this is usually false
-	// We just verify it returns a boolean without error
-	if result != true && result != false {
-		t.Errorf("isInteractiveMode() returned non-boolean value")
+// The caller decides whether an operator can answer; the resolver doesn't
+// look at stdin to guess.
+func TestNewConflictResolverTakesInteractivityFromOptions(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		resolver, err := NewConflictResolver("0", ResolveOptions{Interactive: interactive})
+		if err != nil {
+			t.Fatalf("NewConflictResolver() error = %v", err)
+		}
+		if resolver.interactiveMode != interactive {
+			t.Errorf("interactiveMode = %t, want %t", resolver.interactiveMode, interactive)
+		}
+		_ = resolver.Close()
 	}
 }
 
 func TestConflictResolver_Close(t *testing.T) {
-	resolver, err := NewConflictResolver(constants.SptAPIPort, false)
+	resolver, err := NewConflictResolver(constants.SptAPIPort, ResolveOptions{})
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -433,7 +437,7 @@ func TestResolvePortConflict_HelperFunction(t *testing.T) {
 	ctx := context.Background()
 
 	// Test with available port
-	result, err := ResolvePortConflict(ctx, "0", false)
+	result, err := ResolvePortConflict(ctx, "0", ResolveOptions{})
 	if err != nil {
 		t.Errorf("ResolvePortConflict() error = %v, want nil", err)
 	}
@@ -444,7 +448,7 @@ func TestResolvePortConflict_HelperFunction(t *testing.T) {
 }
 
 func TestConflictResolver_ExecuteResolutionStrategy_UnknownStrategy(t *testing.T) {
-	resolver, err := NewConflictResolver(constants.SptAPIPort, false)
+	resolver, err := NewConflictResolver(constants.SptAPIPort, ResolveOptions{})
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -502,7 +506,7 @@ func TestConflictResolver_Integration_SptConflict(t *testing.T) {
 	}
 
 	// Test with force mode (automated resolution)
-	resolver, err := NewConflictResolver(port, true)
+	resolver, err := NewConflictResolver(port, ResolveOptions{Force: true})
 	if err != nil {
 		t.Fatalf("NewConflictResolver() error = %v", err)
 	}
@@ -592,12 +596,7 @@ func TestConflictResolver_EmptyMetricsServiceIsNotSpt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CheckAndResolveConflicts() error = %v", err)
 			}
-			if result.Success {
-				t.Errorf("Success = true, want false")
-			}
-			if !strings.Contains(result.Message, "only works for Spt services") {
-				t.Errorf("Message = %q, want the non-SPT graceful-stop refusal", result.Message)
-			}
+			assertUnattendedAbort(t, result, err, "port "+port+" is in use (")
 			mu.Lock()
 			defer mu.Unlock()
 			if deletes != 0 {
@@ -681,8 +680,8 @@ func TestConflictResolver_LegacyJSONServiceIsNotSpt(t *testing.T) {
 				if result.Success {
 					t.Errorf("Success = true, want false")
 				}
-				if !force && !strings.Contains(result.Message, "only works for Spt services") {
-					t.Errorf("Message = %q, want the non-SPT graceful-stop refusal", result.Message)
+				if !force {
+					assertUnattendedAbort(t, result, err, "port "+port+" is in use (")
 				}
 				mu.Lock()
 				defer mu.Unlock()
@@ -696,7 +695,7 @@ func TestConflictResolver_LegacyJSONServiceIsNotSpt(t *testing.T) {
 
 func TestConflictResolver_VerifyResolution(t *testing.T) {
 	t.Run("resolution successful - port available", func(t *testing.T) {
-		resolver, err := NewConflictResolver("0", false) // Port 0 should be available
+		resolver, err := NewConflictResolver("0", ResolveOptions{}) // Port 0 should be available
 		if err != nil {
 			t.Fatalf("NewConflictResolver() error = %v", err)
 		}
@@ -783,7 +782,7 @@ func TestConflictResolver_ErrorConditions(t *testing.T) {
 
 // Benchmark tests for performance
 func BenchmarkConflictResolver_CheckAndResolveConflicts(b *testing.B) {
-	resolver, err := NewConflictResolver("0", true) // Available port with force mode
+	resolver, err := NewConflictResolver("0", ResolveOptions{Force: true}) // Available port with force mode
 	if err != nil {
 		b.Fatalf("NewConflictResolver() error = %v", err)
 	}

@@ -161,4 +161,70 @@ class CsvLoggerArtifactAggregatorTest {
 						IntegrityCsvArtifacts.FAILURES_HEADER);
 		assertThrows(IntegrityTerminalException.class, aggregator::close);
 	}
+
+	@Test
+	void aLostNodesArtifactFailsAsNotCollectedInsteadOfEmpty() throws Exception {
+		final Path dir = Files.createTempDirectory("integrity-logger-aggregation-");
+		final Path canonical = dir.resolve(IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME);
+		Files.writeString(canonical, IntegrityCsvArtifacts.PERFORMANCE_HEADER + "\r\n", StandardCharsets.UTF_8);
+		final FileManager localManager = mock(FileManager.class);
+		final FileManager remoteManager = mock(FileManager.class);
+		when(localManager.logFileName("logger", "step")).thenReturn(canonical.toString());
+		when(remoteManager.logFileName("logger", "step")).thenReturn("/remote/integrity.performance.csv");
+		// The guard's answer for a node whose step slice the entry lost.
+		when(remoteManager.readFromFile("/remote/integrity.performance.csv", 0)).thenThrow(new LostNodeFileManager.NotCollected());
+		final var aggregator = new CsvLoggerArtifactAggregator(
+						"step",
+						List.of(localManager, remoteManager),
+						"logger",
+						IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME,
+						IntegrityCsvArtifacts.PERFORMANCE_HEADER);
+
+		final IntegrityTerminalException failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals(
+						"remote logger artifact was not collected, as the entry lost its node's step slice: /remote/integrity.performance.csv",
+						failure.getCause().getMessage());
+	}
+
+	@Test
+	void aStoppedStartPublishesTheStartedSlicesOnlyAndNothingWithoutOne() throws Exception {
+		final Path dir = Files.createTempDirectory("stopped-start-aggregation-");
+		final var artifact = com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.FILE_NAME;
+		final var header = com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.HEADER;
+		final Path canonical = dir.resolve(artifact);
+		try {
+			final FileManager entry = mock(FileManager.class);
+			when(entry.logFileName("OperationLifecycle", "step")).thenReturn(canonical.toString());
+			final FileManager worker = mock(FileManager.class);
+			when(worker.logFileName("OperationLifecycle", "step")).thenReturn("/worker-1/" + artifact);
+			when(worker.readFromFile("/worker-1/" + artifact, 0)).thenThrow(new java.nio.file.NoSuchFileException("never started"));
+			final var aggregator = new CsvLoggerArtifactAggregator("step", List.of(entry, worker), "OperationLifecycle", artifact, header);
+
+			aggregator.closeAfterStoppedStart(0);
+			try (var files = Files.list(dir)) {
+				assertEquals(List.of(), files.toList(), "a step whose slices never started published its file");
+			}
+			assertThrows(IllegalArgumentException.class, () -> aggregator.closeAfterStoppedStart(-1));
+			assertThrows(IllegalArgumentException.class, () -> aggregator.closeAfterStoppedStart(3));
+			// A started slice's missing file is still a failure.
+			final var missing = assertThrows(IntegrityTerminalException.class, () -> aggregator.closeAfterStoppedStart(1));
+			org.junit.jupiter.api.Assertions.assertTrue(missing.getMessage().contains("entry-node logger artifact is missing"));
+
+			final var counters = new com.dell.spt.base.load.lifecycle.OperationLifecycleCounters(true, 1, 1, 0, 1, 0, 0, 0, 0, 0);
+			Files.writeString(canonical, header + "\n" + com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.row(
+							1, "step", "worker-0", List.of(counters), true) + "\n");
+			aggregator.closeAfterStoppedStart(1);
+			try (final var parser = CSVFormat.RFC4180.builder().setHeader().get().parse(Files.newBufferedReader(canonical))) {
+				assertEquals(List.of("worker-0"), parser.getRecords().stream().map(row -> row.get("worker_id")).toList());
+			}
+			org.junit.jupiter.api.Assertions.assertFalse(Files.exists(CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 1)));
+		} finally {
+			try (final var files = Files.list(dir)) {
+				for (final var file : files.toList())
+					Files.deleteIfExists(file);
+			}
+			Files.deleteIfExists(dir);
+		}
+	}
 }

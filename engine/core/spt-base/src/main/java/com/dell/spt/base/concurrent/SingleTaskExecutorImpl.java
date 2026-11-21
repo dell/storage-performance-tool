@@ -9,8 +9,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import org.apache.logging.log4j.Level;
 
-import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-
 public final class SingleTaskExecutorImpl implements Runnable, SingleTaskExecutor {
 
 	private static final ThreadFactory THREAD_FACTORY = new LogContextThreadFactory("single_task_executor_", true);
@@ -49,14 +47,20 @@ public final class SingleTaskExecutorImpl implements Runnable, SingleTaskExecuto
 				try {
 					task.run();
 				} catch (final Throwable cause) {
-					if (!(cause instanceof InterruptedException)
-									|| Thread.currentThread() == workerRef.get()) {
-						throwUncheckedIfInterrupted(cause);
+					if (!(cause instanceof InterruptedException)) {
 						LogUtil.trace(Loggers.ERR, Level.ERROR, cause, "Unexpected task execution failure");
+					} else if (Thread.currentThread() == workerRef.get()) {
+						// No stop replaced this worker, so it lives on to run the next task. A stopped
+						// task's worker was replaced and ends quietly.
+						LogUtil.trace(
+										Loggers.ERR, Level.ERROR, cause, "A task ended with an interrupt that was not a stop");
 					}
 				} finally {
 					taskRef.compareAndSet(task, null);
 				}
+				// A flag the ended task left set must not interrupt the next task. The flag is not cleared
+				// before a task runs: a stop that lands before then has replaced this worker already.
+				Thread.interrupted();
 			}
 		}
 	}

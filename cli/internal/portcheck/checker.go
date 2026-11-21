@@ -7,12 +7,14 @@ package portcheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -47,6 +49,13 @@ type PortChecker struct {
 	// newFinder creates the Docker finder used for container detection;
 	// nil means NewDockerContainerFinder. Tests supply a fake.
 	newFinder func() (*DockerContainerFinder, error)
+	// bind tries to bind the port on every address and returns the listener;
+	// nil means net.Listen. Tests supply a bind that fails as it does on Windows.
+	bind func(address string) (net.Listener, error)
+	// dial connects to address for a port probe; nil means a net.Dialer with
+	// ConnectTimeout. Tests supply one for a host name that maps to several
+	// addresses.
+	dial func(ctx context.Context, address string) (net.Conn, error)
 }
 
 // NewPortChecker creates a new port checker with default settings
@@ -58,7 +67,9 @@ func NewPortChecker(port string) *PortChecker {
 		HTTPTimeout:    DefaultHTTPTimeout,
 		RetryAttempts:  DefaultRetryAttempts,
 		httpClient: &http.Client{
-			Timeout: DefaultHTTPTimeout,
+			Timeout:       DefaultHTTPTimeout,
+			Transport:     redirectsAsAnswers(nil),
+			CheckRedirect: noRedirects,
 		},
 		clock: &RealClock{},
 	}
@@ -73,7 +84,9 @@ func NewPortCheckerWithOptions(port, host string, connectTimeout, httpTimeout ti
 		HTTPTimeout:    httpTimeout,
 		RetryAttempts:  retryAttempts,
 		httpClient: &http.Client{
-			Timeout: httpTimeout,
+			Timeout:       httpTimeout,
+			Transport:     redirectsAsAnswers(nil),
+			CheckRedirect: noRedirects,
 		},
 		clock: &RealClock{},
 	}
@@ -82,6 +95,21 @@ func NewPortCheckerWithOptions(port, host string, connectTimeout, httpTimeout ti
 // IsPortInUse checks if the configured port is listening
 // Returns true if the port is in use, false if available
 func (p *PortChecker) IsPortInUse() bool {
+	return p.isListening(context.Background())
+}
+
+// isListening reports whether a connection to the port succeeds, giving up when
+// ctx ends. A connection that ctx ended is a failed one, so a caller must check
+// ctx before it reads false as a free port.
+func (p *PortChecker) isListening(ctx context.Context) bool {
+	_, ok := p.answeringAddress(ctx)
+	return ok
+}
+
+// answeringAddress connects to the port and returns the address that accepted
+// the connection, or false if none did before ctx ended. The host may name more
+// than one address, so this is the one a holder must have bound.
+func (p *PortChecker) answeringAddress(ctx context.Context) (net.IP, bool) {
 	address := net.JoinHostPort(p.Host, p.Port)
 
 	logging.LogDebug("portcheck", "checking if port is in use",
@@ -90,21 +118,78 @@ func (p *PortChecker) IsPortInUse() bool {
 		"address", address,
 		"timeout", p.ConnectTimeout)
 
-	// Use DialTimeout for a quick connection test
-	conn, err := net.DialTimeout("tcp", address, p.ConnectTimeout)
+	conn, err := p.dialPort(ctx, address)
 	if err != nil {
 		// Connection failed - port is likely available
 		logging.LogDebug("portcheck", "port appears available",
 			"address", address,
 			"error", err.Error())
-		return false
+		return nil, false
 	}
 
 	// Connection successful - port is in use
 	// Close and ignore error; connection was only used as a probe
+	remote, _ := conn.RemoteAddr().(*net.TCPAddr)
 	_ = conn.Close()
 	logging.LogDebug("portcheck", "port is in use", "address", address)
-	return true
+	if remote == nil {
+		return nil, true
+	}
+	return remote.IP, true
+}
+
+// apiBaseURL is the URL of an SPT API on the port at ip, the address a probe
+// connection reached. Without one, as from a test's connection that has no TCP
+// address, it is the checker's host.
+func (p *PortChecker) apiBaseURL(ip net.IP) string {
+	host := p.Host
+	if ip != nil {
+		host = ip.String()
+	}
+	return "http://" + net.JoinHostPort(host, p.Port)
+}
+
+// dialPort opens a probe connection to address.
+func (p *PortChecker) dialPort(ctx context.Context, address string) (net.Conn, error) {
+	if p.dial != nil {
+		return p.dial(ctx, address)
+	}
+	dialer := net.Dialer{Timeout: p.ConnectTimeout}
+	return dialer.DialContext(ctx, "tcp", address)
+}
+
+// IsPortHeld reports whether something still holds the port, on any local
+// address. A failed connection alone does not show that the port is free: a
+// listener with a full accept queue does not answer, and one bound to another
+// address refuses. So it first tries to bind the port, for an instant, and only
+// a connection refusal after that counts as free. It also counts as held a port
+// that a closing connection still blocks. A probe that ctx ended shows nothing,
+// so it counts as held.
+func (p *PortChecker) IsPortHeld(ctx context.Context) bool {
+	bind := p.bind
+	if bind == nil {
+		bind = func(address string) (net.Listener, error) { return net.Listen("tcp", address) }
+	}
+	listener, err := bind(net.JoinHostPort("", p.Port))
+	if err == nil {
+		_ = listener.Close()
+	} else if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+
+	conn, err := p.dialPort(ctx, net.JoinHostPort(p.Host, p.Port))
+	if err == nil {
+		_ = conn.Close()
+		return true
+	}
+	return ctx.Err() != nil || dialFailureMeansHeld(err)
+}
+
+// dialFailureMeansHeld reports whether a failed connection suggests a listener
+// that did not answer, rather than no listener.
+func dialFailureMeansHeld(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // CheckService performs comprehensive service detection on the port
@@ -118,16 +203,19 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 	}
 
 	// First check if port is listening
-	if !p.IsPortInUse() {
+	address, listening := p.answeringAddress(ctx)
+	if !listening {
 		logging.LogDebug("portcheck", "port is not in use", "port", p.Port)
 		return info, nil
 	}
 
 	info.IsListening = true
+	info.Address = address
 	logging.LogInfo("portcheck", "port is in use, identifying service", "port", p.Port)
 
-	// Try to identify if it's Spt by making HTTP requests
-	sptStatus, err := p.detectSptService(ctx)
+	// Try to identify if it's Spt by making HTTP requests, to the address that
+	// answered and not to the host name, which may name another address too.
+	sptStatus, err := p.detectSptService(ctx, p.apiBaseURL(address))
 	if err != nil {
 		logging.LogDebug("portcheck", "failed to detect Spt service via HTTP",
 			"port", p.Port,
@@ -139,6 +227,7 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 
 	if sptStatus != nil {
 		info.IsSpt = true
+		info.APIConfirmed = true
 		info.Status = sptStatus
 		logging.LogInfo("portcheck", "detected Spt service via HTTP API",
 			"port", p.Port,
@@ -154,8 +243,7 @@ func (p *PortChecker) CheckService(ctx context.Context) (*ServiceInfo, error) {
 
 // detectSptService attempts to identify if the service is Spt
 // Returns SptStatus if Spt is detected, nil if not
-func (p *PortChecker) detectSptService(ctx context.Context) (*SptStatus, error) {
-	baseURL := fmt.Sprintf("http://%s:%s", p.Host, p.Port)
+func (p *PortChecker) detectSptService(ctx context.Context, baseURL string) (*SptStatus, error) {
 	if status := p.probeMetricsJSON(ctx, baseURL); status != nil {
 		return status, nil
 	}
@@ -352,6 +440,11 @@ func (info *ServiceInfo) GetServiceDescription() string {
 		return "Port is available"
 	}
 
+	if info.IsSpt && !info.APIConfirmed && info.Container != nil {
+		return fmt.Sprintf("Container that looks like SPT, with no SPT API: %s (%s)",
+			info.Container.Name, info.Container.Image)
+	}
+
 	if info.IsSpt && info.Status != nil {
 		if info.Status.RunID != "" && info.Status.State != "" {
 			return fmt.Sprintf("Spt test (Run ID: %s, State: %s)",
@@ -371,6 +464,9 @@ func (info *ServiceInfo) GetServiceDescription() string {
 func (info *ServiceInfo) IsTestActive() bool {
 	if !info.IsSpt || info.Status == nil {
 		return false
+	}
+	if info.Status.RunActive {
+		return true
 	}
 
 	// Consider test active if it's in a running state
@@ -402,21 +498,20 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 	}
 	defer func() { _ = dockerFinder.Close() }()
 
-	// Find container using the port
-	container, err := dockerFinder.FindContainerUsingPort(ctx, p.Port)
-	if err != nil {
+	// Find the container whose binding covers the address that answered
+	if err := identifyContainer(ctx, dockerFinder, p.Port, info); err != nil {
 		logging.LogDebug("portcheck", "failed to find Docker container using port",
 			"port", p.Port,
 			"error", err.Error())
 		return info // Return original info if Docker search fails
 	}
 
+	container := info.Container
 	if container == nil {
 		logging.LogDebug("portcheck", "no Docker container found using port", "port", p.Port)
 		return info
 	}
 
-	info.Container = container
 	logging.LogInfo("portcheck", "found Docker container using port",
 		"port", p.Port, "container_name", container.Name, "image", container.Image)
 
@@ -425,7 +520,7 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 		logging.LogInfo("portcheck", "identified Spt container",
 			"port", p.Port, "container_name", container.Name, "image", container.Image)
 		if info.Status == nil {
-			info.Status = &SptStatus{RunID: "detected", State: constants.StateRunning, Message: fmt.Sprintf("Spt container detected: %s", container.Name)}
+			info.Status = &SptStatus{Message: fmt.Sprintf("Spt container detected: %s", container.Name)}
 		}
 	} else {
 		logging.LogDebug("portcheck", "container is not Spt",
@@ -433,6 +528,37 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 	}
 
 	return info
+}
+
+// identifyContainer sets info.Container to the one running container whose
+// published binding covers the address that answered detection, by the rule a
+// force stop applies (see FindPublishers), so the container shown is the one a
+// force stop would remove. When more than one covers it, none is shown and
+// info.Publishers names them. When the SPT API answered, only an SPT engine node
+// container is shown: another publisher cannot be matched to that engine.
+//
+// A daemon not reached through a local socket may list another host's
+// containers, so none of them is shown or named.
+func identifyContainer(ctx context.Context, finder *DockerContainerFinder, port string, info *ServiceInfo) error {
+	if !finder.DaemonIsLocal() {
+		logging.LogDebug("portcheck", "the Docker daemon is not reached through a local socket; no container is shown",
+			"port", port)
+		return nil
+	}
+	publishers, err := finder.FindPublishers(ctx, info.Address, port)
+	if err != nil {
+		info.ListingFailed = true
+		return err
+	}
+	switch {
+	case len(publishers) > 1:
+		for _, c := range publishers {
+			info.Publishers = append(info.Publishers, c.Name)
+		}
+	case len(publishers) == 1 && (!info.APIConfirmed || isEngineNodeContainer(publishers[0].Labels)):
+		info.Container = publishers[0]
+	}
+	return nil
 }
 
 // isSptBadRequestError checks if a 400 Bad Request error is from Spt
