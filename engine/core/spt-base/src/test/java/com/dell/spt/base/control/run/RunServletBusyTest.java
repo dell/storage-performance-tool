@@ -274,6 +274,55 @@ class RunServletBusyTest {
 	}
 
 	@Test
+	void aShutdownAfterAStopWaitsForTheStoppedRunsCleanup() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_CLEANUP_SCENARIO).status);
+		probes.awaitBody();
+		assertEquals(200, delete(RUN_A));
+		probes.awaitCleanup();
+		final int interruptsBefore = probes.cleanupInterrupts.get();
+
+		assertFalse(servlet.stopActiveRunAndAwait(100, TimeUnit.MILLISECONDS), "the cleanup is still held");
+
+		final var pool = Executors.newSingleThreadExecutor();
+		try {
+			final var stop = pool.submit(() -> servlet.stopActiveRunAndAwait(AWAIT_SECONDS, TimeUnit.SECONDS));
+			Thread.sleep(100);
+			assertFalse(stop.isDone(), "the shutdown did not wait for the stopped run");
+			assertEquals(ApiStatus.State.RUNNING, status.state());
+			probes.releaseCleanup();
+			assertTrue(stop.get(AWAIT_SECONDS, TimeUnit.SECONDS));
+			assertEquals(ApiStatus.State.STOPPED, status.state());
+		} finally {
+			pool.shutdownNow();
+		}
+		assertEquals(interruptsBefore, probes.cleanupInterrupts.get(), "a repeated stop interrupted the cleanup");
+		assertFalse(probes.cleanupEndedInterrupted, "a repeated stop interrupted the cleanup");
+	}
+
+	@Test
+	void aShutdownOfAnIdleNodeReturnsAtOnce() throws Exception {
+		assertTrue(servlet.stopActiveRunAndAwait(0, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
+	void aShutdownStopsARunningRunAndWaitsForItsCleanup() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_CLEANUP_SCENARIO).status);
+		probes.awaitBody();
+
+		final var pool = Executors.newSingleThreadExecutor();
+		try {
+			final var stop = pool.submit(() -> servlet.stopActiveRunAndAwait(AWAIT_SECONDS, TimeUnit.SECONDS));
+			probes.awaitCleanup();
+			assertFalse(stop.isDone(), "the shutdown did not wait for the cleanup");
+			probes.releaseCleanup();
+			assertTrue(stop.get(AWAIT_SECONDS, TimeUnit.SECONDS));
+			assertEquals(ApiStatus.State.STOPPED, status.state());
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
 	void aRunStoppedBeforeItStartedIsNotFinishedUntilItsStatusIsPublished() throws Exception {
 		final var publishing = new CountDownLatch(1);
 		final var publish = new CountDownLatch(1);
@@ -536,6 +585,8 @@ class RunServletBusyTest {
 		private final CountDownLatch inBody = new CountDownLatch(1);
 		private final CountDownLatch inCleanup = new CountDownLatch(1);
 		private final CountDownLatch cleanupRelease = new CountDownLatch(1);
+		private final AtomicInteger cleanupInterrupts = new AtomicInteger();
+		private volatile boolean cleanupEndedInterrupted;
 		private volatile boolean failConfigure;
 
 		@SuppressWarnings({"rawtypes", "unchecked"
@@ -627,9 +678,11 @@ class RunServletBusyTest {
 					probes.cleanupRelease.await();
 					break;
 				} catch (final InterruptedException e) {
+					probes.cleanupInterrupts.incrementAndGet();
 					interrupted = true;
 				}
 			}
+			probes.cleanupEndedInterrupted = interrupted || Thread.currentThread().isInterrupted();
 			if (interrupted) {
 				Thread.currentThread().interrupt();
 			}

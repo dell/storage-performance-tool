@@ -342,11 +342,12 @@ public class RunServlet extends HttpServlet {
 
 	/**
 	 * Requests cancellation of the active API run and waits for its cleanup and
-	 * terminal-status publication. A false return means the bounded wait expired.
+	 * terminal-status publication. A run a {@code DELETE} has already stopped is still active until then,
+	 * so this waits for it too. A false return means the bounded wait expired.
 	 */
 	public boolean stopActiveRunAndAwait(final long timeout, final TimeUnit timeUnit)
 					throws InterruptedException {
-		final var activeTask = scenarioExecutor.task();
+		final var activeTask = activeTask();
 		if (activeTask == null) {
 			return true;
 		}
