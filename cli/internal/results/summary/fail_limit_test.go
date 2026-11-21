@@ -23,71 +23,105 @@ func TestFailureLimitStopWarningRule(t *testing.T) {
 		return &PhaseMetrics{SuccessCount: success, FailureCount: failed, DurationSeconds: seconds}
 	}
 	const countWarning = "Create: stopped at its failure limit after 28 failed requests (load.op.limit.fail.count 20), 694ms into its 12s time limit"
+	distributed := func(success, failed int64, seconds float64) *PhaseMetrics {
+		metrics := phase(success, failed, seconds)
+		metrics.NodeCount = 2
+		return metrics
+	}
+	twoRows := &MetricsTotals{Rows: []MetricsTotalsRow{{Operation: "CREATE"}, {Operation: "READ"}}}
+	const rateWarning = "Create: ended 1.91s into its 12s time limit with the failure-rate limit on (load.op.limit.fail.rate) and 35 failed requests; the engine stops a phase when failures outpace successes"
 	cases := []struct {
 		name      string
 		end       RunEnd
+		workload  string
 		step      *StepData
 		operation string
 		metrics   *PhaseMetrics
 		want      string
 	}{
-		{"count above the limit, well short of the time limit", RunEndCompleted,
+		// load.step.limit.size ends a step early on its own (review F4).
+		{"size-bounded step, rate on", RunEndCompleted, "write",
+			&StepData{Limits: &StepLimits{FailRate: true, FailCount: 100000, TimeSeconds: 30, SizeLimited: true}}, "CREATE", phase(9, 2, 0.921), ""},
+		{"size-bounded step, count above the limit", RunEndCompleted, "write",
+			&StepData{Limits: &StepLimits{FailCount: 20, SizeLimited: true}}, "CREATE", phase(9, 21, 0.921), ""},
+		// A weighted or pipeline step: sub-loads with their own limits (review F3).
+		{"two metrics rows outside a mixed workload", RunEndCompleted, "",
+			&StepData{Limits: &StepLimits{FailCount: 20}, Metrics: twoRows}, "MIXED", phase(160, 26, 2), ""},
+		{"two metrics rows in a mixed workload", RunEndCompleted, "mixed",
+			&StepData{Limits: &StepLimits{FailCount: 20}, Metrics: twoRows}, "MIXED", phase(160, 26, 2),
+			"Create: stopped at its failure limit after 26 failed requests (load.op.limit.fail.count 20)"},
+		// A distributed step's config.yaml holds slice 0's share of the counts (review F2).
+		{"distributed, count above slice 0's share, short of the time limit", RunEndCompleted, "write",
+			&StepData{Limits: countLimited(12)}, "CREATE", distributed(35, 35, 1.909), ""},
+		{"distributed, count-bounded", RunEndCompleted, "write",
+			&StepData{Limits: &StepLimits{FailCount: 10, OpCount: 500}}, "CREATE", distributed(84, 84, 1), ""},
+		{"distributed, input list, failures above slice 0's share", RunEndCompleted, "read",
+			&StepData{Limits: &StepLimits{FailCount: 10}}, "READ", distributed(86, 14, 1), ""},
+		{"distributed, rate on, short of the time limit", RunEndCompleted, "write",
+			&StepData{Limits: &StepLimits{FailCount: 10, FailRate: true, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 1.909), rateWarning},
+		{"distributed, rate on, ran to the time limit", RunEndCompleted, "write",
+			&StepData{Limits: &StepLimits{FailCount: 10, FailRate: true, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 11.5), ""},
+		{"distributed, rate on, count-bounded", RunEndCompleted, "write",
+			&StepData{Limits: &StepLimits{FailRate: true, OpCount: 500, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 1.909), ""},
+		{"distributed, rate on, interrupted", RunEndInterrupted, "write",
+			&StepData{Limits: &StepLimits{FailRate: true, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 1.909), ""},
+		{"count above the limit, well short of the time limit", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(24, 28, 0.694), countWarning},
-		{"within 1 s of the time limit", RunEndCompleted,
+		{"within 1 s of the time limit", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(2400, 28, 11.2), ""},
-		{"over the time limit", RunEndCompleted,
+		{"over the time limit", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(8)}, "CREATE", phase(2400, 28, 8.34), ""},
-		{"one-hour phase stopped two minutes early", RunEndCompleted,
+		{"one-hour phase stopped two minutes early", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(3600)}, "CREATE", phase(90000, 21, 3480),
 			"Create: stopped at its failure limit after 21 failed requests (load.op.limit.fail.count 20), 58m into its 1h 0m time limit"},
-		{"count at the limit", RunEndCompleted,
+		{"count at the limit", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(24, 20, 0.694), ""},
-		{"no failures", RunEndCompleted,
+		{"no failures", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 20, FailRate: true, TimeSeconds: 12}}, "CREATE", phase(24, 0, 0.5), ""},
-		{"rate on, failures, ended early", RunEndCompleted,
+		{"rate on, failures, ended early", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 100000, FailRate: true, TimeSeconds: 12}}, "CREATE", phase(2700, 2714, 8.85),
 			"Create: ended 8.85s into its 12s time limit with the failure-rate limit on (load.op.limit.fail.rate) and 2714 failed requests; the engine stops a phase when failures outpace successes"},
-		{"rate on, ran to the time limit", RunEndCompleted,
+		{"rate on, ran to the time limit", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 100000, FailRate: true, TimeSeconds: 12}}, "CREATE", phase(2700, 2714, 12.1), ""},
-		{"rate on, no own limit", RunEndCompleted,
+		{"rate on, no own limit", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 100000, FailRate: true}}, "CREATE", phase(2700, 2714, 8.85), ""},
-		{"count-bounded phase short of its count", RunEndCompleted,
+		{"count-bounded phase short of its count", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 20, OpCount: 1000}}, "CREATE", phase(30, 21, 0.4),
 			"Create: stopped at its failure limit after 21 failed requests (load.op.limit.fail.count 20), after 51 of its 1000 requests"},
-		{"count-bounded phase at its count", RunEndCompleted,
+		{"count-bounded phase at its count", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 20, OpCount: 1000}}, "CREATE", phase(979, 21, 4), ""},
-		{"ran to its count before its time limit", RunEndCompleted,
+		{"ran to its count before its time limit", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 20, OpCount: 1000, TimeSeconds: 60}}, "CREATE", phase(979, 21, 4), ""},
-		{"neither own limit, count rule alone", RunEndCompleted,
+		{"neither own limit, count rule alone", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 20}}, "CREATE", phase(24, 21, 0.4),
 			"Create: stopped at its failure limit after 21 failed requests (load.op.limit.fail.count 20)"},
-		{"unparsable time treated as absent", RunEndCompleted,
-			&StepData{Limits: (&stepConfigProbe{}).withLimits(t, 20, false, 0, "12 seconds")}, "CREATE", phase(24000, 21, 40),
+		{"unparsable time treated as absent", RunEndCompleted, "write",
+			&StepData{Limits: (&stepLimitsProbe{}).withLimits(t, 20, false, 0, "12 seconds")}, "CREATE", phase(24000, 21, 40),
 			"Create: stopped at its failure limit after 21 failed requests (load.op.limit.fail.count 20)"},
-		{"standalone DELETE", RunEndCompleted,
+		{"standalone DELETE", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12), Delete: &deletemetrics.Metrics{}}, "DELETE", phase(24, 28, 0.694), ""},
-		{"DELETE operation", RunEndCompleted,
+		{"DELETE operation", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12)}, "DELETE", phase(24, 28, 0.694), ""},
-		{"suppressed metrics", RunEndCompleted,
+		{"suppressed metrics", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12), MetricsSuppressed: true}, "CREATE", phase(24, 28, 0.694), ""},
-		{"no config.yaml", RunEndCompleted,
+		{"no config.yaml", RunEndCompleted, "write",
 			&StepData{}, "CREATE", phase(24, 28, 0.694), ""},
-		{"auto-terminated run", RunEndAutoTerminated,
+		{"auto-terminated run", RunEndAutoTerminated, "write",
 			&StepData{Limits: countLimited(90)}, "CREATE", phase(24, 2632, 15.18), ""},
-		{"interrupted run", RunEndInterrupted,
+		{"interrupted run", RunEndInterrupted, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(24, 28, 0.694), ""},
-		{"failed run", RunEndFailed,
+		{"failed run", RunEndFailed, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(24, 28, 0.694), ""},
-		{"unknown end", RunEndUnknown,
+		{"unknown end", RunEndUnknown, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(24, 28, 0.694), ""},
-		{"all failed keeps the warning", RunEndCompleted,
+		{"all failed keeps the warning", RunEndCompleted, "write",
 			&StepData{Limits: countLimited(12)}, "CREATE", phase(0, 21, 0.3),
 			"Create: stopped at its failure limit after 21 failed requests (load.op.limit.fail.count 20), 300ms into its 12s time limit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := failureLimitStopWarning("Create", tc.end, tc.step, tc.operation, tc.metrics); got != tc.want {
+			if got := failureLimitStopWarning("Create", tc.end, tc.workload, tc.step, tc.operation, tc.metrics); got != tc.want {
 				t.Fatalf("warning = %q, want %q", got, tc.want)
 			}
 		})
@@ -95,13 +129,13 @@ func TestFailureLimitStopWarningRule(t *testing.T) {
 }
 
 // withLimits builds StepLimits through the same parse the loader uses.
-func (c *stepConfigProbe) withLimits(t *testing.T, failCount int64, rate bool, opCount int64, stepTime any) *StepLimits {
+func (c *stepLimitsProbe) withLimits(t *testing.T, failCount int64, rate bool, opCount int64, stepTime any) *StepLimits {
 	t.Helper()
 	c.Load.Op.Limit.Fail.Count = &failCount
 	c.Load.Op.Limit.Fail.Rate = &rate
 	c.Load.Op.Limit.Count = &opCount
 	c.Load.Step.Limit.Time = stepTime
-	return c.stepLimits()
+	return c.limits()
 }
 
 func TestEngineTimeSeconds(t *testing.T) {
@@ -175,6 +209,37 @@ func TestLoaderReadsStepLimitsFromConfig(t *testing.T) {
 			t.Fatalf("limits = %+v, want %+v", got, want)
 		}
 	})
+	t.Run("size limit", func(t *testing.T) {
+		t.Parallel()
+		for raw, want := range map[string]bool{"0": false, `"0"`: false, `"0B"`: false, `""`: false, `"2MiB"`: true, "1048576": true, `"lots"`: true} {
+			config := strings.Replace(string(fixture), "size: 0\n", "size: "+raw+"\n", 1)
+			got := load(t, []byte(config)).Limits
+			if got == nil || got.SizeLimited != want {
+				t.Errorf("size %s: limits = %+v, want SizeLimited %v", raw, got, want)
+			}
+		}
+	})
+	// A weighted step writes its base config and then one document per sub-load (review F3).
+	t.Run("weighted step's documents", func(t *testing.T) {
+		t.Parallel()
+		config := string(fixture) + "---\nload:\n  op:\n    limit:\n      count: 100\n---\nload:\n  op:\n    limit:\n      count: 100\n"
+		step := load(t, []byte(config))
+		if step.Limits != nil {
+			t.Fatalf("limits = %+v, want nil", step.Limits)
+		}
+	})
+	// A limit of an unexpected type leaves the seed suppression readable (review F7).
+	t.Run("suppression read on its own", func(t *testing.T) {
+		t.Parallel()
+		config := strings.NewReplacer("persist: true", "persist: false", "count: 20", `count: [20]`).Replace(string(fixture))
+		step := load(t, []byte(config))
+		if !step.MetricsSuppressed {
+			t.Fatal("MetricsSuppressed = false, want true")
+		}
+		if step.Limits != nil {
+			t.Fatalf("limits = %+v, want nil", step.Limits)
+		}
+	})
 	t.Run("missing file", func(t *testing.T) {
 		t.Parallel()
 		if got := load(t, nil).Limits; got != nil {
@@ -215,6 +280,18 @@ func failLimitMixedRun(createSeconds, statSeconds float64) *RunData {
 	}
 }
 
+// failLimitPipelineRun is the shape of the review's pipeline-count-ok replay: CREATE then READ,
+// 100 each, load.op.limit.fail.count=20 on the base, neither stage stopped.
+func failLimitPipelineRun() *RunData {
+	data := failLimitMixedRun(0.316, 0.322)
+	data.Params = &RunParams{}
+	step := data.Steps[data.StepOrder[0]]
+	step.Limits = &StepLimits{FailCount: 20}
+	step.Metrics.Rows[0].SuccessCount, step.Metrics.Rows[0].FailureCount = 86, 14
+	step.Metrics.Rows[1].Operation, step.Metrics.Rows[1].SuccessCount, step.Metrics.Rows[1].FailureCount = "READ", 74, 12
+	return data
+}
+
 func TestAggregateMixedFailureLimitStopWarning(t *testing.T) {
 	t.Parallel()
 
@@ -227,6 +304,9 @@ func TestAggregateMixedFailureLimitStopWarning(t *testing.T) {
 		// The phase's duration is the longest of its operations' (0.322 s here, not 0.316 s).
 		{"short duration", failLimitMixedRun(0.316, 0.322), []string{want}},
 		{"full-length duration", failLimitMixedRun(12.05, 12.08), nil},
+		// A pipeline step through spt replay: several operations, no mixed workload, and a
+		// config.yaml that shows only the base (review F3).
+		{"pipeline step", failLimitPipelineRun(), nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,7 +324,7 @@ func TestAggregateMixedFailureLimitStopWarning(t *testing.T) {
 			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
 				t.Fatalf("failure-limit warnings = %q, want %q", got, tc.want)
 			}
-			if !containsString(summary.Warnings, "Mixed: 23 requests failed") {
+			if !containsString(summary.Warnings, "Mixed: 23 requests failed") && tc.name != "pipeline step" {
 				t.Fatalf("failed-count warning missing: %q", summary.Warnings)
 			}
 			renders := map[string]string{

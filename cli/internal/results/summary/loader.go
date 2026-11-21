@@ -1,10 +1,12 @@
 package summary
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -503,7 +505,9 @@ func (l *Loader) findConfigEntry(sm *results.StepManifest) *results.FileStatus {
 	return nil
 }
 
-type stepConfigProbe struct {
+// metricsPersistProbe reads only output.metrics.summary.persist, so a limit value of an
+// unexpected type can't hide a seed step's suppression.
+type metricsPersistProbe struct {
 	Output struct {
 		Metrics struct {
 			Summary struct {
@@ -511,6 +515,10 @@ type stepConfigProbe struct {
 			} `yaml:"summary"`
 		} `yaml:"metrics"`
 	} `yaml:"output"`
+}
+
+// stepLimitsProbe reads the step's own limits for the failure-limit warning.
+type stepLimitsProbe struct {
 	Load struct {
 		Op struct {
 			Limit struct {
@@ -524,6 +532,7 @@ type stepConfigProbe struct {
 		Step struct {
 			Limit struct {
 				Time any `yaml:"time"`
+				Size any `yaml:"size"`
 			} `yaml:"limit"`
 		} `yaml:"step"`
 	} `yaml:"load"`
@@ -540,10 +549,21 @@ type StepLimits struct {
 	OpCount int64
 	// TimeSeconds is load.step.limit.time in seconds; 0 when off or not parseable.
 	TimeSeconds float64
+	// SizeLimited is true when load.step.limit.size is set to anything but zero.
+	SizeLimited bool
 }
 
-// readStepConfig parses the step's fetched config.yaml once; nil when it is absent or unreadable.
-func (l *Loader) readStepConfig(runDir string, sm *results.StepManifest) *stepConfigProbe {
+// stepConfig is what the summary reads from a step's fetched config.yaml.
+type stepConfig struct {
+	metricsSuppressed bool
+	// limits is nil when the limits can't be read reliably: a weighted step writes one YAML
+	// document per sub-load after the base, so the first document isn't the step's limits.
+	limits *StepLimits
+}
+
+// readStepConfig reads the step's fetched config.yaml once; nil when it is absent or unreadable.
+// The metrics suppression and the limits are decoded independently.
+func (l *Loader) readStepConfig(runDir string, sm *results.StepManifest) *stepConfig {
 	entry := l.findConfigEntry(sm)
 	if entry == nil || entry.Status != fileStatusOK {
 		return nil
@@ -552,36 +572,80 @@ func (l *Loader) readStepConfig(runDir string, sm *results.StepManifest) *stepCo
 	if err != nil {
 		return nil
 	}
-	var config stepConfigProbe
-	if err := yaml.Unmarshal(content, &config); err != nil {
-		return nil
+	config := &stepConfig{}
+	var persist metricsPersistProbe
+	if err := yaml.Unmarshal(content, &persist); err == nil {
+		config.metricsSuppressed = persist.Output.Metrics.Summary.Persist != nil && !*persist.Output.Metrics.Summary.Persist
 	}
-	return &config
+	config.limits = readStepLimits(content)
+	return config
 }
 
-func (c *stepConfigProbe) metricsSummaryPersistSuppressed() bool {
-	return c != nil && c.Output.Metrics.Summary.Persist != nil && !*c.Output.Metrics.Summary.Persist
+func (c *stepConfig) metricsSummaryPersistSuppressed() bool {
+	return c != nil && c.metricsSuppressed
 }
 
-// stepLimits is nil when the step has no readable config.yaml.
-func (c *stepConfigProbe) stepLimits() *StepLimits {
+// stepLimits is nil when the step has no readable config.yaml or its limits can't be read reliably.
+func (c *stepConfig) stepLimits() *StepLimits {
 	if c == nil {
 		return nil
 	}
+	return c.limits
+}
+
+// readStepLimits decodes the limits of a single-document config.yaml; nil for anything else.
+func readStepLimits(content []byte) *StepLimits {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	var probe stepLimitsProbe
+	if err := decoder.Decode(&probe); err != nil {
+		return nil
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil
+	}
+	return probe.limits()
+}
+
+func (p *stepLimitsProbe) limits() *StepLimits {
 	limits := &StepLimits{}
-	if v := c.Load.Op.Limit.Fail.Count; v != nil && *v > 0 {
+	if v := p.Load.Op.Limit.Fail.Count; v != nil && *v > 0 {
 		limits.FailCount = *v
 	}
-	if v := c.Load.Op.Limit.Fail.Rate; v != nil {
+	if v := p.Load.Op.Limit.Fail.Rate; v != nil {
 		limits.FailRate = *v
 	}
-	if v := c.Load.Op.Limit.Count; v != nil && *v > 0 {
+	if v := p.Load.Op.Limit.Count; v != nil && *v > 0 {
 		limits.OpCount = *v
 	}
-	if seconds, ok := engineTimeSeconds(c.Load.Step.Limit.Time); ok && seconds > 0 {
+	if seconds, ok := engineTimeSeconds(p.Load.Step.Limit.Time); ok && seconds > 0 {
 		limits.TimeSeconds = seconds
 	}
+	limits.SizeLimited = engineSizeSet(p.Load.Step.Limit.Size)
 	return limits
+}
+
+var engineZeroSizePattern = regexp.MustCompile(`^0+(\.0+)?\s*[a-zA-Z]*$`)
+
+// engineSizeSet reports whether a load.step.limit.size value is anything but off: absent, empty
+// or zero in any unit is off, and a value it can't read counts as set.
+func engineSizeSet(raw any) bool {
+	switch v := raw.(type) {
+	case nil:
+		return false
+	case int:
+		return v != 0
+	case int64:
+		return v != 0
+	case uint64:
+		return v != 0
+	case float64:
+		return v != 0
+	case string:
+		text := strings.TrimSpace(v)
+		return text != "" && !engineZeroSizePattern.MatchString(text)
+	}
+	return true
 }
 
 var (

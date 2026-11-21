@@ -521,7 +521,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 		if warning := unresolvedOperationsWarning(label, stepData); warning != "" {
 			warnings = append(warnings, warning)
 		}
-		if warning := failureLimitStopWarning(label, data.End, stepData, summary.Operation, summary.Metrics); warning != "" {
+		if warning := failureLimitStopWarning(label, data.End, workload.Type, stepData, summary.Operation, summary.Metrics); warning != "" {
 			warnings = append(warnings, warning)
 		}
 

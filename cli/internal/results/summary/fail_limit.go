@@ -3,6 +3,8 @@ package summary
 import (
 	"fmt"
 	"strings"
+
+	workloadreg "github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
 // failureLimitEarlyEndMarginSeconds is how much shorter than its time limit a phase must be to
@@ -21,11 +23,20 @@ const failureLimitEarlyEndMarginSeconds = 1.0
 // (failures > fail.count, or a failure rate above the success rate with fail.rate on).
 // mixed-fail-limit-first-type 01 and weighted-fail-limit-sub-load 01 change which counts that rule
 // reads; the early-end test keeps this warning right before and after both.
-func failureLimitStopWarning(label string, end RunEnd, step *StepData, operation string, metrics *PhaseMetrics) string {
+//
+// It gives no warning where the limits can't be read reliably: a step bounded by
+// load.step.limit.size, whose end the summary can't compare; a step with more than one metrics
+// row outside an spt run mixed workload (a weighted or pipeline step, whose sub-loads have their
+// own limits and whose config.yaml shows only the base); and, in a distributed step, any count
+// limit, because the entry's config.yaml holds slice 0's share of load.op.limit.count and
+// load.op.limit.fail.count while the metrics are the fleet's totals.
+func failureLimitStopWarning(label string, end RunEnd, workloadType string, step *StepData, operation string, metrics *PhaseMetrics) string {
 	if end != RunEndCompleted || step == nil || metrics == nil || step.Limits == nil || step.MetricsSuppressed {
 		return ""
 	}
-	// A standalone DELETE has no engine failure limit; it has its own --max-failed-objects budget.
+	// No DELETE phase gets the warning: a standalone DELETE has no engine failure limit and its
+	// own --max-failed-objects budget, and a --cleanup DELETE is best-effort and has no time or
+	// count limit to show an early end.
 	if step.Delete != nil || step.DeleteEvidence != nil || strings.EqualFold(operation, reportOperationDelete) {
 		return ""
 	}
@@ -34,9 +45,18 @@ func failureLimitStopWarning(label string, end RunEnd, step *StepData, operation
 		return ""
 	}
 	limits := step.Limits
+	if limits.SizeLimited {
+		return ""
+	}
+	if step.Metrics != nil && len(step.Metrics.Rows) > 1 && !strings.EqualFold(workloadType, workloadreg.Mixed) {
+		return ""
+	}
 	failed := metrics.FailureCount
 	if failed <= 0 {
 		return ""
+	}
+	if metrics.NodeCount > 1 {
+		return distributedFailureRateWarning(label, limits, metrics)
 	}
 	countReached := limits.FailCount > 0 && failed > limits.FailCount
 	rateOn := limits.FailRate
@@ -63,9 +83,25 @@ func failureLimitStopWarning(label string, end RunEnd, step *StepData, operation
 		return fmt.Sprintf("%s: stopped at its failure limit after %s failed %s (load.op.limit.fail.count %s)%s",
 			label, formatInt(failed), requestWord(failed), formatInt(limits.FailCount), progress)
 	}
+	return failureRateWarning(label, progress, failed)
+}
+
+func failureRateWarning(label, progress string, failed int64) string {
 	return fmt.Sprintf("%s: ended %s with the failure-rate limit on (load.op.limit.fail.rate) and %s failed %s; "+
 		"the engine stops a phase when failures outpace successes",
 		label, progress, formatInt(failed), requestWord(failed))
+}
+
+// distributedFailureRateWarning is the only form of the warning for a distributed step. Its
+// config.yaml holds slice 0's share of the count limits, not the fleet's, so neither count is
+// compared; the rate switch and the time limit aren't sliced, so a fleet that ended well before
+// its time limit with the rate limit on and no count limit gets the hedged rate wording.
+func distributedFailureRateWarning(label string, limits *StepLimits, metrics *PhaseMetrics) string {
+	if !limits.FailRate || limits.OpCount > 0 || limits.TimeSeconds <= 0 ||
+		metrics.DurationSeconds >= limits.TimeSeconds-failureLimitEarlyEndMarginSeconds {
+		return ""
+	}
+	return failureRateWarning(label, failureLimitProgress(limits, metrics), metrics.FailureCount)
 }
 
 // failureLimitProgress says how far into its own time or count limit the phase got; empty with neither.

@@ -151,25 +151,30 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 }
 
 // summaryRunEnd is how the run ended, for summary warnings that only fit a run the engine
-// ended on its own. Completion tracking returns an error when Ctrl-C or the auto-terminate
-// deadline ends it, so a tracker error marks an interrupted run.
+// ended on its own. It judges the run as resolveOrdinaryRunError does: the tracker of an ordinary
+// run returns once its step files are stable, so a finished run can still read RUNNING or no
+// state (a --cleanup or --items-file run in its last pause), and only a stop or failure it saw,
+// a tracker error, or a run this CLI ended keeps a run from counting as completed.
 func summaryRunEnd(outcome *autoResultsOutcome) summary.RunEnd {
 	switch {
 	case outcome == nil:
 		return summary.RunEndUnknown
 	case outcome.AutoTerminated:
 		return summary.RunEndAutoTerminated
-	case outcome.TrackerErr != nil:
+	case outcome.Interrupted || outcome.TrackerErr != nil:
+		// Interrupted is recorded on its own: a terminal reconciliation after the shutdown
+		// clears TrackerErr when it sees the engine finish.
 		return summary.RunEndInterrupted
 	case outcome.Tracker == nil:
 		return summary.RunEndUnknown
 	}
 	switch outcome.Tracker.FinalState {
-	case constants.StateCompleted, constants.StateIdle:
-		// An engine without /run state is tracked to idle, which is its ordinary end.
-		return summary.RunEndCompleted
-	default:
+	case constants.StateFailed, constants.StateStopped:
 		// FAILED, or STOPPED by something other than this CLI.
 		return summary.RunEndFailed
+	default:
+		// COMPLETED; IDLE on an engine without /run state; RUNNING or none when the tracker
+		// returned on stable step files.
+		return summary.RunEndCompleted
 	}
 }
