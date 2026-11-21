@@ -86,9 +86,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.io.InputStream;
+import java.net.SocketTimeoutException;
 import java.rmi.ConnectException;
 import java.rmi.NoSuchObjectException;
 import java.rmi.RemoteException;
+import java.rmi.UnmarshalException;
 import java.rmi.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -145,12 +147,23 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	// Copy-on-write: a signal's exit hook clears it in the close while the scenario thread's await reads it.
 	private final List<LoadStep> stepSlices = new CopyOnWriteArrayList<>();
+	/** Each slice's node address, in slice order; null for the entry's own slice. */
+	private final List<String> stepSliceNodeAddrs = new CopyOnWriteArrayList<>();
 	// Held for the whole of doStop() and doClose(). A signal runs both on the exit hook while the scenario
 	// thread runs await()'s trailing doStop(), outside the state lock. Order: state lock, then this lock,
 	// then the base class's metrics unregister lock.
 	private final ReentrantLock stopCloseLock = new ReentrantLock();
 	// Set when doClose() returns: a later doStop() has nothing left to stop.
 	private volatile boolean stopCloseDone = false;
+	// Set before closing slices so a concurrent await seeing a self-closed slice is not marked lost.
+	private volatile boolean slicesClosing;
+	private final Object lostSliceLock = new Object();
+	/** The remote slices this entry lost contact with, created at the first loss. Guarded by lostSliceLock. */
+	private Set<LoadStep> lostSlices;
+	/** The step's failure for its lost slices, one suppressed failure per slice after the first. Guarded by lostSliceLock. */
+	private RunTerminalException lostSliceFailure;
+	/** The slices whose latest stop got no response within the RMI response timeout. Guarded by lostSliceLock. */
+	private Set<LoadStep> slowStopSlices;
 	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
@@ -188,8 +201,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
-	// Of this start: how many slices, in slice order, returned from their start(), and whether the
-	// start ended as a stop. A stopped start publishes the slice files of those slices only.
+	// Of this start: how many slices, in slice order, returned from their start() (used for stopped-start
+	// artifact publishing and lost-slice gating), and whether the start ended as a stop.
 	private volatile int startedSliceCount;
 	private volatile boolean startStopped;
 
@@ -316,6 +329,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// count of the start before it, so its close still publishes that start's slices.
 		startedSliceCount = 0;
 		startStopped = false;
+		stepSliceNodeAddrs.clear();
+		slicesClosing = false;
 		resetDurationLifecycleForStart();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			// need to set the once generated step id
@@ -1367,6 +1382,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 													+ ". Ensure the remote node is running with --run-node");
 				}
 			}
+			stepSliceNodeAddrs.add(i == 0 ? null : nodeAddrs.get(i - 1));
 			stepSlices.add(stepSlice);
 			if (validateRunId) {
 				requireMatchingRunId(stepSlice, expectedRunId);
@@ -1397,6 +1413,186 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				throw sliceStartFailure(e, i, sliceCount);
 			}
 		}
+	}
+
+	/**
+	 * Records that this entry lost a started remote slice: its await, stop or close failed in RMI,
+	 * or the worker no longer exports it. That worker's operations since its last metrics report
+	 * are missing from the step's totals, so the step fails at its close. A slice whose contact
+	 * comes back stays lost. Each slice is recorded and logged once.
+	 *
+	 * @return whether the slice is a lost one, now or before; false for a slice that never started,
+	 *     whose failure to start already ends the step, and for the entry's own slice
+	 */
+	private boolean recordLostSlice(final LoadStep slice, final String call, final RemoteException cause) {
+		final LoadStep[] slices = stepSlices.toArray(LoadStep[]::new);
+		final int index = sliceIndex(slices, slice);
+		if (index < 1 || index >= startedSliceCount) {
+			return false;
+		}
+		synchronized (lostSliceLock) {
+			if (lostSlices == null) {
+				lostSlices = Collections.newSetFromMap(new IdentityHashMap<>());
+			}
+			if (!lostSlices.add(slice)) {
+				return true;
+			}
+			final var sliceCount = slices.length;
+			final String nodeAddr = index < stepSliceNodeAddrs.size()
+							? stepSliceNodeAddrs.get(index)
+							: String.valueOf(slice);
+			Loggers.ERR.error(
+							"{}: lost the step slice on node {} at its {} ({}); that node's operations since its last metrics report are missing from the step's totals, so the step fails",
+							loadStepId(),
+							nodeAddr,
+							call,
+							oneLine(cause));
+			// The message is public, so it counts the engine and leaves the node's address to the log.
+			final var failure = new RunTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							loadStepId(),
+							"engine " + (index + 1) + " of " + sliceCount
+											+ ": the entry lost this node's step slice, so its last operations are missing from the step's totals; see the entry's log",
+							cause);
+			if (lostSliceFailure == null) {
+				lostSliceFailure = failure;
+			} else {
+				lostSliceFailure.addSuppressed(failure);
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * A failed await call of a slice, other than a {@linkplain #isResponseReadTimeout response
+	 * timeout}, loses the slice (see {@link #recordLostSlice}). An await whose response timed out is
+	 * the worker still working inside the call, as a pipeline stage that drains its operations in
+	 * flight when it ends does, for up to {@code load.op.wait.limit}: as in 5.17.0 the entry stops
+	 * awaiting that slice and goes on to its normal stop and close of it, where a worker that has
+	 * died or hung is still lost. Unlike 5.17.0, it logs a warning.
+	 */
+	private void recordLostSliceAtAwait(final LoadStep slice, final RemoteException cause) {
+		if (slicesClosing || closedAtJvmExit(stepSlices.size())) {
+			return;
+		}
+		if (isResponseReadTimeout(cause)) {
+			LogUtil.trace(
+							Loggers.ERR,
+							Level.WARN,
+							cause,
+							"{}: the step slice \"{}\" did not answer its await within the RMI response timeout; the entry no longer awaits it and goes on to stop and close it",
+							loadStepId(),
+							slice);
+			return;
+		}
+		recordLostSlice(slice, "await", cause);
+	}
+
+	/**
+	 * A failed stop of a slice, other than a {@linkplain #isResponseReadTimeout response timeout},
+	 * loses the slice (see {@link #recordLostSlice}). A stop whose response timed out is the worker
+	 * still draining its operations in flight, for up to {@code load.op.wait.limit}, past the RMI
+	 * response timeout: it keeps 5.17.0's warning and does not fail the step, although that worker's
+	 * operations that end after the timeout are missing from the totals.
+	 *
+	 * @param stopSent whether the failed call was the stop itself, rather than a call before it
+	 * @return whether the slice is a lost one, so the caller logs nothing more
+	 */
+	private boolean recordLostSliceAtStop(final LoadStep slice, final RemoteException cause, final boolean stopSent) {
+		if (isResponseReadTimeout(cause)) {
+			synchronized (lostSliceLock) {
+				if (stopSent) {
+					if (slowStopSlices == null) {
+						slowStopSlices = Collections.newSetFromMap(new IdentityHashMap<>());
+					}
+					slowStopSlices.add(slice);
+				}
+				// A slice already lost, at its await, keeps its one error line.
+				return lostSlices != null && lostSlices.contains(slice);
+			}
+		}
+		return recordLostSlice(slice, "stop", cause);
+	}
+
+	/** A stop of the slice answered, so a later close of it no longer waits behind a slow stop. */
+	private void stopAnswered(final LoadStep slice) {
+		synchronized (lostSliceLock) {
+			if (slowStopSlices != null) {
+				slowStopSlices.remove(slice);
+			}
+		}
+	}
+
+	/**
+	 * A failed close of a slice loses it, like a failed stop. The one exception is a response timeout
+	 * at the close of a slice whose latest stop timed out the same way: the worker's close waits for
+	 * that stop, which is still draining, so it is the same slow stop and keeps the same warning. A
+	 * close that times out after a stop that answered loses the slice.
+	 *
+	 * @return whether the slice is a lost one, so the caller logs nothing more
+	 */
+	private boolean recordLostSliceAtClose(final LoadStep slice, final RemoteException cause) {
+		if (isResponseReadTimeout(cause)) {
+			synchronized (lostSliceLock) {
+				if (slowStopSlices != null && slowStopSlices.contains(slice)) {
+					// A slice already lost keeps its one error line.
+					return lostSlices != null && lostSlices.contains(slice);
+				}
+			}
+		}
+		return recordLostSlice(slice, "close", cause);
+	}
+
+	/**
+	 * Whether a remote call failed only because the worker's response did not arrive within the RMI
+	 * response timeout ({@code sun.rmi.transport.tcp.responseTimeout}, 10 s in the shipped engine).
+	 * RMI reports a read of the response that timed out as an {@link UnmarshalException} with a
+	 * {@link SocketTimeoutException} in its cause chain. A connect that timed out is a
+	 * {@link java.rmi.ConnectException} or {@link java.rmi.ConnectIOException}, also when its cause is
+	 * a {@code SocketTimeoutException}; a refused connect, a reset connection, a worker that died
+	 * during the call and a released slice ({@link NoSuchObjectException}) fail in other ways. None of
+	 * those is a response timeout.
+	 */
+	static boolean isResponseReadTimeout(final RemoteException failure) {
+		if (!(failure instanceof UnmarshalException)) {
+			return false;
+		}
+		Throwable cause = failure.getCause();
+		for (var depth = 0; cause != null && depth < 16; depth++) {
+			if (cause instanceof SocketTimeoutException) {
+				return true;
+			}
+			cause = cause.getCause();
+		}
+		return false;
+	}
+
+	/** The failure's text on one line, as RMI exceptions put their nested exception on a new one. */
+	private static String oneLine(final Throwable failure) {
+		return failure.toString().replaceAll("\\s*\\R\\s*", " ").strip();
+	}
+
+	private boolean isLostSlice(final LoadStep slice) {
+		synchronized (lostSliceLock) {
+			return lostSlices != null && lostSlices.contains(slice);
+		}
+	}
+
+	private RunTerminalException takeLostSliceFailure() {
+		synchronized (lostSliceLock) {
+			final var failure = lostSliceFailure;
+			lostSliceFailure = null;
+			return failure;
+		}
+	}
+
+	private static int sliceIndex(final LoadStep[] slices, final LoadStep slice) {
+		for (var i = 0; i < slices.length; i++) {
+			if (slices[i] == slice) {
+				return i;
+			}
+		}
+		return -1;
 	}
 
 	void validateDeleteInventoriesBeforeAdmission() {
@@ -1953,7 +2149,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
 			} catch (final RemoteException e) {
-				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the step service {}", loadStepId(), stepSlice);
+				if (!isLostSlice(stepSlice)) {
+					LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the step service {}", loadStepId(), stepSlice);
+				}
 			}
 		});
 	}
@@ -2250,6 +2448,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					} catch (final InterruptedException e) {
 						throwUnchecked(e);
 					} catch (final RemoteException e) {
+						recordLostSliceAtAwait(stepSlice, e);
 						return false;
 					}
 					return false;
@@ -2950,14 +3149,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		} else {
 			stepSlices.stream().filter(s -> s != null).parallel().forEach(stepSlice -> {
+				var stopSent = false;
 				try (
 								final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
 												KEY_CLASS_NAME, getClass().getSimpleName())) {
+					stopSent = true;
 					stepSlice.stop();
+					stopAnswered(stepSlice);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
-					LogUtil.trace(Loggers.ERR, Level.WARN, e, "{}: failed to stop the step slice \"{}\"", loadStepId(),
-									stepSlice);
+					if (!(e instanceof RemoteException remote && recordLostSliceAtStop(stepSlice, remote, stopSent))) {
+						LogUtil.trace(Loggers.ERR, Level.WARN, e, "{}: failed to stop the step slice \"{}\"", loadStepId(),
+										stepSlice);
+					}
 				}
 			});
 		}
@@ -3044,8 +3248,32 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		try {
 			closeForStandaloneDeleteMode(false);
+		} catch (final IOException | RuntimeException | Error e) {
+			final var lost = takeLostSliceFailure();
+			if (lost == null) {
+				throw e;
+			}
+			// A lost slice fails the step also when the close failed for an ordinary reason.
+			if (RunTerminalException.find(e) == null) {
+				lost.addSuppressed(e);
+				throw lost;
+			}
+			e.addSuppressed(lost);
+			throw e;
 		} finally {
 			closeRetainedDurationPhases();
+		}
+	}
+
+	/**
+	 * Fails the closed step when it lost a slice: the close has run in full, but the totals are
+	 * missing that worker's last operations.
+	 */
+	@Override
+	protected final void afterCloseTransition() {
+		final var lost = takeLostSliceFailure();
+		if (lost != null) {
+			throw lost;
 		}
 	}
 
@@ -3182,6 +3410,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 				metricsAggregator = null;
 			}
+			slicesClosing = true;
 			if (durationMode && durationAdmissionBarrierSatisfied) {
 				final List<LoadStep> activeSlices = stepSlices.stream()
 								.filter(slice -> slice != null)
@@ -3215,6 +3444,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						Loggers.MSG.debug("{}: step slice \"{}\" closed", loadStepId(), stepSlice);
 					} catch (final Exception e) {
 						throwUncheckedIfInterrupted(e);
+						if (e instanceof RemoteException remote && recordLostSliceAtClose(stepSlice, remote)) {
+							// The step's failure for its lost slices names this one.
+							continue;
+						}
 						LogUtil.exception(Level.WARN, e, "{}: failed to close the step service \"{}\"", loadStepId(),
 										stepSlice);
 						if (integrityModeEnabled()) {
@@ -3228,14 +3461,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			Loggers.MSG.debug("{}: closed all {} step slices", loadStepId(), stepSlices.size());
+			final int slicesStarted = startedSliceCount;
 			if (!durationMode || (durationSlicesClosed && terminalCause == null)) {
 				stepSlices.clear();
+				startedSliceCount = 0;
 			}
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
 			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
 				try {
 					if (startStopped && deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
-						aggregator.closeAfterStoppedStart(startedSliceCount);
+						aggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						deleteArtifactAggregator.close();
 					}
@@ -3253,7 +3488,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
 			for (final var aggregator : operationLifecycleAggregators) {
 				try {
-					closeSliceLoggerArtifact(aggregator);
+					closeSliceLoggerArtifact(aggregator, slicesStarted);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(terminalCause,
@@ -3272,7 +3507,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
-					closeSliceLoggerArtifact(integrityLogFileAggregator);
+					closeSliceLoggerArtifact(integrityLogFileAggregator, slicesStarted);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(
@@ -3324,7 +3559,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						final long failedOperationCount = terminalFailureCountsByOpType.getOrDefault(
 										csvAggregator.artifactOpType(), -1L);
 						if (startStopped) {
-							csvAggregator.closeAfterStoppedStart(failedOperationCount, startedSliceCount);
+							csvAggregator.closeAfterStoppedStart(failedOperationCount, slicesStarted);
 						} else {
 							csvAggregator.close(failedOperationCount);
 						}
@@ -3413,9 +3648,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
 	 * started, nothing is published.
 	 */
-	private void closeSliceLoggerArtifact(final AutoCloseable aggregator) throws Exception {
+	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
 		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
-			sliceArtifact.closeAfterStoppedStart(startedSliceCount);
+			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
 			aggregator.close();
 		}

@@ -86,7 +86,7 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 		final List<Long> runIds = new ArrayList<>();
 		for (final var openStepSvc : openStepSvcs.reversed()) {
 			if (openStepSvc.isRunning()) {
-				runIds.add(openStepSvc.runId());
+				runIds.add(openStepSvc.sliceRunId());
 			}
 		}
 		return runIds;
@@ -102,12 +102,12 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 		var matched = false;
 		final List<String> stoppedStepIds = new ArrayList<>();
 		for (final var openStepSvc : openStepSvcs) {
-			if (openStepSvc.runId() != runId) {
+			if (openStepSvc.sliceRunId() != runId) {
 				continue;
 			}
 			matched = true;
 			if (openStepSvc.isRunning()) {
-				final var stepId = openStepSvc.loadStepId();
+				final var stepId = openStepSvc.sliceStepId();
 				try {
 					openStepSvc.stop();
 					stoppedStepIds.add(stepId);

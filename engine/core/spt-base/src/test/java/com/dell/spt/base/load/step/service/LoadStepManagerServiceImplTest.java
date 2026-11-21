@@ -106,7 +106,7 @@ class LoadStepManagerServiceImplTest {
 			manager.newStepService("Load", mock(Config.class), List.of());
 			final var service = construction.constructed().getFirst();
 			when(service.isRunning()).thenReturn(true);
-			when(service.runId()).thenReturn(7L);
+			when(service.sliceRunId()).thenReturn(7L);
 
 			hooks.getFirst().accept(service);
 
@@ -129,10 +129,10 @@ class LoadStepManagerServiceImplTest {
 			}
 			final var services = construction.constructed();
 			when(services.get(0).isRunning()).thenReturn(true);
-			when(services.get(0).runId()).thenReturn(1L);
-			when(services.get(1).runId()).thenReturn(2L);
+			when(services.get(0).sliceRunId()).thenReturn(1L);
+			when(services.get(1).sliceRunId()).thenReturn(2L);
 			when(services.get(2).isRunning()).thenReturn(true);
-			when(services.get(2).runId()).thenReturn(3L);
+			when(services.get(2).sliceRunId()).thenReturn(3L);
 
 			assertEquals(List.of(3L, 1L), manager.busySliceRunIds());
 			assertTrue(manager.hasOpenSlices());
@@ -152,9 +152,9 @@ class LoadStepManagerServiceImplTest {
 			final var notRunning = services.get(2);
 			final var otherRun = services.get(3);
 			for (final var service : List.of(running, failing, notRunning)) {
-				when(service.runId()).thenReturn(5L);
+				when(service.sliceRunId()).thenReturn(5L);
 			}
-			when(otherRun.runId()).thenReturn(6L);
+			when(otherRun.sliceRunId()).thenReturn(6L);
 			when(running.isRunning()).thenReturn(true);
 			when(failing.isRunning()).thenReturn(true);
 			when(otherRun.isRunning()).thenReturn(true);

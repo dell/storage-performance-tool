@@ -11,8 +11,10 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.concurrent.JvmExit;
@@ -25,17 +27,21 @@ import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
+import com.dell.spt.base.load.step.service.LoadStepService;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.rmi.NoSuchObjectException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -44,6 +50,7 @@ import java.util.stream.Stream;
 import org.apache.commons.csv.CSVFormat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 
 /**
  * A start that ends as a stop publishes the slice files of the slices whose start returned, and
@@ -130,6 +137,48 @@ class StoppedStartSliceArtifactsTest {
 		Thread.interrupted();
 
 		assertDoesNotThrow(client::close);
+		assertEquals(List.of("entry-worker"), workerIds(canonical));
+		assertEquals(List.of(CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 0)), nodeSources());
+	}
+
+	@Test
+	void aStoppedStartWithAnUnstartedRemoteSliceFailingTeardownStillPublishesTheEntrySlice() throws Exception {
+		final LoadStep entry = sliceWritingItsLifecycleRowAtClose("entry-worker");
+		final AtomicBoolean workerWrote = new AtomicBoolean();
+		final TestLoadStepClient client = twoSliceClient(entry, workerWrote, false);
+
+		try (MockedStatic<LoadStepSliceUtil> util = mockStatic(LoadStepSliceUtil.class, CALLS_REAL_METHODS)) {
+			util.when(() -> LoadStepSliceUtil.resolveRemote(any(), anyList(), anyString(), anyString()))
+							.thenAnswer(invocation -> {
+								final LoadStepService stub = (LoadStepService) invocation.callRealMethod();
+								return (LoadStepService) Proxy.newProxyInstance(
+												LoadStepService.class.getClassLoader(),
+												new Class<?>[]{LoadStepService.class
+								},
+												(proxy, method, args) -> {
+													if (method.getDeclaringClass() == Object.class) {
+														return switch (method.getName()) {
+														case "equals" -> proxy == args[0];
+														case "hashCode" -> System.identityHashCode(proxy);
+														default -> "unstarted slice";
+														};
+													}
+													if ("stop".equals(method.getName()) || "close".equals(method.getName())) {
+														throw new NoSuchObjectException("injected: unstarted slice released");
+													}
+													try {
+														return method.invoke(stub, args);
+													} catch (final InvocationTargetException e) {
+														throw e.getCause();
+													}
+												});
+							});
+			assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, client::start));
+		}
+		Thread.interrupted();
+
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
 		assertEquals(List.of("entry-worker"), workerIds(canonical));
 		assertEquals(List.of(CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 0)), nodeSources());
 	}
