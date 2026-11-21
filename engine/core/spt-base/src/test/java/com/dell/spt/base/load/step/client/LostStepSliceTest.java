@@ -1188,16 +1188,10 @@ class LostStepSliceTest {
 			Thread.sleep(500);
 			releaseClose.countDown();
 			final String closeOutcome = closed.get(40, TimeUnit.SECONDS);
-			String awaitOutcome;
-			try {
-				awaitOutcome = "returned " + awaited.get(30, TimeUnit.SECONDS);
-			} catch (final ExecutionException e) {
-				awaitOutcome = "threw " + e.getCause();
-			}
+			final ExecutionException awaitFailure = assertThrows(ExecutionException.class, () -> awaited.get(30, TimeUnit.SECONDS));
+			assertInstanceOf(InterruptedException.class, awaitFailure.getCause(), "the await stops as the engine exits");
 			LogUtil.flushAll();
 			Thread.sleep(200);
-			System.out.println("PROBE-RESULT lostNodes=" + lostNodes() + " | close: " + closeOutcome + " | await: " + awaitOutcome
-							+ " | await poll failure: " + observedAwaitFailure.get());
 			assertEquals(List.of(), lostNodes(), "the exit hook's close in progress must not record a lost slice");
 			assertEquals("closed without a failure", closeOutcome);
 		} finally {

@@ -286,6 +286,9 @@ class SliceLifecycleCloseTest {
 	@Test
 	void anAwaitEndingWhileTheExitHookClosesSlicesThrowsInterrupted() throws Exception {
 		final String stepId = "mid-close-await-" + UUID.randomUUID();
+		stepDir = Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_METRICS_TOTAL.getName(), stepId))
+						.toAbsolutePath()
+						.getParent();
 		final int port1 = freePort();
 		final int port2 = freePort();
 		final String w1 = "127.0.0.1:" + port1;
