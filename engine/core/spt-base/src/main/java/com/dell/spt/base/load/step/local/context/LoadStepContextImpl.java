@@ -543,6 +543,38 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			closeDeleteVerificationStorage();
 			throw failure;
 		}
+		warnIfSizeLimitCannotStop(configSizeLimit.get(), standaloneDelete.enabled());
+	}
+
+	/**
+	 * Warns once, at construction, when this load has a size limit but its primary metrics
+	 * context counts operations that transfer no body: such a load is never stopped by the size
+	 * limit, which counts transferred bytes. A mixed step's primary context is its first enabled
+	 * type, so it warns only when that type is bodyless.
+	 */
+	private void warnIfSizeLimitCannotStop(final long configuredSizeLimit, final boolean standaloneDeleteFlag) {
+		if (configuredSizeLimit <= 0) {
+			return;
+		}
+		final OpType bodylessType;
+		if (standaloneDeleteFlag) {
+			bodylessType = OpType.DELETE;
+		} else {
+			final OpType primaryType = metricsCtx == null ? null : metricsCtx.opType();
+			bodylessType = OpType.DELETE.equals(primaryType) || OpType.STAT.equals(primaryType)
+							|| OpType.NOOP.equals(primaryType)
+											? primaryType
+											: null;
+		}
+		if (bodylessType != null) {
+			Loggers.ERR.warn(
+							"{}: load.step.limit.size counts transferred bytes, and {} operations transfer none, so this"
+											+ " load is not stopped by the size limit of {}; it ends at its count limit, the"
+											+ " step's time limit, or the end of its items",
+							id,
+							bodylessType,
+							BinarySizeFormat.formatFixedSize(configuredSizeLimit));
+		}
 	}
 
 	/**
