@@ -890,11 +890,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	 * UPDATE queues no body and grows nothing.
 	 */
 	private static void commitAppendedSize(final Operation<?> op) {
-		if (op instanceof DataOperation<?> dataOp
-						&& dataOp.countBytesDone() > 0
-						&& op.item() instanceof DataItem dataItem) {
+		if (op instanceof DataOperation<?> dataOp) {
+			// A random-range UPDATE has no fixed ranges: skip the volatile countBytesDone() read.
 			final List<Range> fixedRanges = dataOp.fixedRanges();
-			if (fixedRanges == null) {
+			if (fixedRanges == null
+							|| dataOp.countBytesDone() <= 0
+							|| !(op.item() instanceof DataItem dataItem)) {
 				return;
 			}
 			long appended = 0;
