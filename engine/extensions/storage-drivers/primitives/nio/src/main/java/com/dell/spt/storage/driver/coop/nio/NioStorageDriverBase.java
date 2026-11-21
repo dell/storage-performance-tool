@@ -73,6 +73,10 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final int[] opBuffReserved;
 	private final AtomicLong rrc = new AtomicLong(0);
 	private final AtomicBoolean operationFailureReported = new AtomicBoolean(false);
+	// Whether a stop of this cycle found an I/O worker still running at its deadline. The later
+	// stop of the same cycle (the stop after the shutdown) then checks the workers without
+	// waiting again, and the warning is logged once. Read and written under the lifecycle lock.
+	private volatile boolean ioWorkersLate = false;
 
 	public NioStorageDriverBase(
 					final String testStepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
@@ -416,6 +420,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	@Override
 	protected final void doStart()
 					throws IllegalStateException {
+		// A worker that outlived the previous stop still holds its thread: refuse the restart
+		// before anything is restarted, so that the driver stays stopped rather than half started.
+		final var running = runningIoWorkerCount();
+		if (running > 0) {
+			throw new IllegalStateException(
+							toString() + ": cannot restart, " + running + " I/O worker(s) of the previous run still running");
+		}
+		ioWorkersLate = false;
 		super.doStart();
 		for (final var ioWorker : ioWorkers) {
 			if (ioWorker.isStopped() && ioWorker instanceof TaskBase task) {
@@ -440,14 +452,69 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		stopIoWorkers();
 	}
 
+	/**
+	 * Stops every I/O worker and waits for them within one shared
+	 * {@link com.dell.spt.base.Constants#TASK_STOP_WAIT_SECONDS} budget. A worker still running at
+	 * the deadline (for example one blocked in a file open that ignores interrupts) is logged once
+	 * per driver at WARN and left behind, as the Netty driver does, so that the step and the driver
+	 * still close; its late operation is settled as unresolved by the step's drain. Once a stop of
+	 * this cycle has found a worker late, a later call checks the workers without waiting again.
+	 */
 	private void stopIoWorkers() {
 		for (final var ioWorker : ioWorkers) {
 			ioWorker.stop();
 		}
-		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TASK_STOP_WAIT_SECONDS);
+		final int late;
+		if (ioWorkersLate) {
+			late = runningIoWorkerCount();
+		} else {
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TASK_STOP_WAIT_SECONDS);
+			var count = 0;
+			for (final var ioWorker : ioWorkers) {
+				if (deadline - System.nanoTime() <= 0 ? !hasTerminated(ioWorker) : !awaitStopped(ioWorker, deadline)) {
+					count++;
+				}
+			}
+			late = count;
+			if (late > 0) {
+				ioWorkersLate = true;
+				try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, CLS_NAME)) {
+					Loggers.ERR.warn(
+									"{}: {} of {} I/O workers did not stop within {} s; going on without them",
+									toString(), late, ioWorkers.size(), TASK_STOP_WAIT_SECONDS);
+				}
+			}
+		}
+		if (late == 0) {
+			ioWorkersLate = false;
+		}
+	}
+
+	/** The number of I/O workers whose thread has not ended; it does not wait. */
+	private int runningIoWorkerCount() {
+		var count = 0;
 		for (final var ioWorker : ioWorkers) {
-			if (deadline - System.nanoTime() <= 0 || !awaitStopped(ioWorker, deadline)) {
-				throw new IllegalStateException("Timed out waiting for NIO worker termination");
+			if (!hasTerminated(ioWorker)) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	/**
+	 * Whether an I/O worker's thread has ended, or never started, without waiting; also on an
+	 * interrupted thread, whose interrupt flag is set again before this returns.
+	 */
+	private static boolean hasTerminated(final Task ioWorker) {
+		final var interrupted = Thread.interrupted();
+		try {
+			return ioWorker.await(0L, TimeUnit.NANOSECONDS);
+		} catch (final InterruptedException e) {
+			// The flag was cleared above, so this cannot happen; count the worker as running.
+			return false;
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
 			}
 		}
 	}
