@@ -29,7 +29,6 @@ func TestFailureLimitStopWarningRule(t *testing.T) {
 		return metrics
 	}
 	twoRows := &MetricsTotals{Rows: []MetricsTotalsRow{{Operation: "CREATE"}, {Operation: "READ"}}}
-	const rateWarning = "Create: ended 1.91s into its 12s time limit with the failure-rate limit on (load.op.limit.fail.rate) and 35 failed requests; the engine stops a phase when failures outpace successes"
 	cases := []struct {
 		name      string
 		end       RunEnd
@@ -58,7 +57,7 @@ func TestFailureLimitStopWarningRule(t *testing.T) {
 		{"distributed, input list, failures above slice 0's share", RunEndCompleted, "read",
 			&StepData{Limits: &StepLimits{FailCount: 10}}, "READ", distributed(86, 14, 1), ""},
 		{"distributed, rate on, short of the time limit", RunEndCompleted, "write",
-			&StepData{Limits: &StepLimits{FailCount: 10, FailRate: true, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 1.909), rateWarning},
+			&StepData{Limits: &StepLimits{FailCount: 10, FailRate: true, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 1.909), ""},
 		{"distributed, rate on, ran to the time limit", RunEndCompleted, "write",
 			&StepData{Limits: &StepLimits{FailCount: 10, FailRate: true, TimeSeconds: 12}}, "CREATE", distributed(35, 35, 11.5), ""},
 		{"distributed, rate on, count-bounded", RunEndCompleted, "write",

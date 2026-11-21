@@ -55,8 +55,10 @@ func failureLimitStopWarning(label string, end RunEnd, workloadType string, step
 	if failed <= 0 {
 		return ""
 	}
+	// A distributed step's config.yaml holds slice 0's share of the count limits, and the rate
+	// stop can't be told from the results, so a distributed phase gets no warning.
 	if metrics.NodeCount > 1 {
-		return distributedFailureRateWarning(label, limits, metrics)
+		return ""
 	}
 	countReached := limits.FailCount > 0 && failed > limits.FailCount
 	rateOn := limits.FailRate
@@ -90,18 +92,6 @@ func failureRateWarning(label, progress string, failed int64) string {
 	return fmt.Sprintf("%s: ended %s with the failure-rate limit on (load.op.limit.fail.rate) and %s failed %s; "+
 		"the engine stops a phase when failures outpace successes",
 		label, progress, formatInt(failed), requestWord(failed))
-}
-
-// distributedFailureRateWarning is the only form of the warning for a distributed step. Its
-// config.yaml holds slice 0's share of the count limits, not the fleet's, so neither count is
-// compared; the rate switch and the time limit aren't sliced, so a fleet that ended well before
-// its time limit with the rate limit on and no count limit gets the hedged rate wording.
-func distributedFailureRateWarning(label string, limits *StepLimits, metrics *PhaseMetrics) string {
-	if !limits.FailRate || limits.OpCount > 0 || limits.TimeSeconds <= 0 ||
-		metrics.DurationSeconds >= limits.TimeSeconds-failureLimitEarlyEndMarginSeconds {
-		return ""
-	}
-	return failureRateWarning(label, failureLimitProgress(limits, metrics), metrics.FailureCount)
 }
 
 // failureLimitProgress says how far into its own time or count limit the phase got; empty with neither.
