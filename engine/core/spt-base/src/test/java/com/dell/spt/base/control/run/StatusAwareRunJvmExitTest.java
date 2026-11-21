@@ -4,6 +4,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -75,6 +76,10 @@ class StatusAwareRunJvmExitTest {
 		final Throwable thrown = assertThrows(Throwable.class, run("Steps.refused();")::run);
 
 		assertInstanceOf(InterruptedException.class, thrown);
+		// No stop was requested, so the run failed
+		assertEquals(ApiStatus.State.FAILED, status.state(), String.valueOf(status.snapshot()));
+		assertNotNull(status.failureCategory());
+		assertNotNull(status.failureMessage());
 	}
 
 	private void assertStopped() {
