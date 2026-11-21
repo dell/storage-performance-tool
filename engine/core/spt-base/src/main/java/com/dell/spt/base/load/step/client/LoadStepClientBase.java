@@ -3469,32 +3469,44 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		metricsFetchLosesSlices = false;
 		final var stoppedAtOnce = disarmLostSliceStop();
 		// Each stage runs whatever an earlier one threw, so the stop's metrics output, its last stage, is
-		// always written; the first failure is thrown at the end, with any later ones suppressed under it.
-		Throwable failure = null;
+		// written; the first failure is thrown at the end, with any later ones suppressed under it.
+		final var failures = new StopFailures();
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
-				failure = runStopStage(failure, this::relayBucketVersioningNoticesAtStop);
-				failure = runStopStage(failure, this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
-				failure = runStopStage(failure, super::doStop);
-				throwStopFailure(failure);
+				failures.run(this::relayBucketVersioningNoticesAtStop);
+				failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
+				failures.run(super::doStop);
+				failures.throwFirst();
 				return;
 			}
-			failure = runStopStage(failure, this::stopDurationSlices);
+			failures.run(this::stopDurationSlices);
 		} else {
-			failure = runStopStage(failure, () -> stopSlicesAtStop(stoppedAtOnce));
+			failures.run(() -> stopSlicesAtStop(stoppedAtOnce));
 		}
-		failure = runStopStage(failure, this::relayBucketVersioningNoticesAtStop);
-		failure = runStopStage(failure, this::stopMetricsAggregator);
-		failure = runStopStage(failure, this::closeItemTimingMetricsOutputFileAggregators);
+		if (failures.first() instanceof InterruptedException) {
+			// An interrupted slice stop ends the stop here, as before: the stages below expect stopped
+			// slices, and the close's stop runs them once the slices have stopped.
+			failures.throwFirst();
+		}
+		failures.run(this::relayBucketVersioningNoticesAtStop);
+		failures.run(this::stopMetricsAggregator);
+		failures.run(this::closeItemTimingMetricsOutputFileAggregators);
 		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
-			failureBudgetMetricsOutputDeferred = true;
-			throwStopFailure(failure);
+			if (failures.first() == null) {
+				failureBudgetMetricsOutputDeferred = true;
+				return;
+			}
+			// A stop that throws skips the close, so the output cannot wait for the live probe there: as
+			// at an incomplete duration stop, the outcome is published failed and the output written now.
+			failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
+			failures.run(super::doStop);
+			failures.throwFirst();
 			return;
 		}
-		failure = runStopStage(failure, this::finalizeFailureBudgetBeforeMetricsOutput);
-		failure = runStopStage(failure, super::doStop);
-		throwStopFailure(failure);
+		failures.run(this::finalizeFailureBudgetBeforeMetricsOutput);
+		failures.run(super::doStop);
+		failures.throwFirst();
 	}
 
 	private void stopDurationSlices() {
@@ -3558,25 +3570,42 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		itemTimingMetricsOutputFileAggregators.clear();
 	}
 
-	/** Runs one stage of the stop and returns the stop's first failure, with this stage's suppressed under it. */
-	static Throwable runStopStage(final Throwable failure, final Runnable stage) {
-		try {
-			stage.run();
-			return failure;
-		} catch (final Throwable e) {
-			if (failure == null) {
-				return e;
-			}
-			if (failure != e) {
-				failure.addSuppressed(e);
-			}
-			return failure;
-		}
-	}
+	/**
+	 * The failures of one stop: the first is thrown at its end, with each later one suppressed under it,
+	 * never under itself. A stop request suppressed under another failure sets the interrupt flag again,
+	 * so the caller still sees it.
+	 */
+	static final class StopFailures {
 
-	private static void throwStopFailure(final Throwable failure) {
-		if (failure != null) {
-			throwUnchecked(failure);
+		private Throwable first;
+		private boolean interrupted;
+
+		/** Runs one stage of the stop, whatever an earlier stage threw. */
+		void run(final Runnable stage) {
+			try {
+				stage.run();
+			} catch (final Throwable e) {
+				interrupted |= e instanceof InterruptedException;
+				if (first == null) {
+					first = e;
+				} else if (first != e) {
+					first.addSuppressed(e);
+				}
+			}
+		}
+
+		Throwable first() {
+			return first;
+		}
+
+		void throwFirst() {
+			if (first == null) {
+				return;
+			}
+			if (interrupted && !(first instanceof InterruptedException)) {
+				Thread.currentThread().interrupt();
+			}
+			throwUnchecked(first);
 		}
 	}
 

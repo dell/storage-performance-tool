@@ -22,6 +22,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.load.step.client.metrics.MetricsAggregator;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -65,6 +66,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
@@ -2853,6 +2855,77 @@ class LoadStepClientBaseTest {
 			closeThread.join(TimeUnit.SECONDS.toMillis(2));
 		}
 		assertNoLiveThreads("spt-delete-failure-budget-snapshot-");
+	}
+
+	@Test
+	void aFailedStopStageWithALiveCounterProbeStillWritesTheMetricsOutput() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final Map<String, Object> metadata = new HashMap<>();
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(metadata);
+		client.addMetricsContextForTest(metricsContext);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSnapshot = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotEntered.countDown();
+			awaitIgnoringInterrupt(releaseSnapshot);
+			return cleanDeleteLifecycle();
+		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		addRawStepSlice(client, slice);
+		final Field aggregatorField = LoadStepClientBase.class.getDeclaredField("metricsAggregator");
+		aggregatorField.setAccessible(true);
+		try {
+			// The await's stop defers the output to the close while the live probe runs.
+			assertTrue(client.await(2, TimeUnit.SECONDS));
+			verify(mockMetricsManager, never()).unregister(metricsContext);
+			final IllegalStateException injected = new IllegalStateException("injected: metrics aggregator stop");
+			final MetricsAggregator aggregator = mock(MetricsAggregator.class);
+			doThrow(injected).when(aggregator).stop();
+			aggregatorField.set(client, aggregator);
+
+			// The close's stop fails with the probe still live, so the close is skipped: the output is written now.
+			assertSame(injected, assertThrows(IllegalStateException.class, client::close));
+
+			verify(mockMetricsManager, times(1)).unregister(metricsContext);
+			assertEquals(
+							MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED,
+							metadata.get(MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME));
+			assertFalse(client.isClosed());
+		} finally {
+			aggregatorField.set(client, null);
+			releaseSnapshot.countDown();
+			try {
+				client.close();
+			} catch (final IOException | RuntimeException ignored) {
+				// Only the release of the probe and the collector matters here.
+			}
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+	}
+
+	@Test
+	void aFailedStageOfAnIncompleteDurationStopStillWritesTheMetricsOutput() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						durationConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(new HashMap<>());
+		client.addMetricsContextForTest(metricsContext);
+		final IllegalStateException injected = new IllegalStateException("injected: outcome publish");
+		doThrow(injected).when(mockMetricsManager).updateTerminalDeleteFailureOutcome(anyString(), anyString());
+
+		// No admission barrier was reached: the stop takes the incomplete duration branch.
+		assertSame(injected, assertThrows(IllegalStateException.class, client::doStop));
+
+		verify(mockMetricsManager, times(1)).unregister(metricsContext);
 	}
 
 	@Test

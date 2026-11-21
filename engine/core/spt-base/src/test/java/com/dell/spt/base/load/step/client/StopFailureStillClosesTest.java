@@ -1,11 +1,15 @@
 package com.dell.spt.base.load.step.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -20,14 +24,15 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * A step slice whose shutdown fails, as a local slice whose {@code fs} or {@code s3-aws} I/O worker
- * will not stop, does not cost the step its close; and a stop stage that fails does not cost the stop
- * its metrics output. The slices are mocks: slice 0 stands for the entry's own, slices 1 and 2 for two
+ * A step slice whose shutdown fails, as a local slice whose context's drain or storage driver shutdown
+ * throws, does not cost the step its close; and a stop stage that fails does not cost the stop its
+ * metrics output. The slices are mocks: slice 0 stands for the entry's own, slices 1 and 2 for two
  * workers'.
  */
 @Timeout(60)
@@ -45,10 +50,15 @@ class StopFailureStillClosesTest {
 		config.val("item-data-verify", false);
 	}
 
+	@AfterEach
+	void clearInterrupt() {
+		Thread.interrupted();
+	}
+
 	@Test
 	void aSliceWhoseShutdownThrowsStillLetsTheStepStopAndCloseEverySlice() throws Exception {
 		final TestLoadStepClient client = clientWithThreeSlices();
-		doThrow(new IllegalStateException("injected: Timed out waiting for NIO worker termination"))
+		doThrow(new IllegalStateException("injected: the context's driver shutdown failed"))
 						.when(slices.get(1)).shutdown();
 		final AtomicInteger timingCloses = new AtomicInteger();
 		final AtomicInteger lifecycleCloses = new AtomicInteger();
@@ -81,6 +91,45 @@ class StopFailureStillClosesTest {
 	}
 
 	@Test
+	void anInterruptFromASlicesShutdownStillPropagates() throws Exception {
+		final TestLoadStepClient client = clientWithThreeSlices();
+		doAnswer(invocation -> {
+			throw new InterruptedException("injected");
+		}).when(slices.get(1)).shutdown();
+
+		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, client::doShutdown));
+	}
+
+	@Test
+	void anInterruptedSliceStopEndsTheStopBeforeItsOutputAndTheClosesStopWritesIt() throws Exception {
+		final TestLoadStepClient client = clientWithThreeSlices();
+		final MetricsContext<?> context = mock(MetricsContext.class);
+		client.addMetricsContextForTest(context);
+		final AtomicInteger sliceStops = new AtomicInteger();
+		doAnswer(invocation -> {
+			if (sliceStops.incrementAndGet() == 1) {
+				throw new InterruptedException("injected: stopped");
+			}
+			return invocation.getMock();
+		}).when(slices.get(1)).stop();
+		final AtomicInteger timingCloses = new AtomicInteger();
+		list(client, "itemTimingMetricsOutputFileAggregators").add((AutoCloseable) timingCloses::incrementAndGet);
+
+		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, client::close));
+
+		assertFalse(Thread.interrupted(), "the thrown InterruptedException carries the stop, as before");
+		assertEquals(0, timingCloses.get(), "no output stage runs before the slices have stopped");
+		verify(metricsMgr, never()).unregister(context);
+		assertFalse(client.isClosed());
+
+		client.close();
+
+		assertEquals(1, timingCloses.get(), "the close's stop closes the timing aggregator");
+		verify(metricsMgr, times(1)).unregister(context);
+		assertTrue(client.isClosed(), "the step ends closed");
+	}
+
+	@Test
 	void aFailedStopStageStillWritesTheMetricsOutputAndThrowsTheFirstFailure() throws Exception {
 		final TestLoadStepClient client = clientWithThreeSlices();
 		final MetricsContext<?> context = mock(MetricsContext.class);
@@ -105,10 +154,12 @@ class StopFailureStillClosesTest {
 		assertEquals(List.of(later), List.of(first.getSuppressed()));
 		assertEquals(1, timingCloses.get(), "the stage after the failed one still runs");
 		verify(metricsMgr, times(1)).unregister(context);
+		assertTrue(Thread.interrupted(), "the stop request under the first failure sets the interrupt flag");
 	}
 
 	@Test
 	void anInterruptedTimingAggregatorCloseStillWritesTheMetricsOutput() throws Exception {
+		// Unlike an interrupted slice stop, the slices have stopped here.
 		final TestLoadStepClient client = clientWithThreeSlices();
 		final MetricsContext<?> context = mock(MetricsContext.class);
 		client.addMetricsContextForTest(context);
@@ -120,6 +171,7 @@ class StopFailureStillClosesTest {
 
 		assertTrue(stop instanceof InterruptedException, String.valueOf(stop));
 		verify(metricsMgr, times(1)).unregister(context);
+		assertFalse(Thread.interrupted(), "the thrown InterruptedException carries the stop itself");
 	}
 
 	@Test
@@ -127,19 +179,22 @@ class StopFailureStillClosesTest {
 		final IllegalStateException first = new IllegalStateException("first");
 		final IllegalStateException second = new IllegalStateException("second");
 
-		var failure = LoadStepClientBase.runStopStage(null, () -> {
+		final var failures = new LoadStepClientBase.StopFailures();
+		failures.run(() -> {
 			throw first;
 		});
-		failure = LoadStepClientBase.runStopStage(failure, () -> {});
-		failure = LoadStepClientBase.runStopStage(failure, () -> {
+		failures.run(() -> {});
+		failures.run(() -> {
 			throw first;
 		});
-		failure = LoadStepClientBase.runStopStage(failure, () -> {
+		failures.run(() -> {
 			throw second;
 		});
 
-		assertSame(first, failure);
+		assertSame(first, failures.first());
 		assertEquals(List.of(second), List.of(first.getSuppressed()));
+		assertSame(first, assertThrows(IllegalStateException.class, failures::throwFirst));
+		assertFalse(Thread.interrupted(), "no stop request was collected");
 	}
 
 	private TestLoadStepClient clientWithThreeSlices() throws Exception {
