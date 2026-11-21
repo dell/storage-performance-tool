@@ -77,6 +77,8 @@ final class S3AwsMultipartStepCountsTest {
 
 	private final MultipartStub stub = new MultipartStub();
 	private long stepMillis;
+	/** The last step's own elapsed time, from its last metrics snapshot, by operation type and concurrency limit. */
+	private final Map<String, Long> stepElapsedMillis = new ConcurrentHashMap<>();
 
 	@TempDir
 	Path home;
@@ -242,7 +244,8 @@ final class S3AwsMultipartStepCountsTest {
 		assertEquals(stub.completions.get(), stub.completedUploads.stream().distinct().count(), "each under its own upload ID");
 		assertEquals(List.of(), stub.nullUploadIdRequests);
 		assertEquals(1, stub.maxOpenUploads.get(), "uploads open at once");
-		assertTrue(stepMillis >= TimeUnit.SECONDS.toMillis(4), () -> "the step ended after " + stepMillis + " ms");
+		final long elapsedMillis = stepElapsedMillis.get("CREATE-4");
+		assertTrue(elapsedMillis >= TimeUnit.SECONDS.toMillis(4), () -> "the step ended after " + elapsedMillis + " ms");
 	}
 
 	/**
@@ -310,6 +313,7 @@ final class S3AwsMultipartStepCountsTest {
 					final var snapshot = metricsCtx.lastSnapshot();
 					outcomes.put(metricsCtx.opType() + "-" + metricsCtx.concurrencyLimit(),
 									List.of(snapshot.successSnapshot().count(), snapshot.failsSnapshot().count()));
+					stepElapsedMillis.put(metricsCtx.opType() + "-" + metricsCtx.concurrencyLimit(), snapshot.elapsedTimeMillis());
 				}
 			}
 		}) {

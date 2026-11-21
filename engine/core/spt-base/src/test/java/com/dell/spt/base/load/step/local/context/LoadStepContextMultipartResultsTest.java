@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -21,6 +22,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -206,6 +208,56 @@ final class LoadStepContextMultipartResultsTest {
 		assertNull(whole.get("uploadId"));
 		assertEquals(PARTS, whole.subOperations().size());
 		assertFalse(whole.allSubOperationsDone(), "every part is unsettled again");
+	}
+
+	@ParameterizedTest(name = "batch={0}, retry={1}")
+	@MethodSource("forms")
+	void aRecycledSplitReadStartsAgainFromItsFirstRange(final boolean batch, final boolean retry) {
+		final var read = new Published(OpType.READ).starts(Status.SUCC);
+		for (var part = 0; part < PARTS; part++) {
+			read.partSucceeds(part);
+		}
+		read.ends(Status.SUCC);
+		recycle = true;
+
+		put(context(retry), batch, read);
+
+		assertOutcome(1, 0, 0);
+		@SuppressWarnings("unchecked")
+		final ArgumentCaptor<Operation<DataItem>> recycled = ArgumentCaptor.forClass(Operation.class);
+		verify(generator).recycle(recycled.capture());
+		final var whole = assertInstanceOf(CompositeOperation.class, recycled.getValue(), "the read, not a range, is recycled");
+		assertFalse(whole.allSubOperationsDone(), "the recycled read starts from the beginning");
+		assertEquals(PARTS, whole.subOperations().size());
+	}
+
+	/** A plain recycled CREATE or READ, not split, is handed back to the generator as it is. */
+	@ParameterizedTest(name = "batch={0}, retry={1}")
+	@MethodSource("forms")
+	void aRecycledPlainOperationIsRecycledAsItIs(final boolean batch, final boolean retry) {
+		recycle = true;
+		final var context = context(retry);
+		final List<Operation<DataItem>> results = new ArrayList<>();
+		for (final var type : List.of(OpType.CREATE, OpType.READ)) {
+			final Operation<DataItem> plain = new DataOperationImpl<>(0, type,
+							new DataItemImpl("plain-" + type, 0, PARTS * PART_SIZE), null, "/bucket", null, null, 0);
+			plain.status(Status.SUCC);
+			results.add(plain);
+		}
+		if (batch) {
+			assertEquals(results.size(), context.put(results, 0, results.size()));
+		} else {
+			results.forEach(result -> assertTrue(context.put(result)));
+		}
+
+		verify(metrics, times(results.size())).markSucc(anyLong(), anyLong(), anyLong(), anyLong());
+		verify(metrics, never()).markFail();
+		verify(generator, never()).retry(any());
+		assertEquals(results.size(), counterResults(context), "results counted toward the count limit");
+		for (final var plain : results) {
+			verify(generator).recycle(same(plain));
+			assertEquals(Status.SUCC, plain.status(), "the recycled result is untouched");
+		}
 	}
 
 	private void assertFailedOnceOrRetriedAsAWhole(final boolean retry) {
