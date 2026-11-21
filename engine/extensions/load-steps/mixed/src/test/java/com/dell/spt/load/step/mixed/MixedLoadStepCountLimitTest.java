@@ -212,6 +212,34 @@ class MixedLoadStepCountLimitTest {
 		assertEquals(20, drivers.accepted.sum(), "operations the driver accepted");
 	}
 
+	/** A step that fails its start runs nothing, so it is not warned about a rate limit. */
+	@Test
+	void aStepThatFailsItsStartIsNotWarned() throws Exception {
+		final String stepId = newStepId("rate-failed-start");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 20L);
+		config.val("load-op-limit-rate", 10.0);
+		config.val("load-op-weights-get", 100);
+		config.val("load-op-weights-put", 0);
+		config.val("load-op-weights-delete", 0);
+		config.val("load-op-weights-stat", 0);
+
+		final List<String> warnings = new ArrayList<>();
+		RuntimeException startFailure = null;
+		metrics = new FinalCountsMetricsManager();
+		try (ErrorLogCapture log = new ErrorLogCapture()) {
+			try {
+				new MixedLoadStepClient(config, extensions(), null, metrics).run();
+			} catch (final RuntimeException e) {
+				startFailure = e;
+			}
+			warnings.addAll(log.messagesContaining("does not apply load.op.limit.rate", Level.WARN));
+		}
+
+		assertEquals(List.of(), warnings, "the rate limit warnings of a step that failed its start: " + startFailure);
+		assertEquals(0, drivers.accepted.sum(), "operations the driver accepted");
+	}
+
 	/** A rate only in the last appended context is the step's rate, so it is warned. */
 	@Test
 	void aRateInTheLastAppendedContextIsWarned() throws Exception {
