@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -323,6 +324,27 @@ class RunServletBusyTest {
 	}
 
 	@Test
+	void aRunInterruptedByAThreadAnEarlierRunLeftFailsAndTheNextRunStarts() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", "Probe.leaveInterrupter();").status);
+		awaitIdle();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
+
+		assertEquals(202, post(RUN_B, "runB", "Probe.awaitInterrupter();").status);
+		awaitIdle();
+		assertEquals(ApiStatus.State.FAILED, status.state(), String.valueOf(status.snapshot()));
+		assertEquals(RUN_B, status.runId());
+
+		final long runC = RUN_A + RUN_B;
+		assertEquals(202, post(runC, "runC", HOLDING_SCENARIO).status);
+		probes.awaitHeld();
+		assertEquals(ApiStatus.State.RUNNING, status.state());
+		probes.release();
+		awaitIdle();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
+		assertEquals(new Report(runC, "runC", runC), probes.onlyReport());
+	}
+
+	@Test
 	void aRunStoppedBeforeItStartedIsNotFinishedUntilItsStatusIsPublished() throws Exception {
 		final var publishing = new CountDownLatch(1);
 		final var publish = new CountDownLatch(1);
@@ -588,6 +610,8 @@ class RunServletBusyTest {
 		private final AtomicInteger cleanupInterrupts = new AtomicInteger();
 		private volatile boolean cleanupEndedInterrupted;
 		private volatile boolean failConfigure;
+		/** The thread an interrupter that an earlier run left behind interrupts. */
+		private final CompletableFuture<Thread> interrupterTarget = new CompletableFuture<>();
 
 		@SuppressWarnings({"rawtypes", "unchecked"
 		})
@@ -667,6 +691,25 @@ class RunServletBusyTest {
 		public void awaitStop() throws InterruptedException {
 			probes.inBody.countDown();
 			new CountDownLatch(1).await();
+		}
+
+		/** Leaves a thread that outlives this run and interrupts the thread of a later run. */
+		public void leaveInterrupter() {
+			final var interrupter = new Thread(() -> {
+				try {
+					probes.interrupterTarget.get(AWAIT_SECONDS, TimeUnit.SECONDS).interrupt();
+				} catch (final Exception e) {
+					// The later run did not start; its test fails on its own
+				}
+			}, "left-behind-interrupter");
+			interrupter.setDaemon(true);
+			interrupter.start();
+		}
+
+		/** Waits for the thread an earlier run left behind to interrupt this run. */
+		public void awaitInterrupter() throws InterruptedException {
+			probes.interrupterTarget.complete(Thread.currentThread());
+			new CountDownLatch(1).await(AWAIT_SECONDS, TimeUnit.SECONDS);
 		}
 
 		public void holdCleanup() {

@@ -410,6 +410,10 @@ public class RunServlet extends HttpServlet {
 			} catch (final Exception e) {
 				// A step refused at JVM exit ends the scenario with this: a stop, not an uncaught failure.
 				if (!(e instanceof InterruptedException && JvmExit.begun())) {
+					if (e instanceof InterruptedException) {
+						// An interrupt no stop requested is a failure; a requested stop still wins below
+						failure = e;
+					}
 					throw e;
 				}
 			} finally {
