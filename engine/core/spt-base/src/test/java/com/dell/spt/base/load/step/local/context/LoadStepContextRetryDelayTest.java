@@ -28,8 +28,11 @@ import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.confuse.Config;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -67,14 +70,20 @@ class LoadStepContextRetryDelayTest {
 	}
 
 	@Test
-	void manyContextsShareOneSchedulerThread() {
+	void manyContextsShareOneSchedulerThread() throws Exception {
+		final Set<Thread> delayed = Collections.newSetFromMap(new IdentityHashMap<>());
 		for (var i = 0; i < 20; i++) {
 			final var step = new Step("retry-delay-shared-" + i, true);
+			step.context.start();
 			step.failOperations(FAILURES);
 			verify(step.generator, timeout(WAIT_MILLIS).times(FAILURES)).retry(any());
 			step.assertDelayedWorkRanOnSchedulerThread(step.retryThreads);
+			delayed.addAll(step.delayedRetryThreads());
+			step.context.stop();
+			step.context.close();
 		}
-		assertEquals(1, schedulerThreadCount());
+		assertEquals(1, delayed.size(), "contexts that were started, stopped and closed must share one thread");
+		assertTrue(schedulerThreads().contains(delayed.iterator().next()), "the shared thread must still run");
 	}
 
 	@Test
@@ -97,10 +106,14 @@ class LoadStepContextRetryDelayTest {
 		assertTrue(log.contains(FirstUseProbe.PASSED), log);
 	}
 
-	private static long schedulerThreadCount() {
+	private static List<Thread> schedulerThreads() {
 		return Thread.getAllStackTraces().keySet().stream()
 						.filter(thread -> RetryDelayScheduler.THREAD_NAME.equals(thread.getName()))
-						.count();
+						.toList();
+	}
+
+	private static long schedulerThreadCount() {
+		return schedulerThreads().size();
 	}
 
 	/** Runs in its own JVM: in the test JVM another test may already have started the thread. */
@@ -127,9 +140,12 @@ class LoadStepContextRetryDelayTest {
 
 			retryOn.failOperations(FAILURES);
 			requireThreads("failures with retry on", 1);
+			retryOn.context.stop();
+			retryOn.context.close();
+			retryOff.context.close();
 			System.out.println(PASSED);
 			System.out.flush();
-			Runtime.getRuntime().halt(0);
+			// No exit call: the JVM must end on its own, which the daemon timer thread must not hold.
 		}
 
 		private static void requireThreads(final String stage, final long expected) {
@@ -146,6 +162,7 @@ class LoadStepContextRetryDelayTest {
 		final MetricsContext<AllMetricsSnapshot> metrics;
 		final LoadStepContextImpl<DataItem, Operation<DataItem>> context;
 		final Queue<String> retryThreads = new ConcurrentLinkedQueue<>();
+		final Queue<Thread> retryThreadObjects = new ConcurrentLinkedQueue<>();
 		final Queue<String> failureThreads = new ConcurrentLinkedQueue<>();
 
 		@SuppressWarnings("unchecked")
@@ -159,7 +176,12 @@ class LoadStepContextRetryDelayTest {
 			generator = mock(LoadGenerator.class);
 			when(generator.supportsRetry()).thenReturn(true);
 			when(generator.isNothingPendingRetry()).thenReturn(true);
-			doAnswer(call -> retryThreads.add(Thread.currentThread().getName())).when(generator).retry(any());
+			doAnswer(call -> {
+				retryThreadObjects.add(Thread.currentThread());
+				return retryThreads.add(Thread.currentThread().getName());
+			})
+							.when(generator)
+							.retry(any());
 			metrics = mock(MetricsContext.class, RETURNS_DEEP_STUBS);
 			doAnswer(call -> failureThreads.add(Thread.currentThread().getName())).when(metrics).markFail();
 			final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
@@ -192,6 +214,12 @@ class LoadStepContextRetryDelayTest {
 			final List<String> delayed = threads.stream().filter(name -> !caller.equals(name)).toList();
 			assertFalse(delayed.isEmpty(), "every retry ran inline");
 			delayed.forEach(name -> assertEquals(RetryDelayScheduler.THREAD_NAME, name));
+		}
+
+		/** The retries that did not run inline on the calling thread. */
+		List<Thread> delayedRetryThreads() {
+			final var caller = Thread.currentThread();
+			return retryThreadObjects.stream().filter(thread -> thread != caller).toList();
 		}
 
 		private static DataOperation<DataItem> operation(final String name) {

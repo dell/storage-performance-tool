@@ -26,9 +26,6 @@ public final class RetryDelayScheduler {
 
 	private static final ScheduledThreadPoolExecutor EXECUTOR = newExecutor();
 
-	/** What the timer thread last applied. Only that thread uses this, and its tasks leave it as set. */
-	private static Map<String, String> appliedLogContext = Map.of();
-
 	private RetryDelayScheduler() {}
 
 	/**
@@ -48,15 +45,13 @@ public final class RetryDelayScheduler {
 	}
 
 	/**
-	 * Consecutive retries of one step usually share a context, so most tasks change nothing here.
-	 * Reading the thread's own context would copy it, so the comparison uses the last one applied.
+	 * Every task replaces the thread's whole context, even when the previous task came from the same
+	 * producer: a task may have changed the context, and a skipped equal snapshot would then leave
+	 * the next task logging to another step.
 	 */
 	private static void applyLogContext(final Map<String, String> logContext) {
-		if (logContext != appliedLogContext && !logContext.equals(appliedLogContext)) {
-			ThreadContext.clearMap();
-			ThreadContext.putAll(logContext);
-			appliedLogContext = logContext;
-		}
+		ThreadContext.clearMap();
+		ThreadContext.putAll(logContext);
 	}
 
 	/** Whether {@code future} is still waiting in the timer's queue. */
