@@ -1908,26 +1908,36 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return stepSlices.size();
 	}
 
+	/**
+	 * The configuration the operations of metrics row {@code originIndex} run on, which gives the row
+	 * its count limit and bucket source. By default the base with context {@code originIndex} over
+	 * it, or the base when there is no such context. A step type whose rows are not its contexts
+	 * overrides this.
+	 */
+	protected Config effectiveConfig(final int originIndex) {
+		if (ctxConfigs == null || originIndex < 0 || originIndex >= ctxConfigs.size()) {
+			return config;
+		}
+		final var merged = TreeUtil.reduceForest(
+						java.util.Arrays.asList(
+										com.github.akurilov.confuse.Config.deepToMap(this.config),
+										com.github.akurilov.confuse.Config.deepToMap(ctxConfigs.get(originIndex))));
+		return new BasicConfig(this.config.pathSep(), this.config.schema(), merged);
+	}
+
 	@Override
 	protected final void initMetrics(
 					final int originIndex, final OpType opType, final int concurrencyLimit, final Config metricsConfig,
 					final SizeInBytes itemDataSize, final boolean outputColorFlag) {
 
-		// Determine effective config for this origin index (merge base + context slice if present)
-		Config effectiveConfig = this.config;
+		// The configuration this row's operations run on, as the step type says.
+		Config effectiveConfig;
 		try {
-			if (ctxConfigs != null && originIndex >= 0 && originIndex < ctxConfigs.size()) {
-				final var merged = TreeUtil.reduceForest(
-								java.util.Arrays.asList(
-												com.github.akurilov.confuse.Config.deepToMap(this.config),
-												com.github.akurilov.confuse.Config.deepToMap(ctxConfigs.get(originIndex))));
-				effectiveConfig = new BasicConfig(
-								this.config.pathSep(), this.config.schema(), merged);
-			}
+			effectiveConfig = effectiveConfig(originIndex);
 		} catch (final Exception e) {
-			// Fall back to base config if merging fails for any reason
+			// Fall back to base config if resolving it fails for any reason
 			Loggers.MSG.debug(
-							"{}: failed to merge context config for origin index {}; using base config",
+							"{}: failed to resolve the configuration of metrics row {}; using base config",
 							loadStepId(),
 							originIndex,
 							e);
@@ -1946,7 +1956,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							e);
 		}
 		try {
-			final Object raw = effectiveConfig.val("load-step-limit-time");
+			// The step stops on the base's time limit, whatever a context says.
+			final Object raw = this.config.val("load-step-limit-time");
 			if (raw instanceof String) {
 				timeLimitSec = com.dell.spt.base.config.TimeUtil.getTimeInSeconds((String) raw);
 			} else if (raw != null) {
