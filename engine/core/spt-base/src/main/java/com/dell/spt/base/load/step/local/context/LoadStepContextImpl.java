@@ -652,9 +652,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		if (rangeRuntime != null) {
+			// Read order matters with recycling: the result count first, the generated count last,
+			// custody, pending results and the recycle queue between them (the order of the generic
+			// recycle dry check). A result published and its successor generated during this check
+			// then raise the generated count past the earlier result count, so the check fails.
+			final long resultCount = counterResults.sum();
 			return generator.isItemInputFinished() && !operationLifecycle.hasOutstandingOperations()
-							&& !rangeRuntime.hasPendingResults() && counterResults.sum() >= generator.generatedOpCount()
-							&& (!recycleFlag || generator.isNothingToRecycle());
+							&& !rangeRuntime.hasPendingResults()
+							&& (!recycleFlag || generator.isNothingToRecycle())
+							&& resultCount >= generator.generatedOpCount();
 		}
 		if (listPathWorkload) {
 			// LIST continuations can leave the recycle queue before generated/active
