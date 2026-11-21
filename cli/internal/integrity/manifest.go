@@ -25,6 +25,16 @@ const (
 	manifestMergeFanIn       = 64
 )
 
+// conflictingSizesError is the sort's refusal of one identity given with two sizes. It keeps the
+// record so that the stager can name source lines instead of the identity.
+type conflictingSizesError struct {
+	record ManifestRecord
+}
+
+func (err *conflictingSizesError) Error() string {
+	return fmt.Sprintf("manifest identity %q has conflicting sizes", err.record.identity())
+}
+
 func (r ManifestRecord) compare(other ManifestRecord) int {
 	if value := strings.Compare(r.bucket, other.bucket); value != 0 {
 		return value
@@ -352,7 +362,7 @@ func writeSortedChunk(tempDir string, records []ManifestRecord) (string, error) 
 			if prior.size != record.size {
 				_ = file.Close()
 				_ = os.Remove(path)
-				return "", fmt.Errorf("manifest identity %q has conflicting sizes", record.identity())
+				return "", &conflictingSizesError{record: record}
 			}
 			continue
 		}
@@ -491,7 +501,7 @@ func mergeSortedChunkGroupContext(ctx context.Context, tempDir string, chunks []
 		if prior != nil && prior.compare(item.record) == 0 {
 			if prior.size != item.record.size {
 				_ = out.Close()
-				return "", 0, fmt.Errorf("manifest identity %q has conflicting sizes", item.record.identity())
+				return "", 0, &conflictingSizesError{record: item.record}
 			}
 		} else {
 			if err = writer.Write(item.record.fields()); err != nil {

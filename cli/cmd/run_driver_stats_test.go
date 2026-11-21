@@ -672,7 +672,7 @@ func installAutoResultsFakes(t *testing.T, runtimeStepIDs []string) {
 	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
 		return &fakeFetcher{output: output, manifest: &results.Manifest{}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 }
 
 type storedDriverStats struct {
