@@ -510,7 +510,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		try {
 			return ioWorker.await(0L, TimeUnit.NANOSECONDS);
 		} catch (final InterruptedException e) {
-			// The flag was cleared above, so this cannot happen; count the worker as running.
+			// An interrupt that arrived after the flag was read; keep it and count the worker as running.
+			Thread.currentThread().interrupt();
 			return false;
 		} finally {
 			if (interrupted) {
