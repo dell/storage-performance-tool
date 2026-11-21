@@ -427,6 +427,7 @@ func (m *RemoteDockerManager) StartContainerInNodeModeContext(
 	if mode != command.NetworkModeHost {
 		cfg.PortMappings = []command.PortMapping{{HostPort: port, ContainerPort: port}}
 	}
+	applyRemoteRdmaPassthrough(&cfg)
 
 	id, _, err := m.ops.StartContainer(ctx, cfg)
 	if err != nil {
@@ -434,6 +435,16 @@ func (m *RemoteDockerManager) StartContainerInNodeModeContext(
 	}
 	m.setStartedContainer(id)
 	return m.containerID, nil
+}
+
+// applyRemoteRdmaPassthrough gives a remote engine container the RDMA device, the IPC_LOCK
+// capability and an unlimited memlock limit when SPT_RDMA is enabled.
+func applyRemoteRdmaPassthrough(cfg *command.ContainerConfig) {
+	if constants.IsRdmaEnabled() {
+		cfg.Devices = []string{constants.RdmaDevicePath}
+		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
+		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
+	}
 }
 
 func selectedNodeNetworkMode(networkMode string) command.NetworkMode {
@@ -496,12 +507,7 @@ func (m *RemoteDockerManager) startWorkerNodeOnPorts(
 		EnvFiles:    envFiles,
 	}
 
-	// RDMA device passthrough when SPT_RDMA is enabled
-	if constants.IsRdmaEnabled() {
-		cfg.Devices = []string{constants.RdmaDevicePath}
-		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
-		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
-	}
+	applyRemoteRdmaPassthrough(&cfg)
 
 	// Echo exact JAVA_OPTS for triage
 	logging.LogInfo("remote-docker", "JAVA_OPTS configured", "host", m.host.Original, "JAVA_OPTS", cfg.Environment[constants.JavaOptsEnvVar])
@@ -577,12 +583,7 @@ func (m *RemoteDockerManager) startEntryNodeOnPorts(
 		cfg.PortMappings = []command.PortMapping{{HostPort: ports.api, ContainerPort: ports.api}}
 	}
 
-	// RDMA device passthrough when SPT_RDMA is enabled
-	if constants.IsRdmaEnabled() {
-		cfg.Devices = []string{constants.RdmaDevicePath}
-		cfg.CapAdd = []string{constants.RdmaCapIpcLock}
-		cfg.Ulimits = []string{constants.RdmaUlimitMemlock}
-	}
+	applyRemoteRdmaPassthrough(&cfg)
 
 	id, _, err := m.ops.StartContainer(startCtx, cfg)
 	if err != nil {
