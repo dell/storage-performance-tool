@@ -2447,7 +2447,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		stepSlices.stream().filter(s -> s != null && !isLostSlice(s)).parallel().forEach(stepSlice -> {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
-			} catch (final RemoteException e) {
+			} catch (final RemoteException | RuntimeException e) {
+				// A local slice rethrows its context's shutdown failure, as a drain or driver shutdown that throws:
+				// the other slices still shut down, and the step's stop and close still run.
 				if (!isLostSlice(stepSlice)) {
 					LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the step service {}", loadStepId(), stepSlice);
 				}
@@ -3466,44 +3468,69 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private void stopUnderLock() {
 		metricsFetchLosesSlices = false;
 		final var stoppedAtOnce = disarmLostSliceStop();
+		// Each stage runs whatever an earlier one threw, so the stop's metrics output, its last stage, is
+		// always written; the first failure is thrown at the end, with any later ones suppressed under it.
+		Throwable failure = null;
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
-				relayBucketVersioningNoticesAtStop();
-				publishFailedOutcomeBeforeIncompleteDurationMetricsOutput();
-				super.doStop();
+				failure = runStopStage(failure, this::relayBucketVersioningNoticesAtStop);
+				failure = runStopStage(failure, this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
+				failure = runStopStage(failure, super::doStop);
+				throwStopFailure(failure);
 				return;
 			}
-			final List<LoadStep> activeSlices = stepSlices.stream()
-							.filter(slice -> slice != null)
-							.collect(Collectors.toList());
-			final var result = invokeStepSlicePhase(
-							activeSlices,
-							stepSlice -> {
-								try (final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
-												KEY_CLASS_NAME, getClass().getSimpleName())) {
-									stepSlice.stop();
-								}
-							},
-							durationStopPhaseDeadlineNanos(),
-							"spt-delete-step-stop-");
-			if (recordDurationPhaseResult("stop", result)) {
-				Thread.currentThread().interrupt();
-			}
+			failure = runStopStage(failure, this::stopDurationSlices);
 		} else {
-			// Each slice that no stop at once reached stops now, without waiting for a stop at once that a
-			// slow drain holds up; a slice stopped at once, the entry's own among them, is not stopped again.
-			stepSlices.stream()
-							.filter(s -> s != null && !stoppedAtOnce.containsKey(s))
-							.parallel()
-							.forEach(this::stopSlice);
-			// A stop at once that failed before it was sent, as at a slow loadStepId call, is sent now, once
-			// its thread has ended, so the two never overlap. After an interrupt, the close's stop does it.
-			if (awaitStopsAtOnce(stoppedAtOnce.values())) {
-				takeUnsentStopsAtOnce().parallelStream().forEach(this::stopSlice);
-			}
+			failure = runStopStage(failure, () -> stopSlicesAtStop(stoppedAtOnce));
 		}
-		relayBucketVersioningNoticesAtStop();
+		failure = runStopStage(failure, this::relayBucketVersioningNoticesAtStop);
+		failure = runStopStage(failure, this::stopMetricsAggregator);
+		failure = runStopStage(failure, this::closeItemTimingMetricsOutputFileAggregators);
+		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
+			failureBudgetMetricsOutputDeferred = true;
+			throwStopFailure(failure);
+			return;
+		}
+		failure = runStopStage(failure, this::finalizeFailureBudgetBeforeMetricsOutput);
+		failure = runStopStage(failure, super::doStop);
+		throwStopFailure(failure);
+	}
+
+	private void stopDurationSlices() {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		final var result = invokeStepSlicePhase(
+						activeSlices,
+						stepSlice -> {
+							try (final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
+											KEY_CLASS_NAME, getClass().getSimpleName())) {
+								stepSlice.stop();
+							}
+						},
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-step-stop-");
+		if (recordDurationPhaseResult("stop", result)) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private void stopSlicesAtStop(final IdentityHashMap<LoadStep, Thread> stoppedAtOnce) {
+		// Each slice that no stop at once reached stops now, without waiting for a stop at once that a
+		// slow drain holds up; a slice stopped at once, the entry's own among them, is not stopped again.
+		stepSlices.stream()
+						.filter(s -> s != null && !stoppedAtOnce.containsKey(s))
+						.parallel()
+						.forEach(this::stopSlice);
+		// A stop at once that failed before it was sent, as at a slow loadStepId call, is sent now, once
+		// its thread has ended, so the two never overlap. After an interrupt, the close's stop does it.
+		if (awaitStopsAtOnce(stoppedAtOnce.values())) {
+			takeUnsentStopsAtOnce().parallelStream().forEach(this::stopSlice);
+		}
+	}
+
+	private void stopMetricsAggregator() {
 		if (null != metricsAggregator) {
 			try {
 				metricsAggregator.stop();
@@ -3516,6 +3543,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								loadStepId());
 			}
 		}
+	}
+
+	private void closeItemTimingMetricsOutputFileAggregators() {
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {
 				itemMetricsOutputFileAggregator.close();
@@ -3526,12 +3556,28 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		});
 		itemTimingMetricsOutputFileAggregators.clear();
-		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
-			failureBudgetMetricsOutputDeferred = true;
-			return;
+	}
+
+	/** Runs one stage of the stop and returns the stop's first failure, with this stage's suppressed under it. */
+	static Throwable runStopStage(final Throwable failure, final Runnable stage) {
+		try {
+			stage.run();
+			return failure;
+		} catch (final Throwable e) {
+			if (failure == null) {
+				return e;
+			}
+			if (failure != e) {
+				failure.addSuppressed(e);
+			}
+			return failure;
 		}
-		finalizeFailureBudgetBeforeMetricsOutput();
-		super.doStop();
+	}
+
+	private static void throwStopFailure(final Throwable failure) {
+		if (failure != null) {
+			throwUnchecked(failure);
+		}
 	}
 
 	/**

@@ -1,0 +1,170 @@
+package com.dell.spt.base.load.step.client;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.load.step.LoadStep;
+import com.dell.spt.base.load.step.client.metrics.MetricsAggregator;
+import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.context.MetricsContext;
+import com.github.akurilov.confuse.Config;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+/**
+ * A step slice whose shutdown fails, as a local slice whose {@code fs} or {@code s3-aws} I/O worker
+ * will not stop, does not cost the step its close; and a stop stage that fails does not cost the stop
+ * its metrics output. The slices are mocks: slice 0 stands for the entry's own, slices 1 and 2 for two
+ * workers'.
+ */
+@Timeout(60)
+class StopFailureStillClosesTest {
+
+	private final Config config = TestConfigBuilder.config();
+	private final MetricsManager metricsMgr = mock(MetricsManager.class);
+	private final List<LoadStep> slices = new ArrayList<>();
+
+	@BeforeEach
+	void configure() {
+		config.val("load-op-type", "noop");
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+	}
+
+	@Test
+	void aSliceWhoseShutdownThrowsStillLetsTheStepStopAndCloseEverySlice() throws Exception {
+		final TestLoadStepClient client = clientWithThreeSlices();
+		doThrow(new IllegalStateException("injected: Timed out waiting for NIO worker termination"))
+						.when(slices.get(1)).shutdown();
+		final AtomicInteger timingCloses = new AtomicInteger();
+		final AtomicInteger lifecycleCloses = new AtomicInteger();
+		final AtomicInteger itemOutputCloses = new AtomicInteger();
+		list(client, "itemTimingMetricsOutputFileAggregators").add((AutoCloseable) timingCloses::incrementAndGet);
+		list(client, "operationLifecycleAggregators").add((AutoCloseable) lifecycleCloses::incrementAndGet);
+		list(client, "itemOutputFileAggregators").add((AutoCloseable) itemOutputCloses::incrementAndGet);
+
+		client.close();
+
+		for (final LoadStep slice : slices) {
+			verify(slice, times(1)).shutdown();
+			verify(slice, times(1)).close();
+		}
+		verify(slices.get(0), times(1)).stop();
+		verify(slices.get(2), times(1)).stop();
+		assertEquals(1, timingCloses.get(), "the timing aggregator is closed");
+		assertEquals(1, lifecycleCloses.get(), "the operation lifecycle aggregator is closed");
+		assertEquals(1, itemOutputCloses.get(), "the item output aggregator is closed");
+		assertTrue(client.isClosed(), "the step ends closed");
+	}
+
+	@Test
+	void anErrorFromASlicesShutdownStillPropagates() throws Exception {
+		final TestLoadStepClient client = clientWithThreeSlices();
+		final AssertionError error = new AssertionError("injected");
+		doThrow(error).when(slices.get(1)).shutdown();
+
+		assertSame(error, assertThrows(AssertionError.class, client::doShutdown));
+	}
+
+	@Test
+	void aFailedStopStageStillWritesTheMetricsOutputAndThrowsTheFirstFailure() throws Exception {
+		final TestLoadStepClient client = clientWithThreeSlices();
+		final MetricsContext<?> context = mock(MetricsContext.class);
+		client.addMetricsContextForTest(context);
+		final IllegalStateException first = new IllegalStateException("injected: metrics aggregator stop");
+		final MetricsAggregator aggregator = mock(MetricsAggregator.class);
+		doThrow(first).when(aggregator).stop();
+		final Field field = LoadStepClientBase.class.getDeclaredField("metricsAggregator");
+		field.setAccessible(true);
+		field.set(client, aggregator);
+		final InterruptedException later = new InterruptedException("injected: interrupted");
+		final AtomicInteger timingCloses = new AtomicInteger();
+		list(client, "itemTimingMetricsOutputFileAggregators").add((AutoCloseable) () -> {
+			timingCloses.incrementAndGet();
+			throw later;
+		});
+
+		final RuntimeException stop = assertThrows(RuntimeException.class, client::doStop);
+		field.set(client, null);
+
+		assertSame(first, stop);
+		assertEquals(List.of(later), List.of(first.getSuppressed()));
+		assertEquals(1, timingCloses.get(), "the stage after the failed one still runs");
+		verify(metricsMgr, times(1)).unregister(context);
+	}
+
+	@Test
+	void anInterruptedTimingAggregatorCloseStillWritesTheMetricsOutput() throws Exception {
+		final TestLoadStepClient client = clientWithThreeSlices();
+		final MetricsContext<?> context = mock(MetricsContext.class);
+		client.addMetricsContextForTest(context);
+		list(client, "itemTimingMetricsOutputFileAggregators").add((AutoCloseable) () -> {
+			throw new InterruptedException("injected: interrupted");
+		});
+
+		final Throwable stop = assertThrows(Throwable.class, client::doStop);
+
+		assertTrue(stop instanceof InterruptedException, String.valueOf(stop));
+		verify(metricsMgr, times(1)).unregister(context);
+	}
+
+	@Test
+	void aLaterStageFailureIsSuppressedUnderTheFirstAndNeverUnderItself() {
+		final IllegalStateException first = new IllegalStateException("first");
+		final IllegalStateException second = new IllegalStateException("second");
+
+		var failure = LoadStepClientBase.runStopStage(null, () -> {
+			throw first;
+		});
+		failure = LoadStepClientBase.runStopStage(failure, () -> {});
+		failure = LoadStepClientBase.runStopStage(failure, () -> {
+			throw first;
+		});
+		failure = LoadStepClientBase.runStopStage(failure, () -> {
+			throw second;
+		});
+
+		assertSame(first, failure);
+		assertEquals(List.of(second), List.of(first.getSuppressed()));
+	}
+
+	private TestLoadStepClient clientWithThreeSlices() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), metricsMgr);
+		for (var i = 0; i < 3; i++) {
+			final LoadStep slice = mock(LoadStep.class);
+			when(slice.loadStepId()).thenReturn("slice-" + i);
+			when(slice.toString()).thenReturn("slice-" + i);
+			slices.add(slice);
+		}
+		list(client, "stepSlices").addAll(slices);
+		final List<Object> addrs = list(client, "stepSliceNodeAddrs");
+		addrs.add(null);
+		addrs.add("127.0.0.1:1");
+		addrs.add("127.0.0.1:2");
+		final Field started = LoadStepClientBase.class.getDeclaredField("startedSliceCount");
+		started.setAccessible(true);
+		started.setInt(client, 3);
+		return client;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<Object> list(final LoadStepClientBase<?> client, final String name) throws Exception {
+		final Field field = LoadStepClientBase.class.getDeclaredField(name);
+		field.setAccessible(true);
+		return (List<Object>) field.get(client);
+	}
+}
