@@ -1175,7 +1175,7 @@ func TestReplayCommandReleasesLaunchersOnAuthoritativeWorkloadTerminal(t *testin
 			}
 			discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
 			newResultsFetcherFunc = func(_, output string) autoResultsFetcher { return &fakeFetcher{output: output} }
-			generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+			generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 			// Mirror the real runners: never complete on our own, only on the
 			// authoritative session signal.

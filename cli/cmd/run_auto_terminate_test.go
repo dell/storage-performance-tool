@@ -63,6 +63,7 @@ type autoTerminateFake struct {
 	mu          sync.Mutex
 	events      []string
 	fetchBudget time.Duration
+	summaryEnds []summary.RunEnd
 }
 
 func (f *autoTerminateFake) add(event string) {
@@ -152,7 +153,10 @@ func installAutoTerminateMonitorSeams(t *testing.T, fake *autoTerminateFake) {
 			},
 		}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(_ context.Context, _ string, _ io.Writer, end summary.RunEnd) (*summary.RunSummary, error) {
+		fake.mu.Lock()
+		fake.summaryEnds = append(fake.summaryEnds, end)
+		fake.mu.Unlock()
 		if !fake.allFailed {
 			return nil, nil
 		}
@@ -342,6 +346,20 @@ func checkAutoTerminateCommand(
 	t *testing.T, test autoTerminateCommandCase, err error, fake *autoTerminateFake, output string,
 ) {
 	t.Helper()
+	// No run here ended on its own, so the summary must not treat one as completed: a warning
+	// such as the failure-limit stop applies only to a completed run.
+	fake.mu.Lock()
+	summaryEnds := slices.Clone(fake.summaryEnds)
+	fake.mu.Unlock()
+	for _, end := range summaryEnds {
+		wantEnd := summary.RunEndAutoTerminated
+		if test.engine == engineStepFailed {
+			wantEnd = summary.RunEndFailed
+		}
+		if end != wantEnd {
+			t.Errorf("summary run end = %q, want %q", end, wantEnd)
+		}
+	}
 	switch test.want {
 	case autoTerminateWantExit0:
 		if err != nil {

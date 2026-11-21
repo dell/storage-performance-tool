@@ -178,7 +178,7 @@ func installStartFailureMonitorSeams(t *testing.T, shutdownErr error) (shutdowns
 		record("shutdown")
 		return shutdownErr
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) {
 		summaries.Add(1)
 		return nil, errors.New("load results: load manifest: index.json: no such file or directory")
 	}
@@ -360,9 +360,9 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 			})
 			// The shipped summary runs, so a missing summary or a false summary problem shows.
 			var summaries atomic.Int32
-			generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
+			generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, end summary.RunEnd) (*summary.RunSummary, error) {
 				summaries.Add(1)
-				return generateRunSummary(ctx, runDir, out)
+				return generateRunSummary(ctx, runDir, out, end)
 			}
 			var shutdownMu sync.Mutex
 			var shutdownHosts [][]string

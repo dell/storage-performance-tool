@@ -482,7 +482,9 @@ func TestStartAutoResults_StaleDiscoveredIDsFromPriorRun(t *testing.T) {
 		return fetcher
 	}
 
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
+		return nil, nil
+	}
 
 	tmpDir := t.TempDir()
 	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, currentIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
@@ -562,7 +564,7 @@ func TestAutoResultsCleanupOnlySkipsEngineEvidenceAndFinalizes(t *testing.T) {
 		shutdowns.Add(1)
 		return nil
 	}
-	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -689,7 +691,7 @@ func TestAutoResultsMonitorArmCancelInterleavings(t *testing.T) {
 				fetches.Add(1)
 				return &fakeFetcher{output: output}
 			}
-			generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+			generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 			session := runcontrol.NewSession()
 			finalizerStarted := make(chan struct{})
@@ -944,7 +946,7 @@ func TestAutoResultsLaunchGateRejectsAllPreSubmissionEvidence(t *testing.T) {
 			return nil
 		}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 	var shutdowns atomic.Int32
 	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, int64, bool) error {
 		shutdowns.Add(1)
@@ -1057,7 +1059,7 @@ func TestAutoResultsBindsLingeringEngineAndFleetEvidenceToArmedRun(t *testing.T)
 		fetcher.output = output
 		return fetcher
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 	monitor := startAutoResultsMonitor(
 		context.Background(), server.URL, "mt", t.TempDir(),
@@ -1136,7 +1138,7 @@ func TestStartAutoResults_NodeRuntimeDiscoveryReplacesExpectedAliases(t *testing
 	}
 
 	summaryCalls := 0
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		summaryCalls++
 		fetcher.mu.Lock()
 		defer fetcher.mu.Unlock()
@@ -1230,7 +1232,9 @@ func TestStartAutoResults_FleetDiscoveryPreferred(t *testing.T) {
 		fetcher.output = outputDir
 		return fetcher
 	}
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
+		return nil, nil
+	}
 
 	tmpDir := t.TempDir()
 	metadata := &runMetadata{ExpectedStepIDs: append([]string(nil), expectedIDs...)}
@@ -1294,7 +1298,9 @@ func TestStartAutoResults_FleetUnavailableFallback(t *testing.T) {
 		fetcher.output = outputDir
 		return fetcher
 	}
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
+		return nil, nil
+	}
 
 	tmpDir := t.TempDir()
 	done := startAutoResults(context.Background(), "http://example", "mt", tmpDir, expectedIDs, false, nil, "", false, 0, "", nil, io.Discard, io.Discard, "", nil)
@@ -1381,7 +1387,7 @@ func TestStartAutoResults_AppendsTraceArtifactToManifest(t *testing.T) {
 		fetcher.output = outputDir
 		return fetcher
 	}
-	generateRunSummaryFunc = func(_ context.Context, _ string, out io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(_ context.Context, _ string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		_, err := io.WriteString(out, "Performance by Phase\nphase rows\nIntegrity Verification\nverified 1000\n")
 		return nil, err
 	}
@@ -1460,7 +1466,7 @@ func TestStartAutoResults_EmitsSummaryAfterShutdown(t *testing.T) {
 	requestShutdownAllFunc = func(context.Context, []*hostparse.HostInfo, string, time.Duration, int64, bool) error {
 		return nil
 	}
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		_, err := io.WriteString(out, "FINAL SUMMARY\n")
 		return nil, err
 	}
@@ -1557,7 +1563,7 @@ func TestStartAutoResults_FetchFailureStillShutsDownAndEmitsSummary(t *testing.T
 		return nil
 	}
 	var summaryCalled int32
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) {
 		atomic.AddInt32(&summaryCalled, 1)
 		return nil, nil
 	}
@@ -1630,7 +1636,9 @@ func TestStartAutoResults_FinalizesResourcesWhenGracefulShutdownDisabled(t *test
 	newResultsFetcherFunc = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fakeFetcher{output: outputDir}
 	}
-	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
+		return nil, nil
+	}
 
 	var hookCalled int32
 	preSummaryHook := func(context.Context) { atomic.AddInt32(&hookCalled, 1) }
@@ -1665,7 +1673,7 @@ func TestStartAutoResultsCancellationTerminatesMonitorWorker(t *testing.T) {
 	newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
 	discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
 	discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := startAutoResults(
@@ -1759,7 +1767,7 @@ func TestStartAutoResultsCancellationUsesIndependentPhaseContextsWithShutdown(t 
 		return nil
 	}
 	var summaryCalled int32
-	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		assertCleanupContext("summary", ctx, constants.AutoResultsSummaryTimeout)
 		atomic.AddInt32(&summaryCalled, 1)
 		return nil, nil
@@ -1868,7 +1876,7 @@ func TestStartAutoResultsKeepsPreparedInputsThroughConsumersAndReportsCleanupFai
 			return cleanupErr
 		},
 	}
-	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -1980,7 +1988,7 @@ func TestStartAutoResultsArtifactTimeoutCannotStarveFinalization(t *testing.T) {
 		}
 		close(hookCalled)
 	}
-	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(ctx context.Context, _ string, _ io.Writer, _ summary.RunEnd) (*summary.RunSummary, error) {
 		select {
 		case <-hookCalled:
 		default:
@@ -2144,7 +2152,7 @@ func TestInterruptedVerificationReconcilesStopBeforeSalvageAndPersistsIndex(t *t
 			return fetchErr
 		}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 	producer := &integrityplan.PlannedStep{ID: createStep, Number: 1, Role: integrityplan.StepRoleCreate}
 	cleanup := &integrityplan.PlannedStep{ID: cleanupStep, Number: 3, Role: integrityplan.StepRoleCleanup}

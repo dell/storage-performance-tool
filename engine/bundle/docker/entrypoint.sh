@@ -34,6 +34,12 @@ set -eu
 #   connection would otherwise hang the whole test/run indefinitely instead of failing fast
 #   into the existing retry/backoff path. 10s is generous relative to normal sub-10ms RMI
 #   round-trips for these small control-plane calls.
+# - sun.rmi.transport.tcp.handshakeTimeout: bounds how long the entry node waits for the RMI
+#   handshake on each new connection to a node. Defaults to 60s in the JDK. A call that fails
+#   drops its connection, so after a node stops answering (a frozen process whose kernel still
+#   accepts connections) each later call opens a new one and waits the whole handshake timeout;
+#   the entry makes about eight such calls in series while it stops and closes the step. 10s,
+#   as for the response timeout, ends such a run in about 90s instead of about 8 minutes.
 #
 # These options are also the defaults of the bundle's run.sh and run.bat: engine/bundle/build.gradle
 # generates them from the X86_JAVA_OPTS and DEFAULT_JAVA_OPTS lines below, so keep each of those
@@ -43,7 +49,7 @@ X86_JAVA_OPTS=""
 case "$(uname -m)" in
 	x86_64) X86_JAVA_OPTS="-XX:UseAVX=2" ;;
 esac
-DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off ${X86_JAVA_OPTS} -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000"
+DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off ${X86_JAVA_OPTS} -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000 -Dsun.rmi.transport.tcp.handshakeTimeout=10000"
 
 # Append any user-provided JAVA_OPTS (like RMI hostname) to the defaults.
 # If a user provides conflicting flags (like -Xmx8g), Java will use the last one specified.

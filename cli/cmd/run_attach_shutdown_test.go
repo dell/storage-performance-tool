@@ -77,7 +77,7 @@ func installAttachShutdownSeams(t *testing.T, interrupt bool) (shutdowns func() 
 	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
 		return &fakeFetcher{output: output}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) {
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) {
 		return nil, nil
 	}
 	var mu sync.Mutex
