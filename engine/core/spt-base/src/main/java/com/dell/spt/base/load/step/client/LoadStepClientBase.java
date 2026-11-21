@@ -2207,7 +2207,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * The configuration the operations of metrics row {@code originIndex} run on, which gives the row
 	 * its count limit and bucket source. By default the base with context {@code originIndex} over
 	 * it, or the base when there is no such context. A step type whose rows are not its contexts
-	 * overrides this.
+	 * overrides this. A {@code null} result, like a thrown exception, stands for the base.
 	 */
 	protected Config effectiveConfig(final int originIndex) {
 		if (ctxConfigs == null || originIndex < 0 || originIndex >= ctxConfigs.size()) {
@@ -2236,6 +2236,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							loadStepId(),
 							originIndex,
 							e);
+			effectiveConfig = this.config;
+		}
+		if (effectiveConfig == null) {
 			effectiveConfig = this.config;
 		}
 
