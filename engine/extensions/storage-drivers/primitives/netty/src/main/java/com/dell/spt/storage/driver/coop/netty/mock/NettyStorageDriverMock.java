@@ -79,9 +79,8 @@ public final class NettyStorageDriverMock<I extends Item, O extends Operation<I>
 					final List<Range> fixedRanges = dataOp.fixedRanges();
 					if (fixedRanges == null || fixedRanges.isEmpty()) {
 						dataItem.commitUpdatedRanges(dataOp.markedRangesMaskPair());
-					} else { // fixed byte ranges case
-						dataItem.size(dataItem.size() + dataOp.markedRangesSize());
 					}
+					// Fixed byte ranges: complete() grows the item by its appends on success.
 					dataOp.countBytesDone(dataOp.markedRangesSize());
 				}
 			}

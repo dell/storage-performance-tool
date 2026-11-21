@@ -876,12 +876,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 							channel.write(new DataItemFileRegion(dataItem.slice(beg, size)));
 						}
 					}
-					// The item grows by the appended bytes only, once. complete() takes them back if
-					// this attempt fails; an attempt it already completed (a header write that failed
-					// at once on a closed channel) is not grown, so a retry starts from the same size.
-					if (appendBeg != baseItemSize && op.status() == Operation.Status.ACTIVE) {
-						dataItem.size(appendBeg);
-					}
+					// The item grows by the appended bytes in complete(), once the UPDATE succeeds.
 					dataOp.countBytesDone(bytesQueued);
 				}
 			}
@@ -889,11 +884,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	/**
-	 * A failed UPDATE attempt that queued its fixed ranges ({@code countBytesDone() > 0}, set only by
-	 * {@link #sendRequestData}) takes back the size its appends added there, so a retry starts from
-	 * the item's size before the first attempt.
+	 * A successful UPDATE that queued its fixed ranges ({@code countBytesDone() > 0}, set only by
+	 * {@link #sendRequestData}) grows the item by the sum of its appends. Only this success grows it,
+	 * so a failed attempt never changes the size and its retry starts from the same one; a tagging
+	 * UPDATE queues no body and grows nothing.
 	 */
-	private static void rollBackAppendedSize(final Operation<?> op) {
+	private static void commitAppendedSize(final Operation<?> op) {
 		if (op instanceof DataOperation<?> dataOp
 						&& dataOp.countBytesDone() > 0
 						&& op.item() instanceof DataItem dataItem) {
@@ -910,7 +906,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			}
 			if (appended > 0) {
 				try {
-					dataItem.size(dataItem.size() - appended);
+					dataItem.size(dataItem.size() + appended);
 				} catch (final IOException e) {
 					throw new AssertionError(e);
 				}
@@ -958,19 +954,19 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		}
 
 		final boolean failed = op.status() != Operation.Status.SUCC;
-		if (failed && channel != null) {
-			// Completion accounting must not wait for asynchronous channel teardown.
-			final var unusedClose = channel.close();
-		}
-
 		final boolean transportHeld = channel != null
 						&& !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE);
-		if (failed && transportHeld && OpType.UPDATE.equals(op.type())) {
+		if (failed) {
+			if (channel != null) {
+				// Completion accounting must not wait for asynchronous channel teardown.
+				final var unusedClose = channel.close();
+			}
+		} else if (transportHeld && OpType.UPDATE.equals(op.type())) {
 			// Once per attempt: a second complete() finds the transport released.
-			rollBackAppendedSize(op);
+			commitAppendedSize(op);
 		}
 		if (transportHeld && directDispatchEnabled()
-						&& op.status() == Operation.Status.SUCC
+						&& !failed
 						&& channel.isActive()
 						&& isDirectDispatchEligible(op)) {
 			// Keep the permit and the channel across completion so the next queued operation can
