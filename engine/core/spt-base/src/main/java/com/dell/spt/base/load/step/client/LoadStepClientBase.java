@@ -243,6 +243,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	// artifact publishing and lost-slice gating), and whether the start ended as a stop.
 	private volatile int startedSliceCount;
 	private volatile boolean startStopped;
+	// Whether this start created a slice and never called its start(): it ended between the two.
+	private volatile boolean createdSliceUnreached;
 	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
 	private volatile boolean startEntered;
 
@@ -370,6 +372,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		startEntered = true;
 		startedSliceCount = 0;
 		startStopped = false;
+		createdSliceUnreached = false;
 		stepSliceNodeAddrs.clear();
 		slicesClosing = false;
 		resetDurationLifecycleForStart();
@@ -1452,18 +1455,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			stepSliceNodeAddrs.add(i == 0 ? null : nodeAddrs.get(i - 1));
 			stepSlices.add(stepSlice);
+			createdSliceUnreached = true;
 			checkStartStopped("stopped after resolving step slice " + i);
+			// A stop during either node call: the slice is closed unstarted, and an armed one fenced.
 			if (validateRunId) {
 				requireMatchingRunId(stepSlice, expectedRunId);
+				checkStartStopped("stopped while checking the run id of step slice " + i);
 			}
 			if (barrier != null) {
 				barrier.arm(i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1), stepSlice);
-			}
-			if (validateRunId || barrier != null) {
-				// A stop during those node calls: the slice is closed unstarted, and an armed one fenced.
 				checkStartStopped("stopped while preparing step slice " + i);
 			}
 			try {
+				createdSliceUnreached = false;
 				stepSlice.start();
 				startedSliceCount = i + 1;
 			} catch (final Exception e) {
@@ -4061,7 +4065,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
 			for (final var aggregator : operationLifecycleAggregators) {
 				try {
-					closeSliceLoggerArtifact(aggregator, slicesStarted);
+					closeOperationLifecycleArtifact(aggregator, slicesStarted);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(terminalCause,
@@ -4233,6 +4237,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
 			aggregator.close();
+		}
+	}
+
+	/**
+	 * Publishes the operation lifecycle file as {@link #closeSliceLoggerArtifact} does. A slice that no
+	 * start reached writes none, so after a start that failed between creating a slice and starting
+	 * it, the file is collected from the slices started before it, as after a stopped start.
+	 */
+	private void closeOperationLifecycleArtifact(final AutoCloseable aggregator, final int slicesStarted)
+					throws Exception {
+		if (!startStopped && createdSliceUnreached && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+			sliceArtifact.closeAfterStoppedStart(slicesStarted);
+		} else {
+			closeSliceLoggerArtifact(aggregator, slicesStarted);
 		}
 	}
 

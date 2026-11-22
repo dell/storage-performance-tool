@@ -20,6 +20,7 @@ import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.JvmExitTestSupport;
@@ -39,10 +40,13 @@ import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
+import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -52,6 +56,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -409,6 +414,87 @@ class StopBetweenSliceStartsTest {
 		verify(entry).close();
 	}
 
+	@Test
+	void aStopDuringTheArmOfANicSetStepNeverStartsThatSlice() throws Exception {
+		final LoadStep entry = mock(LoadStep.class);
+		// The stop lands while the start arms the slice's admission; the call then returns.
+		doAnswer(call -> {
+			starter.interrupt();
+			return null;
+		}).when(entry).startPreparation(anyLong(), anyLong());
+		final Config config = config();
+		config.val("storage-net-interfaces", List.of("eth9"));
+		final TestLoadStepClient client = client(config, entry);
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		verify(entry).startPreparation(anyLong(), anyLong());
+		verify(entry, never()).start();
+		verify(entry).fencePreparation(anyLong());
+		assertDoesNotThrow(client::close);
+		verify(entry).close();
+	}
+
+	@Test
+	void aStopDuringTheRunIdCheckOfANicSetStepNeverArmsThatSlice() throws Exception {
+		final LoadStep entry = mock(LoadStep.class);
+		when(entry.runId()).thenAnswer(call -> {
+			starter.interrupt();
+			return 7L;
+		});
+		final TestLoadStepClient client = metadataClient(entryFactory(entry), true);
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		verify(entry).runId();
+		verify(entry, never()).startPreparation(anyLong(), anyLong());
+		verify(entry, never()).start();
+		assertDoesNotThrow(client::close);
+		verify(entry).close();
+	}
+
+	@Test
+	void aStartWhoseArmFailsBeforeTheSliceStartedClosesCleanly() throws Exception {
+		// A failure, not a stop: the slice never started, so it wrote no lifecycle file to collect.
+		final Config config = config();
+		config.val("load-op-type", "create");
+		config.val("storage-net-interfaces", List.of("eth9"));
+		final LoadStepFactory<LoadStep, ?> factory = realSliceFactory(new CopyOnWriteArrayList<>(), () -> {},
+						"startPreparation", () -> {
+							throw new java.rmi.RemoteException("the arm call failed");
+						});
+		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(factory), null, metricsMgr);
+		stepDir = lifecycleFile().getParent();
+
+		final Throwable failure = assertThrows(Throwable.class, client::start);
+		assertFalse(failure instanceof InterruptedException, failure::toString);
+		Thread.interrupted();
+
+		assertDoesNotThrow(client::close);
+		assertNoSliceFiles();
+	}
+
+	@Test
+	void aMetadataStartWhoseRunIdCheckFailsFailsClosedWithoutALifecycleFailure() throws Exception {
+		final LoadStepFactory<LoadStep, ?> factory = realSliceFactory(new CopyOnWriteArrayList<>(), () -> {},
+						"runId", () -> 8L);
+		final TestLoadStepClient client = metadataClient(factory);
+
+		final Throwable failure = assertThrows(IntegrityTerminalException.class, client::start);
+		assertTrue(failure.getMessage().contains("run.id mismatch"), failure.getMessage());
+		Thread.interrupted();
+
+		final var closeFailure = assertThrows(IntegrityTerminalException.class, client::close);
+		assertTrue(closeFailure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
+						closeFailure.getMessage());
+		for (final Throwable suppressed : closeFailure.getSuppressed()) {
+			assertFalse(String.valueOf(suppressed.getMessage()).contains(Loggers.OPERATION_LIFECYCLE.getName()),
+							suppressed::toString);
+		}
+	}
+
 	/**
 	 * A factory that creates a real slice of the configuration it is given, after {@code stop}, as a
 	 * stop that lands while the slice is created.
@@ -424,6 +510,36 @@ class StopBetweenSliceStartsTest {
 							call.getArgument(0), call.getArgument(1), call.getArgument(2), call.getArgument(3));
 			created.add(slice);
 			return slice;
+		});
+		return factory;
+	}
+
+	/**
+	 * As {@link #realSliceFactory(List, Runnable)}, but each slice's {@code method} calls {@code answer}
+	 * in its place.
+	 */
+	@SuppressWarnings("unchecked")
+	private static LoadStepFactory<LoadStep, ?> realSliceFactory(
+					final List<LoadStep> created, final Runnable stop, final String method, final Callable<Object> answer)
+					throws Exception {
+		final LoadStepFactory<LoadStep, ?> real = realSliceFactory(created, stop);
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn("test-load-step");
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenAnswer(call -> {
+			final LoadStep slice = real.createLocal(
+							call.getArgument(0), call.getArgument(1), call.getArgument(2), call.getArgument(3));
+			final Class<?>[] types = {LoadStep.class
+			};
+			return (LoadStep) Proxy.newProxyInstance(LoadStep.class.getClassLoader(), types, (proxy, called, args) -> {
+				if (method.equals(called.getName())) {
+					return answer.call();
+				}
+				try {
+					return called.invoke(slice, args);
+				} catch (final InvocationTargetException e) {
+					throw e.getCause();
+				}
+			});
 		});
 		return factory;
 	}
@@ -504,16 +620,27 @@ class StopBetweenSliceStartsTest {
 						.withNodeFileManagers(nodeFiles);
 	}
 
-	@SuppressWarnings("unchecked")
 	private TestLoadStepClient metadataClient(final LoadStepFactory<LoadStep, ?> entryFactory) throws Exception {
+		return metadataClient(entryFactory, false);
+	}
+
+	/** As {@link #metadataClient(LoadStepFactory)}, with a NIC set when {@code nicSet}. */
+	@SuppressWarnings("unchecked")
+	private TestLoadStepClient metadataClient(final LoadStepFactory<LoadStep, ?> entryFactory, final boolean nicSet)
+					throws Exception {
 		stepDir = lifecycleFile().getParent();
 		final Config config = config();
 		config.val("run-id", 7L);
 		config.val("storage-driver-type", "s3");
 		config.val("storage-integrity-mode", "metadata");
 		config.val("load-op-type", "create");
+		if (nicSet) {
+			config.val("storage-net-interfaces", List.of("eth9"));
+		}
 		// A metadata-mode step needs an s3 driver at its start; this one is a mock that does nothing.
-		final StorageDriverFactory<?, ?, ?> s3 = mock(StorageDriverFactory.class);
+		final StorageDriverFactory<?, ?, ?> s3 = nicSet
+						? mock(StorageDriverFactory.class, withSettings().extraInterfaces(NicSetDriverFactory.class))
+						: mock(StorageDriverFactory.class);
 		when(s3.id()).thenReturn("s3");
 		when(s3.create(anyString(), any(), any(), anyBoolean(), anyInt())).thenAnswer(call -> mock(StorageDriver.class));
 		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(entryFactory, s3), null, metricsMgr);
