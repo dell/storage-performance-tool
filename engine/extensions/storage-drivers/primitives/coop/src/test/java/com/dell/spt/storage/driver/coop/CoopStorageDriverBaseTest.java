@@ -1199,12 +1199,13 @@ class CoopStorageDriverBaseTest {
 		final var loggerCtx = LoggerContext.getContext(false);
 		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
 		final var originalLevel = logger.getLevel();
-		logger.addAppender(appender);
-		logger.setLevel(Level.WARN);
 
 		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
 		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
 		try {
+			// In the try, so that the finally puts them back when the driver's construction throws.
+			logger.addAppender(appender);
+			logger.setLevel(Level.WARN);
 			driver = new CoopStorageDriverMock<>("parse-warn-step", dataInput, storageConfig, false, 16);
 
 			assertNull(mpuObjectThrottleOf(driver), "malformed multipart limits should fall back to unlimited MPU objects");
@@ -1245,12 +1246,13 @@ class CoopStorageDriverBaseTest {
 		final var loggerCtx = LoggerContext.getContext(false);
 		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
 		final var originalLevel = logger.getLevel();
-		logger.addAppender(appender);
-		logger.setLevel(Level.WARN);
 
 		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
 		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
 		try {
+			// In the try, so that the finally puts them back when the driver's construction throws.
+			logger.addAppender(appender);
+			logger.setLevel(Level.WARN);
 			driver = new CoopStorageDriverMock<>("parse-ok-step", dataInput, storageConfig, false, 16);
 
 			final var mpuThrottle = mpuObjectThrottleOf(driver);
@@ -1377,12 +1379,13 @@ class CoopStorageDriverBaseTest {
 		final var loggerCtx = LoggerContext.getContext(false);
 		final var logger = loggerCtx.getLogger(Loggers.ERR.getName());
 		final var originalLevel = logger.getLevel();
-		logger.addAppender(appender);
-		logger.setLevel(Level.WARN);
 
 		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
 		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
 		try {
+			// In the try, so that the finally puts them back when the driver's construction throws.
+			logger.addAppender(appender);
+			logger.setLevel(Level.WARN);
 			driver = new CoopStorageDriverMock<>("parse-missing-step", dataInput, storageConfig, false, 16);
 
 			assertNull(mpuObjectThrottleOf(driver), "missing multipart object limit should keep MPU objects unlimited");

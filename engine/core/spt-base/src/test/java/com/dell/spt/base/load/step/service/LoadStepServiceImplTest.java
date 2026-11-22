@@ -9,6 +9,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
@@ -27,6 +28,7 @@ import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -514,24 +516,30 @@ public class LoadStepServiceImplTest {
 		private final String originalHost = System.getProperty("java.rmi.server.hostname");
 		private final WarningCapture warnings = new WarningCapture();
 		private final org.apache.logging.log4j.core.Logger errors = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
-		private final Level errorsLevel = errors.getLevel();
+		private final LoggerLevels levels;
 
 		WatchedSlice(final LoadStep local, final long checkPeriodNanos) throws Exception {
-			System.setProperty("java.rmi.server.hostname", "127.0.0.1");
-			warnings.start();
-			errors.addAppender(warnings);
-			errors.setLevel(Level.WARN);
 			stepId = local.loadStepId();
 			threadName = "spt-entry-watchdog-" + stepId;
-			final Config config = TestConfigBuilder.config();
-			config.val("load-step-id", stepId);
-			@SuppressWarnings("unchecked")
-			final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
-			when(factory.id()).thenReturn(STEP_TYPE);
-			when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(local);
-			service = new LoadStepServiceImpl(
-							freePort(), List.of(factory), STEP_TYPE, config, Collections.emptyList(), mock(MetricsManager.class),
-							releases::add, ENTRY_SILENCE_NANOS, checkPeriodNanos, clock::get);
+			System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+			levels = LoggerLevels.set(Map.of(Loggers.ERR.getName(), Level.WARN));
+			try {
+				warnings.start();
+				errors.addAppender(warnings);
+				final Config config = TestConfigBuilder.config();
+				config.val("load-step-id", stepId);
+				@SuppressWarnings("unchecked")
+				final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+				when(factory.id()).thenReturn(STEP_TYPE);
+				when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(local);
+				service = new LoadStepServiceImpl(
+								freePort(), List.of(factory), STEP_TYPE, config, Collections.emptyList(), mock(MetricsManager.class),
+								releases::add, ENTRY_SILENCE_NANOS, checkPeriodNanos, clock::get);
+			} catch (final Throwable failure) {
+				// No try-with-resources closes a slice that failed to open: put back what it changed.
+				restore();
+				throw failure;
+			}
 		}
 
 		void pass(final long nanos) {
@@ -559,12 +567,16 @@ public class LoadStepServiceImplTest {
 			try {
 				service.close();
 			} finally {
-				errors.removeAppender(warnings);
-				errors.setLevel(errorsLevel);
-				warnings.stop();
-				ServiceUtil.shutdown();
-				restoreHost(originalHost);
+				restore();
 			}
+		}
+
+		private void restore() {
+			errors.removeAppender(warnings);
+			warnings.stop();
+			levels.close();
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
 		}
 	}
 

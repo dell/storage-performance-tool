@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.status.StatusConsoleListener;
 import org.apache.logging.log4j.status.StatusLogger;
 import org.junit.jupiter.api.Test;
 
@@ -130,6 +131,13 @@ final class LogContextShutdownTest {
 	void quietsTheStatusLoggerBelowError() {
 		final var statusLogger = StatusLogger.getLogger();
 		final var level = statusLogger.getFallbackListener().getStatusLevel();
+		// quietStatusLogger() sets each console listener to ERROR too: put theirs back as well.
+		final var listenerLevels = new IdentityHashMap<StatusConsoleListener, Level>();
+		for (final var listener : statusLogger.getListeners()) {
+			if (listener instanceof StatusConsoleListener consoleListener) {
+				listenerLevels.put(consoleListener, consoleListener.getStatusLevel());
+			}
+		}
 		try {
 			statusLogger.getFallbackListener().setLevel(Level.INFO);
 			LogContextShutdown.quietStatusLogger();
@@ -138,6 +146,7 @@ final class LogContextShutdownTest {
 			assertTrue(statusLogger.isEnabled(Level.ERROR, null));
 		} finally {
 			statusLogger.getFallbackListener().setLevel(level);
+			listenerLevels.forEach(StatusConsoleListener::setLevel);
 		}
 	}
 
