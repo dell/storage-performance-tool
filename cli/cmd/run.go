@@ -2437,11 +2437,13 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			_ = os.Setenv(constants.EnvSptImage, strings.TrimSpace(sptImageFlag))
 		}
 
-		switch params.S3Driver {
-		case scenario.S3DriverRdma:
+		if params.S3Driver == scenario.S3DriverRdma && workloadType != WorkloadTypeMock && workloadType != WorkloadTypeTables {
 			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
 			fmt.Println("RDMA mode enabled: using s3-rdma driver with device passthrough.")
-		case scenario.S3DriverAws:
+		} else {
+			_ = os.Unsetenv(constants.EnvRdmaEnabled)
+		}
+		if params.S3Driver == scenario.S3DriverAws {
 			fmt.Println("Using AWS SDK S3 driver (s3-aws).")
 		}
 
