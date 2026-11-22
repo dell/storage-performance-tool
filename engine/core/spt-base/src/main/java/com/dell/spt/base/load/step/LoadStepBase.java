@@ -80,8 +80,6 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
 	// Whether run() will close this step again after the stop or close now running.
 	private volatile boolean runClosesAgain;
-	// Whether the close now running is one of run()'s close attempts.
-	private volatile boolean runClosing;
 	// Set when a start reaches this step: one stopped or closed before it never ran.
 	private volatile boolean startReached;
 
@@ -294,17 +292,30 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		} finally {
 			// The window ends where the run does, before the freeze, on normal and exceptional exits.
 			closeSteadyWindows("run exit");
+			boolean closesNext = false;
 			try {
-				completedRunMetricsSnapshots = List.copyOf(currentMetricsSnapshots());
-			} catch (final Throwable metricsFailure) {
-				throwUncheckedIfInterrupted(metricsFailure);
-				completedRunMetricsSnapshots = List.of();
-				recordRunFailure(metricsFailure);
+				try {
+					completedRunMetricsSnapshots = List.copyOf(currentMetricsSnapshots());
+				} catch (final Throwable metricsFailure) {
+					throwUncheckedIfInterrupted(metricsFailure);
+					completedRunMetricsSnapshots = List.of();
+					recordRunFailure(metricsFailure);
+				}
+				closesNext = true;
+			} finally {
+				if (!closesNext) {
+					// A stop request here skips the close: what a stop left to it is written now.
+					endRunWithoutClose();
+				}
 			}
 			// The stop may leave the interrupt set; the close runs with it clear so it still writes the
 			// step's artifacts, and the stop ends the run after it (below).
 			final boolean interruptedBeforeClose = Thread.interrupted();
-			final Throwable closeCause = closeAfterRun();
+			Throwable closeCause = closeAfterRun();
+			if (closeCause == null) {
+				// A close that completed may keep the failed outcome an earlier stop wrote: the run ends with it.
+				closeCause = failureKeptByClose();
+			}
 			stoppedAtClose = Thread.interrupted() || interruptedBeforeClose;
 			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
@@ -389,9 +400,9 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						? DURATION_RUN_CLOSE_ATTEMPT_LIMIT
 						: 1;
 		boolean closed = false;
-		runClosing = true;
 		try {
 			Throwable firstFailure = null;
+			Throwable stopRequest = null;
 			for (var attempt = 0; attempt < attemptLimit; attempt++) {
 				runClosesAgain = standaloneDeleteDurationMode && attempt < attemptLimit - 1;
 				try {
@@ -399,7 +410,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					closed = true;
 					return null;
 				} catch (final Throwable closeCause) {
-					throwUncheckedIfInterrupted(closeCause);
+					if (closeCause instanceof InterruptedException) {
+						// A stop request ends the retries, not their cleanup below; it ends the run after it.
+						stopRequest = closeCause;
+						break;
+					}
 					if (firstFailure == null) {
 						firstFailure = closeCause;
 					} else if (closeCause != firstFailure) {
@@ -407,30 +422,53 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					}
 				}
 			}
-			if (standaloneDeleteDurationMode) {
-				// A normal run has no caller left to perform another explicit close. Cancel any
-				// still-owned lifecycle resources after the bounded retries so they cannot leak.
-				try {
-					cancelDurationRunCleanupResourcesAfterExhaustion();
-				} catch (final Throwable cleanupCause) {
-					throwUncheckedIfInterrupted(cleanupCause);
-					if (cleanupCause != firstFailure) {
-						firstFailure.addSuppressed(cleanupCause);
+			runClosesAgain = false;
+			// The cleanup runs with the interrupt clear, so it can still deliver its calls; it is set again after.
+			final boolean interrupted = Thread.interrupted();
+			try {
+				if (standaloneDeleteDurationMode) {
+					// A normal run has no caller left to perform another explicit close. Cancel any
+					// still-owned lifecycle resources after the bounded retries so they cannot leak.
+					try {
+						cancelDurationRunCleanupResourcesAfterExhaustion();
+					} catch (final Throwable cleanupCause) {
+						throwUncheckedIfInterrupted(cleanupCause);
+						if (firstFailure == null) {
+							firstFailure = cleanupCause;
+						} else if (cleanupCause != firstFailure) {
+							firstFailure.addSuppressed(cleanupCause);
+						}
+					} finally {
+						closeRetainedDurationPhases();
 					}
-				} finally {
+				} else {
 					closeRetainedDurationPhases();
 				}
-			} else {
-				closeRetainedDurationPhases();
+			} finally {
+				if (interrupted) {
+					Thread.currentThread().interrupt();
+				}
+			}
+			if (stopRequest != null) {
+				if (firstFailure != null) {
+					stopRequest.addSuppressed(firstFailure);
+				}
+				throwUnchecked(stopRequest);
 			}
 			return firstFailure;
 		} finally {
 			runClosesAgain = false;
-			runClosing = false;
-			if (standaloneDeleteDurationMode && !closed) {
+			if (!closed) {
 				// No close of this run settled the step, as when one is stopped: what waited for one is written now.
-				writeOutputLeftToTheRunsClose();
+				endRunWithoutClose();
 			}
+		}
+	}
+
+	private void endRunWithoutClose() {
+		runClosesAgain = false;
+		if (standaloneDeleteDurationMode) {
+			writeOutputLeftToTheRunsClose();
 		}
 	}
 
@@ -444,15 +482,19 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		return runClosesAgain;
 	}
 
-	/** Whether the close now running is one of {@link #run()}'s close attempts, whose failure the run reports. */
-	protected final boolean runClosing() {
-		return runClosing;
+	/**
+	 * The failure that a close which completed kept from an earlier stop of this step, as when that
+	 * stop wrote the outcome {@code failed} before the cleanup could settle: {@link #run()} ends with
+	 * it although its close returned. Null by default and when no close kept one.
+	 */
+	protected Throwable failureKeptByClose() {
+		return null;
 	}
 
 	/**
-	 * Called once a duration-mode run's close attempts end without one that closed the step, as when
-	 * they run out or a stop request ends one: writes any output a stop left to a later close. It
-	 * must not throw.
+	 * Called once a duration-mode run ends without a close that closed the step, as when its close
+	 * attempts run out or a stop request ends one: writes any output a stop left to a later close, and
+	 * releases what only that close would have released. It must not throw.
 	 */
 	protected void writeOutputLeftToTheRunsClose() {}
 

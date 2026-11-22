@@ -20,6 +20,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.concurrent.AsyncRunnable;
 import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
@@ -29,6 +30,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
+import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsConstants;
@@ -171,6 +173,7 @@ class DurationCloseRetryOutcomeTest {
 		final LoadStep slice = runSlice();
 		failFirstCalls(Integer.MAX_VALUE).when(slice).closeOperationAdmissionForStepStop();
 		final RunHarness run = new RunHarness(slice);
+		captureAggregatorAtAwait(run, slice);
 
 		assertThrows(IntegrityTerminalException.class, run.client::run);
 
@@ -179,6 +182,65 @@ class DurationCloseRetryOutcomeTest {
 		verify(run.metricsManager, never()).updateTerminalDeleteFailureOutcome(
 						anyString(),
 						eq(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY));
+		verify(slice, atLeastOnce()).close();
+		assertAggregatorClosed(run);
+	}
+
+	@Test
+	void aRunWhoseSliceStopFailsOnEveryAttemptWritesOneFailedOutputAndFails() throws Exception {
+		final LoadStep slice = runSlice();
+		failFirstCalls(Integer.MAX_VALUE).when(slice).stop();
+		final RunHarness run = new RunHarness(slice);
+		captureAggregatorAtAwait(run, slice);
+
+		assertThrows(IntegrityTerminalException.class, run.client::run);
+
+		assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED), run.outcomesAtOutput,
+						"the output agrees with the run's failure");
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+		verify(run.metricsManager, never()).updateTerminalDeleteFailureOutcome(
+						anyString(),
+						eq(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY));
+		verify(slice, atLeastOnce()).close();
+		assertAggregatorClosed(run);
+	}
+
+	@Test
+	void aRunWhoseSliceStopFailsOnceWritesOneCleanOutputAfterTheRetry() throws Exception {
+		final LoadStep slice = runSlice();
+		failFirstCalls(1).when(slice).stop();
+		final RunHarness run = new RunHarness(slice);
+
+		assertDoesNotThrow(run.client::run);
+
+		assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY), run.outcomesAtOutput);
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY, run.lastPublishedOutcome());
+		verify(run.metricsManager, never()).updateTerminalDeleteFailureOutcome(
+						anyString(), eq(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED));
+		verify(slice, times(2)).stop();
+		verify(slice).close();
+		assertTrue(run.client.isClosed());
+	}
+
+	@Test
+	void aRunWhoseLastWriteFailsStillReleasesItsSlicesAndFailsWithTheCloseFailure() throws Exception {
+		final LoadStep slice = runSlice();
+		failFirstCalls(Integer.MAX_VALUE).when(slice).closeOperationAdmissionForStepStop();
+		final RunHarness run = new RunHarness(slice);
+		captureAggregatorAtAwait(run, slice);
+		final AtomicInteger writes = new AtomicInteger();
+		doAnswer(invocation -> {
+			writes.incrementAndGet();
+			throw new IllegalStateException("the metrics output cannot be written");
+		}).when(run.metricsManager).unregister(run.context);
+
+		final IntegrityTerminalException failure = assertThrows(IntegrityTerminalException.class, run.client::run);
+
+		assertTrue(failure.getMessage().contains("close operation admission"), failure.getMessage());
+		assertEquals(1, writes.get(), "one write, at the last close attempt");
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+		verify(slice, atLeastOnce()).close();
+		assertAggregatorClosed(run);
 	}
 
 	@Test
@@ -194,6 +256,14 @@ class DurationCloseRetryOutcomeTest {
 			}
 			return null;
 		}).when(slice).stop();
+		final AtomicInteger admissionCloses = new AtomicInteger();
+		doAnswer(invocation -> {
+			if (admissionCloses.incrementAndGet() == 2) {
+				// The run's close retry has begun, so the interrupted stop has ended: the slice may stop now.
+				releaseStop.countDown();
+			}
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
 		final RunHarness run = new RunHarness(slice);
 		final AtomicReference<Throwable> runFailure = new AtomicReference<>();
 		final Thread runner = Thread.ofPlatform().start(() -> {
@@ -207,18 +277,19 @@ class DurationCloseRetryOutcomeTest {
 			assertTrue(stopEntered.await(10, TimeUnit.SECONDS), "the await's stop reaches the slice's stop");
 			// A stop request while the slice is still stopping.
 			runner.interrupt();
-			// Let the interrupted stop end, then release the slice, so a close retry can settle cleanup.
-			Thread.sleep(200);
+			runner.join(TimeUnit.SECONDS.toMillis(30));
+			assertFalse(runner.isAlive());
 		} finally {
 			releaseStop.countDown();
 		}
-		runner.join(TimeUnit.SECONDS.toMillis(30));
-		assertFalse(runner.isAlive());
 
 		assertInstanceOf(InterruptedException.class, runFailure.get());
-		assertEquals(1, run.outcomesAtOutput.size(), "one output: " + run.outcomesAtOutput);
-		assertEquals(run.lastPublishedOutcome(), run.outcomesAtOutput.get(0),
-						"the output carries the outcome the step ends with");
+		assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY), run.outcomesAtOutput,
+						"the retry settles the cleanup, and the output carries its outcome");
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY, run.lastPublishedOutcome());
+		assertEquals(2, admissionCloses.get());
+		verify(slice).close();
+		assertTrue(run.client.isClosed());
 	}
 
 	@Test
@@ -226,13 +297,15 @@ class DurationCloseRetryOutcomeTest {
 		final LoadStep slice = runSlice();
 		failFirstCalls(1).when(slice).closeOperationAdmissionForStepStop();
 		final CountDownLatch stopEntered = new CountDownLatch(1);
-		final CountDownLatch releaseStop = new CountDownLatch(1);
+		// The slice's stop blocks until it is cancelled: only the step's cleanup ends it.
+		final CountDownLatch neverReleased = new CountDownLatch(1);
 		doAnswer(invocation -> {
 			stopEntered.countDown();
-			awaitIgnoringInterrupt(releaseStop);
+			neverReleased.await();
 			return null;
 		}).when(slice).stop();
 		final RunHarness run = new RunHarness(slice);
+		captureAggregatorAtAwait(run, slice);
 		final AtomicReference<Throwable> runFailure = new AtomicReference<>();
 		final Thread runner = Thread.ofPlatform().start(() -> {
 			try {
@@ -246,14 +319,86 @@ class DurationCloseRetryOutcomeTest {
 			runner.interrupt();
 			runner.join(TimeUnit.SECONDS.toMillis(30));
 			assertFalse(runner.isAlive());
-		} finally {
-			releaseStop.countDown();
-		}
 
-		assertInstanceOf(InterruptedException.class, runFailure.get());
+			assertInstanceOf(InterruptedException.class, runFailure.get());
+			assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED), run.outcomesAtOutput,
+							"no metrics context stays registered as running");
+			assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+			verify(slice).close();
+			assertNoLiveThreads("spt-delete-step-stop-");
+			assertAggregatorClosed(run);
+		} finally {
+			neverReleased.countDown();
+		}
+	}
+
+	@Test
+	void aRunInterruptedDuringACloseRetryWhoseWriteFailsStillReleasesItsSlices() throws Exception {
+		final LoadStep slice = runSlice();
+		failFirstCalls(1).when(slice).closeOperationAdmissionForStepStop();
+		final CountDownLatch stopEntered = new CountDownLatch(1);
+		final CountDownLatch neverReleased = new CountDownLatch(1);
+		doAnswer(invocation -> {
+			stopEntered.countDown();
+			neverReleased.await();
+			return null;
+		}).when(slice).stop();
+		final RunHarness run = new RunHarness(slice);
+		captureAggregatorAtAwait(run, slice);
+		final AtomicInteger writes = new AtomicInteger();
+		doAnswer(invocation -> {
+			writes.incrementAndGet();
+			throw new IllegalStateException("the metrics output cannot be written");
+		}).when(run.metricsManager).unregister(run.context);
+		final AtomicReference<Throwable> runFailure = new AtomicReference<>();
+		final Thread runner = Thread.ofPlatform().start(() -> {
+			try {
+				run.client.run();
+			} catch (final Throwable failure) {
+				runFailure.set(failure);
+			}
+		});
+		try {
+			assertTrue(stopEntered.await(10, TimeUnit.SECONDS), "the close retry reaches the slice's stop");
+			runner.interrupt();
+			runner.join(TimeUnit.SECONDS.toMillis(30));
+			assertFalse(runner.isAlive());
+
+			assertInstanceOf(InterruptedException.class, runFailure.get());
+			assertEquals(1, writes.get(), "one write, at the run's end");
+			assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+			verify(slice).close();
+			assertNoLiveThreads("spt-delete-step-stop-");
+			assertAggregatorClosed(run);
+		} finally {
+			neverReleased.countDown();
+		}
+	}
+
+	@Test
+	void aRunStoppedBeforeItsCloseStillWritesTheOutputItsStopLeft() throws Exception {
+		final LoadStep slice = runSlice();
+		final RunHarness run = new RunHarness(slice);
+		final AtomicBoolean stopAtRunExit = new AtomicBoolean();
+		doAnswer(invocation -> {
+			// The await's stop defers the output; a stop request then ends the run's snapshot refresh.
+			stopAtRunExit.set(true);
+			throw new RemoteException("transient failure at the await's stop");
+		}).doNothing().when(slice).closeOperationAdmissionForStepStop();
+		doAnswer(invocation -> {
+			if (stopAtRunExit.getAndSet(false)) {
+				throw new InterruptedException("stopped at the run's snapshot refresh");
+			}
+			return null;
+		}).when(run.context).refreshLastSnapshot();
+
+		final Throwable failure = assertThrows(Throwable.class, run.client::run);
+
+		assertInstanceOf(InterruptedException.class, failure);
 		assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED), run.outcomesAtOutput,
-						"no metrics context stays registered as running");
+						"the deferred output is written");
 		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+		assertFalse(runClosesAgain(run.client), "no run close follows");
 	}
 
 	@Test
@@ -274,7 +419,52 @@ class DurationCloseRetryOutcomeTest {
 		verify(run.metricsManager, never()).updateTerminalDeleteFailureOutcome(
 						anyString(),
 						eq(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY));
-		verify(slice, atLeastOnce()).close();
+		assertTrue(run.client.isClosed(), "the retry whose cleanup succeeds closes the step");
+		// The await's stop and the one close retry: no stop or close reaches the closed slice again.
+		verify(slice, times(2)).closeOperationAdmissionForStepStop();
+		verify(slice, times(1)).stop();
+		verify(slice, times(1)).close();
+	}
+
+	@Test
+	void aCloseFromAnotherThreadDuringTheRunsCloseRetriesDoesNotFail() throws Exception {
+		final LoadStep slice = cleanSlice();
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			JvmExit.markBegun();
+			return false;
+		});
+		final RunHarness run = new RunHarness(slice);
+		final AtomicReference<Throwable> otherCloseFailure = new AtomicReference<>();
+		final AtomicReference<Thread> otherCloser = new AtomicReference<>();
+		final AtomicInteger admissionCloses = new AtomicInteger();
+		doAnswer(invocation -> {
+			final int call = admissionCloses.incrementAndGet();
+			if (call == 2) {
+				// The exit hook's close arrives while the run's close retry runs, and waits for it.
+				otherCloser.set(Thread.ofPlatform().start(() -> {
+					try {
+						run.client.close();
+					} catch (final Throwable failure) {
+						otherCloseFailure.set(failure);
+					}
+				}));
+			}
+			if (call <= 2) {
+				throw new RemoteException("transient failure " + call);
+			}
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+
+		assertThrows(IntegrityTerminalException.class, run.client::run);
+		otherCloser.get().join(TimeUnit.SECONDS.toMillis(30));
+
+		assertFalse(otherCloser.get().isAlive());
+		assertEquals(null, otherCloseFailure.get(), "the other thread's close completes");
+		assertTrue(run.client.isClosed());
+		assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED), run.outcomesAtOutput);
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+		verify(slice, times(3)).closeOperationAdmissionForStepStop();
+		verify(slice, times(1)).close();
 	}
 
 	@Test
@@ -310,6 +500,9 @@ class DurationCloseRetryOutcomeTest {
 		assertEquals(List.of(2), admissionClosesAtOutput, "the failing close writes the output");
 		assertEquals(List.of(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED), run.outcomesAtOutput);
 		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, run.lastPublishedOutcome());
+		assertTrue(run.client.isClosed(), "the last close retry cleans up and closes");
+		verify(slice, times(3)).closeOperationAdmissionForStepStop();
+		verify(slice, times(1)).close();
 	}
 
 	// ---- no close attempt owned by run(): the stop writes the output, and failed stays final ----
@@ -334,6 +527,53 @@ class DurationCloseRetryOutcomeTest {
 		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, terminalOutcome(client),
 						"the terminal entry keeps the outcome the output carries");
 		assertEquals(0, messages.count("completed cleanly"));
+	}
+
+	@Test
+	void aDirectCloseRetryAfterAFailedSliceStopKeepsTheFailedOutcomeItWrote() throws Exception {
+		final TestLoadStepClient client = client(durationConfig());
+		final LoadStep slice = cleanSlice();
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		failFirstCalls(1).when(slice).stop();
+		addSlice(client, slice);
+
+		assertFalse(client.await(1, TimeUnit.MILLISECONDS));
+		assertEquals(List.of(RESULTS_OUTCOME + "failed"), resultsOutcomes(1),
+						"the stop that failed to stop a slice writes failed");
+		assertThrows(IntegrityTerminalException.class, client::close);
+
+		assertDoesNotThrow(client::close);
+
+		assertTrue(client.isClosed(), "the retry still cleans up and closes");
+		verify(slice).close();
+		assertEquals(List.of(RESULTS_OUTCOME + "failed"), resultsOutcomes(1));
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, terminalOutcome(client));
+		assertEquals(0, messages.count("completed cleanly"));
+	}
+
+	@Test
+	void aDirectCloseRetryAfterAnIncompleteStopWithAValidityFailureStillCloses() throws Exception {
+		final TestLoadStepClient client = client(durationConfig());
+		final LoadStep slice = cleanSlice();
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		// The inventory runs out before the duration, and a slice's recovery fails once.
+		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE);
+		failFirstCalls(1).when(slice).recoverQueuedOperationsForStepStop();
+		addSlice(client, slice);
+
+		try {
+			client.await(1, TimeUnit.MILLISECONDS);
+		} catch (final IntegrityTerminalException expected) {
+			// The validity failure: the inventory ran out early.
+		}
+		assertThrows(IntegrityTerminalException.class, client::close);
+
+		assertDoesNotThrow(client::close);
+
+		assertTrue(client.isClosed(), "the retry still cleans up and closes");
+		verify(slice).close();
+		assertEquals(List.of(RESULTS_OUTCOME + "failed"), resultsOutcomes(1));
+		assertEquals(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, terminalOutcome(client));
 	}
 
 	@Test
@@ -381,6 +621,7 @@ class DurationCloseRetryOutcomeTest {
 		final List<String> outcomesAtOutput = new CopyOnWriteArrayList<>();
 		final List<String> publishedOutcomes = new CopyOnWriteArrayList<>();
 		final AtomicBoolean registered = new AtomicBoolean(true);
+		final AtomicReference<AsyncRunnable> aggregator = new AtomicReference<>();
 		final TestLoadStepClient client;
 
 		RunHarness(final LoadStep slice) throws Exception {
@@ -419,6 +660,48 @@ class DurationCloseRetryOutcomeTest {
 		// The slice runs to the deadline.
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
 		return slice;
+	}
+
+	/** The run's metrics aggregator, once the step has started it, as the slice's await sees it. */
+	private static void captureAggregatorAtAwait(final RunHarness run, final LoadStep slice) throws Exception {
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			run.aggregator.set((AsyncRunnable) field(run.client, "metricsAggregator"));
+			return false;
+		});
+	}
+
+	private static void assertAggregatorClosed(final RunHarness run) throws Exception {
+		final AsyncRunnable aggregator = run.aggregator.get();
+		assertTrue(aggregator != null, "the run started its metrics aggregator");
+		assertTrue(aggregator.isClosed(), "the metrics aggregator no longer polls the slices");
+	}
+
+	private static void assertNoLiveThreads(final String namePrefix) throws InterruptedException {
+		final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		List<String> live;
+		do {
+			live = Thread.getAllStackTraces().keySet().stream()
+							.filter(thread -> thread.isAlive() && thread.getName().startsWith(namePrefix))
+							.map(Thread::getName)
+							.toList();
+			if (live.isEmpty()) {
+				return;
+			}
+			Thread.sleep(10);
+		} while (System.nanoTime() < deadlineNanos);
+		throw new AssertionError("live threads " + live);
+	}
+
+	private static boolean runClosesAgain(final LoadStepBase step) throws Exception {
+		final Field field = LoadStepBase.class.getDeclaredField("runClosesAgain");
+		field.setAccessible(true);
+		return field.getBoolean(step);
+	}
+
+	private static Object field(final LoadStepClientBase<?> client, final String name) throws Exception {
+		final Field field = LoadStepClientBase.class.getDeclaredField(name);
+		field.setAccessible(true);
+		return field.get(client);
 	}
 
 	private static Stubber failFirstCalls(final int failures) {
