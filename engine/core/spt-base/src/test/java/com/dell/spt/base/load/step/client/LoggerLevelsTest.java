@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.dell.spt.base.logging.Loggers;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -23,6 +24,9 @@ class LoggerLevelsTest {
 	/** A logger with no entry of its own in the configuration, so that it follows its parent. */
 	private static final String UNCONFIGURED = LoggerLevelsTest.class.getName() + ".unconfigured";
 
+	/** A logger no test fetches before the one that names it with its parent, the root. */
+	private static final String FRESH = LoggerLevelsTest.class.getName() + ".fresh";
+
 	private static final LoggerContext CONTEXT = LoggerContext.getContext(false);
 
 	/** What the Errors logger had before each test, to check against, and to put back if a test fails. */
@@ -39,6 +43,7 @@ class LoggerLevelsTest {
 	void putErrorsBack() {
 		CONTEXT.getConfiguration().getLoggerConfig(ERR).setLevel(errConfigLevel);
 		CONTEXT.getConfiguration().removeLogger(UNCONFIGURED);
+		CONTEXT.getConfiguration().removeLogger(FRESH);
 		CONTEXT.updateLoggers();
 		if (!errLoggerLevel.equals(CONTEXT.getLogger(ERR).getLevel())) {
 			CONTEXT.getLogger(ERR).setLevel(errLoggerLevel);
@@ -51,6 +56,80 @@ class LoggerLevelsTest {
 		final var override = Level.OFF.equals(configured) ? Level.ERROR : Level.OFF;
 		CONTEXT.getLogger(ERR).setLevel(override);
 		return configured;
+	}
+
+	/** A per-Logger level on the Errors logger at or below WARN, which differs from the configured one. */
+	private static Level overrideErrorsAtMostWarn() {
+		final var configured = CONTEXT.getConfiguration().getLoggerConfig(ERR).getLevel();
+		final var override = Level.WARN.equals(configured) ? Level.INFO : Level.WARN;
+		CONTEXT.getLogger(ERR).setLevel(override);
+		return override;
+	}
+
+	/** A per-Logger level on the unconfigured logger, which differs from the one it inherits. */
+	private static Level overrideTheUnconfiguredLogger() {
+		final var inherited = CONTEXT.getLogger(UNCONFIGURED).getLevel();
+		final var override = Level.FATAL.equals(inherited) ? Level.TRACE : Level.FATAL;
+		CONTEXT.getLogger(UNCONFIGURED).setLevel(override);
+		return override;
+	}
+
+	@Test
+	void atMostThatChangesNothingKeepsThePerLoggerLevelItFound() {
+		final var override = overrideErrorsAtMostWarn();
+
+		try (var levels = LoggerLevels.atMost(Level.WARN, ERR)) {
+			assertEquals(override, CONTEXT.getLogger(ERR).getLevel(), "inside the window");
+		}
+
+		assertEquals(override, CONTEXT.getLogger(ERR).getLevel());
+		assertEquals(errConfigLevel, CONTEXT.getConfiguration().getLoggerConfig(ERR).getExplicitLevel());
+	}
+
+	@Test
+	void atMostKeepsThePerLoggerLevelOfANamedLoggerItSkips() {
+		final var errOverride = overrideErrorsAtMostWarn();
+		CONTEXT.getLogger(UNCONFIGURED).setLevel(Level.OFF);
+
+		try (var levels = LoggerLevels.atMost(Level.WARN, UNCONFIGURED, ERR)) {
+			assertEquals(Level.WARN, CONTEXT.getLogger(UNCONFIGURED).getLevel());
+			assertEquals(errOverride, CONTEXT.getLogger(ERR).getLevel(), "inside the window");
+		}
+
+		assertEquals(errOverride, CONTEXT.getLogger(ERR).getLevel());
+		assertEquals(Level.OFF, CONTEXT.getLogger(UNCONFIGURED).getLevel());
+	}
+
+	@Test
+	void aWindowKeepsThePerLoggerLevelOfALoggerItDoesNotName() {
+		final var override = overrideTheUnconfiguredLogger();
+		final var silencing = Level.OFF.equals(errLoggerLevel) ? Level.ERROR : Level.OFF;
+
+		try (var levels = LoggerLevels.set(Map.of(ERR, silencing))) {
+			assertEquals(silencing, CONTEXT.getLogger(ERR).getLevel());
+			assertEquals(override, CONTEXT.getLogger(UNCONFIGURED).getLevel(), "inside the window");
+		}
+
+		assertEquals(override, CONTEXT.getLogger(UNCONFIGURED).getLevel());
+		assertEquals(errLoggerLevel, CONTEXT.getLogger(ERR).getLevel());
+	}
+
+	@Test
+	void aFreshChildNamedAfterItsParentFollowsTheParentAgainAfterTheWindow() {
+		final var rootLevel = LogManager.getRootLogger().getLevel();
+		final var windowRoot = Level.FATAL.equals(rootLevel) ? Level.ERROR : Level.FATAL;
+		final var windowChild = Level.OFF;
+		final var changes = new LinkedHashMap<String, Level>();
+		changes.put(LogManager.ROOT_LOGGER_NAME, windowRoot);
+		changes.put(FRESH, windowChild);
+
+		try (var levels = LoggerLevels.set(changes)) {
+			assertEquals(windowChild, CONTEXT.getLogger(FRESH).getLevel());
+		}
+
+		assertEquals(rootLevel, LogManager.getRootLogger().getLevel());
+		assertNotEquals(FRESH, CONTEXT.getConfiguration().getLoggerConfig(FRESH).getName());
+		assertEquals(rootLevel, CONTEXT.getLogger(FRESH).getLevel(), "it follows the root again");
 	}
 
 	@Test
