@@ -267,7 +267,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			throw e;
 		}
 		// Only now, with this class's fields set, may the exit hook close this client.
-		register();
+		registerForCloseAll();
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {

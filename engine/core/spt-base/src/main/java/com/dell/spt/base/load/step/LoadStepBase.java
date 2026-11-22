@@ -88,8 +88,9 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	}
 
 	/**
-	 * With {@code deferRegistration}, the subclass calls {@link #register()} as the last statement of
-	 * its constructor, so a signal while its fields are still unset does not close it half-built.
+	 * With {@code deferRegistration}, the subclass calls {@link #registerForCloseAll()} as the last
+	 * statement of its constructor, so a signal while its fields are still unset does not close it
+	 * half-built.
 	 * Otherwise this constructor registers the step at its end.
 	 */
 	protected LoadStepBase(
@@ -136,7 +137,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			throw e;
 		}
 		if (!deferRegistration) {
-			register();
+			registerForCloseAll();
 		}
 	}
 

@@ -546,7 +546,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			throw failure;
 		}
 		warnIfSizeLimitCannotStop(configSizeLimit.get(), standaloneDelete.enabled());
-		register();
+		registerForCloseAll();
 	}
 
 	/**

@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -84,8 +85,11 @@ class HalfBuiltDaemonCloseAllTest {
 		}
 	}
 
-	/** A daemon built on its own thread, held in its constructor at {@link Hold#here}. */
-	private static final class Building<T> {
+	/**
+	 * A daemon built on its own thread, held in its constructor at {@link Hold#here}. Closing it releases
+	 * the hold, so a failed assertion does not leave the daemon half-built for the next test's closeAll.
+	 */
+	private static final class Building<T> implements AutoCloseable {
 		private final Hold hold = new Hold();
 		private final AtomicReference<T> built = new AtomicReference<>();
 		private final AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -113,13 +117,25 @@ class HalfBuiltDaemonCloseAllTest {
 		}
 
 		T releaseAndAwait() throws InterruptedException {
+			final var cause = releaseAndAwaitFailure();
+			if (cause != null) {
+				throw new AssertionError("the constructor failed", cause);
+			}
+			return built.get();
+		}
+
+		/** For a constructor that is meant to fail: what it threw, or null. */
+		Throwable releaseAndAwaitFailure() throws InterruptedException {
 			hold.release.countDown();
 			thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
 			assertFalse(thread.isAlive(), "the constructor did not finish");
-			if (failure.get() != null) {
-				throw new AssertionError("the constructor failed", failure.get());
-			}
-			return built.get();
+			return failure.get();
+		}
+
+		@Override
+		public void close() throws InterruptedException {
+			hold.release.countDown();
+			thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
 		}
 	}
 
@@ -212,6 +228,79 @@ class HalfBuiltDaemonCloseAllTest {
 		}
 	}
 
+	/** Registers at once, as a storage driver does, and its constructor fails after the hold. */
+	private static final class FailingScopedDaemon extends DaemonBase {
+		private final List<String> closes;
+
+		FailingScopedDaemon() {
+			Hold.here(this);
+			closes = refuse();
+		}
+
+		private static List<String> refuse() {
+			throw new IllegalStateException("refused, as a driver refuses its configuration");
+		}
+
+		@Override
+		protected void doClose() {
+			closes.add("close");
+		}
+	}
+
+	/** A built daemon whose close holds closeAll until the test lets it go on. */
+	private static final class SlowClosingDaemon extends DaemonBase {
+		private final CountDownLatch closing = new CountDownLatch(1);
+		private final CountDownLatch proceed = new CountDownLatch(1);
+
+		@Override
+		protected void doClose() throws IOException {
+			closing.countDown();
+			try {
+				if (!proceed.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
+					throw new IOException("the test never let the close go on");
+				}
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new IOException(e);
+			}
+		}
+
+		void awaitClosing() throws InterruptedException {
+			assertTrue(closing.await(WAIT_SECONDS, TimeUnit.SECONDS), "closeAll never reached the slow daemon");
+		}
+
+		void proceed() {
+			proceed.countDown();
+		}
+	}
+
+	/**
+	 * Runs {@link #closeAllFailures()} on a thread of its own, for a test that steps through it while it
+	 * closes the slow daemon. Closing the run lets that close go on and closes the daemon if closeAll did not.
+	 */
+	private static final class CloseAllRun implements AutoCloseable {
+		private final FutureTask<List<String>> task = new FutureTask<>(HalfBuiltDaemonCloseAllTest::closeAllFailures);
+		private final Thread thread = new Thread(task, "test-close-all");
+		private final SlowClosingDaemon slow;
+
+		CloseAllRun(final SlowClosingDaemon slow) {
+			this.slow = slow;
+			thread.setDaemon(true);
+			thread.start();
+		}
+
+		List<String> await() throws Exception {
+			return task.get(WAIT_SECONDS, TimeUnit.SECONDS);
+		}
+
+		@Override
+		public void close() throws InterruptedException, IOException {
+			slow.proceed();
+			thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+			slow.close();
+		}
+	}
+
 	/** A step id of its own: a closed local step publishes artifacts that a later run must not find. */
 	private static Config stepConfig() {
 		final var config = TestConfigBuilder.config();
@@ -291,90 +380,188 @@ class HalfBuiltDaemonCloseAllTest {
 
 	@Test
 	void aClientHeldInItsConstructorIsLeftAloneByCloseAllAndClosesOnceBuilt() throws Exception {
-		final var building = build(() -> new HeldClient(stepConfig()));
-		final var held = building.awaitHeld();
+		try (final var building = build(() -> new HeldClient(stepConfig()))) {
+			final var held = building.awaitHeld();
 
-		assertFalse(registered(held));
-		assertEquals(List.of(), closeAllFailures());
+			assertFalse(registered(held));
+			assertEquals(List.of(), closeAllFailures());
 
-		final var client = building.releaseAndAwait();
-		assertSame(held, client);
-		assertEquals(State.INITIAL, client.state());
-		assertTrue(registered(client));
-		client.close();
-		assertTrue(client.isClosed());
-		assertFalse(registered(client));
+			final var client = building.releaseAndAwait();
+			assertSame(held, client);
+			assertEquals(State.INITIAL, client.state());
+			assertTrue(registered(client));
+			client.close();
+			assertTrue(client.isClosed());
+			assertFalse(registered(client));
+		}
 	}
 
 	/** Its stop also reads the standalone DELETE stop coordination, which the client's own fields hold. */
 	@Test
 	void aStandaloneDeleteClientHeldInItsConstructorIsLeftAloneByCloseAll() throws Exception {
-		final var building = build(() -> new HeldClient(standaloneDelete()));
-		final var held = building.awaitHeld();
+		try (final var building = build(() -> new HeldClient(standaloneDelete()))) {
+			final var held = building.awaitHeld();
 
-		assertEquals(List.of(), closeAllFailures());
+			assertEquals(List.of(), closeAllFailures());
 
-		final var client = building.releaseAndAwait();
-		assertSame(held, client);
-		assertEquals(State.INITIAL, client.state());
-		assertTrue(registered(client));
-		// Not closed here: a never-started standalone DELETE client fails its failure budget at close, a
-		// separate defect (delete-prototype-close-integrity-error), and would stay registered for the next test.
-		client.abandonRegistration();
+			final var client = building.releaseAndAwait();
+			assertSame(held, client);
+			assertEquals(State.INITIAL, client.state());
+			assertTrue(registered(client));
+			// Not closed here: a never-started standalone DELETE client fails its failure budget at close, a
+			// separate defect (delete-prototype-close-integrity-error), and would stay registered for the next test.
+			client.abandonRegistration();
+		}
 	}
 
 	@Test
 	void aLocalStepHeldInItsConstructorIsLeftAloneByCloseAllAndClosesOnceBuilt() throws Exception {
-		final var building = build(() -> new HeldLocal(stepConfig()));
-		final var held = building.awaitHeld();
+		try (final var building = build(() -> new HeldLocal(stepConfig()))) {
+			final var held = building.awaitHeld();
 
-		assertFalse(registered(held));
-		assertEquals(List.of(), closeAllFailures());
+			assertFalse(registered(held));
+			assertEquals(List.of(), closeAllFailures());
 
-		final var step = building.releaseAndAwait();
-		assertSame(held, step);
-		assertEquals(State.INITIAL, step.state());
-		assertTrue(registered(step));
-		step.close();
-		assertTrue(step.isClosed());
+			final var step = building.releaseAndAwait();
+			assertSame(held, step);
+			assertEquals(State.INITIAL, step.state());
+			assertTrue(registered(step));
+			step.close();
+			assertTrue(step.isClosed());
+		}
 	}
 
 	@Test
 	void aDirectlyBuiltStepIsLeftAloneWhileHeldAndClosedByCloseAllOnceBuilt() throws Exception {
-		final var building = build(() -> new DirectStep(stepConfig()));
-		final var held = building.awaitHeld();
+		try (final var building = build(() -> new DirectStep(stepConfig()))) {
+			final var held = building.awaitHeld();
 
-		assertFalse(registered(held));
-		assertEquals(List.of(), closeAllFailures());
+			assertFalse(registered(held));
+			assertEquals(List.of(), closeAllFailures());
 
-		final var step = building.releaseAndAwait();
-		assertEquals(State.INITIAL, step.state());
-		assertTrue(registered(step));
-		assertEquals(List.of(), closeAllFailures());
-		assertTrue(step.isClosed());
+			final var step = building.releaseAndAwait();
+			assertEquals(State.INITIAL, step.state());
+			assertTrue(registered(step));
+			assertEquals(List.of(), closeAllFailures());
+			assertTrue(step.isClosed());
+		}
 	}
 
 	@Test
 	void aDaemonHeldInItsConstructionScopeIsLeftAloneByCloseAllAndClosedOnceTheScopeSucceeds() throws Exception {
-		final var building = build(() -> {
+		try (final var building = build(() -> {
 			try (final var scope = DaemonBase.openConstructionScope()) {
 				final var daemon = new ScopedDaemon();
 				scope.succeeded();
 				return daemon;
 			}
-		});
-		final var held = building.awaitHeld();
+		})) {
+			final var held = building.awaitHeld();
 
-		assertTrue(registered(held), "a daemon without deferred registration registers at once");
-		assertEquals(List.of(), closeAllFailures());
+			assertTrue(registered(held), "a daemon without deferred registration registers at once");
+			assertEquals(List.of(), closeAllFailures());
 
-		final var daemon = building.releaseAndAwait();
-		assertSame(held, daemon);
-		assertEquals(State.INITIAL, daemon.state());
-		assertTrue(registered(daemon), "closeAll keeps a daemon it left alone");
+			final var daemon = building.releaseAndAwait();
+			assertSame(held, daemon);
+			assertEquals(State.INITIAL, daemon.state());
+			assertTrue(registered(daemon), "closeAll keeps a daemon it left alone");
+			assertEquals(List.of(), closeAllFailures());
+			assertTrue(daemon.isClosed());
+			assertEquals(List.of("close"), daemon.closes);
+		}
+	}
+
+	/**
+	 * closeAll has taken the next registry entry while it closes the one before, and the construction
+	 * scope of that next daemon fails meanwhile: the scope releases and abandons it, and closeAll must
+	 * not close it then. (The registry's iterator reads one entry ahead, so the removal does not hide it.)
+	 */
+	@Test
+	void aDaemonWhoseScopeFailsWhileCloseAllClosesAnotherIsNotClosedByCloseAll() throws Exception {
+		final var slow = new SlowClosingDaemon();
+		try {
+			try (final var building = build(() -> {
+				try (final var scope = DaemonBase.openConstructionScope()) {
+					final var daemon = new FailingScopedDaemon();
+					scope.succeeded();
+					return daemon;
+				}
+			})) {
+				final var held = building.awaitHeld();
+				assertTrue(registered(held));
+				try (final var closeAll = new CloseAllRun(slow)) {
+					slow.awaitClosing();
+
+					assertTrue(building.releaseAndAwaitFailure() instanceof IllegalStateException);
+					assertFalse(registered(held), "the failed scope abandons its daemon");
+					slow.proceed();
+
+					assertEquals(List.of(), closeAll.await());
+				}
+				assertTrue(slow.isClosed());
+				assertFalse(((DaemonBase) held).isClosed(), "closeAll closed an abandoned, half-built daemon");
+			}
+		} finally {
+			// Not left registered and unclosed for the next test, whatever failed here.
+			slow.proceed();
+			slow.close();
+		}
+	}
+
+	/**
+	 * closeAll skips a daemon whose construction scope is open and goes on to close the next one; the
+	 * scope succeeds meanwhile. The daemon must stay registered, so a later closeAll closes it.
+	 */
+	@Test
+	void aDaemonWhoseScopeSucceedsWhileCloseAllClosesAnotherStaysForTheNextCloseAll() throws Exception {
+		try (final var building = build(() -> {
+			try (final var scope = DaemonBase.openConstructionScope()) {
+				final var daemon = new ScopedDaemon();
+				scope.succeeded();
+				return daemon;
+			}
+		})) {
+			final var held = building.awaitHeld();
+			final var slow = new SlowClosingDaemon();
+			final ScopedDaemon daemon;
+			try (final var closeAll = new CloseAllRun(slow)) {
+				slow.awaitClosing();
+
+				daemon = building.releaseAndAwait();
+				assertSame(held, daemon);
+				slow.proceed();
+
+				assertEquals(List.of(), closeAll.await());
+			}
+			assertTrue(slow.isClosed());
+			assertFalse(daemon.isClosed());
+			assertTrue(registered(daemon), "closeAll dropped a daemon it skipped");
+
+			assertEquals(List.of(), closeAllFailures());
+			assertTrue(daemon.isClosed());
+			assertEquals(List.of("close"), daemon.closes);
+		}
+	}
+
+	/** Registered after closeAll has passed its place in the registry: a later closeAll closes it. */
+	@Test
+	void aDaemonRegisteredWhileCloseAllClosesAnotherStaysForTheNextCloseAll() throws Exception {
+		final var slow = new SlowClosingDaemon();
+		final DaemonBase late;
+		try (final var closeAll = new CloseAllRun(slow)) {
+			slow.awaitClosing();
+			late = new DaemonBase(true) {};
+			late.registerForCloseAll();
+			slow.proceed();
+
+			assertEquals(List.of(), closeAll.await());
+		}
+		assertTrue(slow.isClosed());
+		assertFalse(late.isClosed());
+		assertTrue(registered(late), "closeAll dropped a daemon registered after it passed");
+
 		assertEquals(List.of(), closeAllFailures());
-		assertTrue(daemon.isClosed());
-		assertEquals(List.of("close"), daemon.closes);
+		assertTrue(late.isClosed());
 	}
 
 	/** Built, but its enclosing scope is still open: the construction around it may still fail. */
@@ -433,17 +620,18 @@ class HalfBuiltDaemonCloseAllTest {
 			return null;
 		}).when(generator).onSchedulingExhaustion(any());
 		final var before = registeredContexts();
-		final var building = build(() -> context(generator, TestConfigBuilder.config()));
-		building.awaitHeld();
+		try (final var building = build(() -> context(generator, TestConfigBuilder.config()))) {
+			building.awaitHeld();
 
-		assertEquals(before, registeredContexts());
-		assertEquals(List.of(), closeAllFailures());
+			assertEquals(before, registeredContexts());
+			assertEquals(List.of(), closeAllFailures());
 
-		final var context = building.releaseAndAwait();
-		assertEquals(State.INITIAL, context.state());
-		assertTrue(registered(context));
-		context.close();
-		assertTrue(context.isClosed());
+			final var context = building.releaseAndAwait();
+			assertEquals(State.INITIAL, context.state());
+			assertTrue(registered(context));
+			context.close();
+			assertTrue(context.isClosed());
+		}
 	}
 
 	@Test
@@ -462,7 +650,7 @@ class HalfBuiltDaemonCloseAllTest {
 	void aDaemonClosedBeforeItRegistersStaysUnregistered() throws IOException {
 		final var daemon = new DaemonBase(true) {};
 		daemon.close();
-		daemon.register();
+		daemon.registerForCloseAll();
 
 		assertFalse(registered(daemon));
 	}
@@ -470,8 +658,8 @@ class HalfBuiltDaemonCloseAllTest {
 	@Test
 	void registeringTwiceRegistersOnce() throws IOException {
 		final var daemon = new DaemonBase(true) {};
-		daemon.register();
-		daemon.register();
+		daemon.registerForCloseAll();
+		daemon.registerForCloseAll();
 		assertTrue(registered(daemon));
 
 		daemon.close();
@@ -482,7 +670,7 @@ class HalfBuiltDaemonCloseAllTest {
 	void anAbandonedRegistrationCannotBeRegisteredAgain() {
 		final var daemon = new DaemonBase(true) {};
 		daemon.abandonRegistration();
-		daemon.register();
+		daemon.registerForCloseAll();
 
 		assertFalse(registered(daemon));
 	}

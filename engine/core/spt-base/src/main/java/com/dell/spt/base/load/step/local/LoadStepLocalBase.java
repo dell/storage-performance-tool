@@ -186,7 +186,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 					final MetricsManager metricsManager) {
 		super(baseConfig, extensions, contextConfigs, metricsManager, true);
 		// Only now, with this class's fields set, may the exit hook close this step.
-		register();
+		registerForCloseAll();
 	}
 
 	@Override

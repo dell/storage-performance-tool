@@ -26,8 +26,12 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 
 	private final WeakReference<DaemonBase> daemonRef;
 	private final AtomicBoolean registered = new AtomicBoolean();
+	/** Its construction failed: {@link #closeAll()} never closes it. */
 	private volatile boolean abandoned;
-	/** Built inside a construction scope that has not yet closed as succeeded: {@link #closeAll()} skips it. */
+	/**
+	 * Built inside a construction scope that has not yet closed as succeeded, or one that failed:
+	 * {@link #closeAll()} skips it.
+	 */
 	private volatile boolean constructing;
 
 	/** Registers this daemon for {@link #closeAll()} at once, before a subclass's fields are set. */
@@ -36,9 +40,9 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 	}
 
 	/**
-	 * With {@code deferRegistration}, the subclass calls {@link #register()} once its own fields are
-	 * set, so the exit hook's {@link #closeAll()} cannot run a lifecycle method on a partly built
-	 * object; until then it does not reach this daemon.
+	 * With {@code deferRegistration}, the subclass calls {@link #registerForCloseAll()} once its own
+	 * fields are set, so the exit hook's {@link #closeAll()} cannot run a lifecycle method on a partly
+	 * built object; until then it does not reach this daemon.
 	 */
 	protected DaemonBase(final boolean deferRegistration) {
 		daemonRef = new WeakReference<>(this);
@@ -48,7 +52,7 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 			scope.daemons.add(this);
 		}
 		if (!deferRegistration) {
-			register();
+			registerForCloseAll();
 		}
 	}
 
@@ -57,7 +61,7 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 	 * deferred registration; a second call does nothing, and so does a call once the registration was
 	 * abandoned or the daemon closed.
 	 */
-	protected final void register() {
+	protected final void registerForCloseAll() {
 		if (!abandoned && !isClosed() && registered.compareAndSet(false, true)) {
 			REGISTRY.add(daemonRef);
 			if (abandoned || isClosed()) {
@@ -106,7 +110,9 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 					parent.daemons.addAll(daemons);
 				} else {
 					for (final var daemon : daemons) {
-						daemon.constructing = false;
+						if (!daemon.abandoned) {
+							daemon.constructing = false;
+						}
 					}
 				}
 			} else {
@@ -151,10 +157,12 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 	/**
 	 * Takes this daemon out of the registry, so {@link #closeAll()} does not reach it. For a constructor
 	 * that fails: what it leaves behind is only partly built, and closing it would read unset fields.
+	 * A {@link #closeAll()} that already holds the entry skips it too.
 	 */
 	protected final void abandonRegistration() {
+		// Set first, and constructing left as it is: a closeAll() that read the entry before the remove
+		// must still see a daemon it may not close.
 		abandoned = true;
-		constructing = false;
 		REGISTRY.remove(daemonRef);
 	}
 
@@ -180,22 +188,31 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 		return false;
 	}
 
+	/** Neither still in its construction scope, which releases it if the construction fails, nor abandoned. */
+	private boolean closeableByCloseAll() {
+		return !abandoned && !constructing;
+	}
+
 	public static void closeAll() {
 		InterruptedException ex = null;
 		synchronized (REGISTRY) {
 			// A close waits for a start in progress, so every start is told to end before the first close.
-			// A daemon still in its construction scope is left to that scope, which releases it if the
-			// construction around it fails.
 			for (final var daemonRef : REGISTRY) {
 				final var daemon = daemonRef.get();
-				if (daemon != null && !daemon.constructing) {
+				if (daemon != null && daemon.closeableByCloseAll()) {
 					daemon.interruptStarter();
 				}
 			}
-			for (final var daemonRef : REGISTRY) {
+			// Each entry is removed once it is handled. One still in its construction scope stays, so a later
+			// closeAll() reaches it once it is built, and so does one registered after this loop passed.
+			for (final var it = REGISTRY.iterator(); it.hasNext();) {
+				final var daemonRef = it.next();
 				final var daemon = daemonRef.get();
+				if (daemon != null && daemon.constructing && !daemon.abandoned) {
+					continue;
+				}
 				try {
-					if (daemon != null && !daemon.constructing && !daemon.isClosed()) {
+					if (daemon != null && daemon.closeableByCloseAll() && !daemon.isClosed()) {
 						daemon.close();
 					}
 				} catch (final Throwable cause) {
@@ -207,13 +224,10 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 					// name, not the daemon: its toString() may run on a half-built object.
 					LogUtil.trace(Loggers.ERR, Level.WARN, cause, "Failed to close the daemon instance {}",
 									daemon.getClass().getName());
+				} finally {
+					it.remove();
 				}
 			}
-			// One still in its construction scope stays, so a later closeAll() reaches it once it is built.
-			REGISTRY.removeIf(daemonRef -> {
-				final var daemon = daemonRef.get();
-				return daemon == null || !daemon.constructing;
-			});
 		}
 		if (ex != null) {
 			throwUnchecked(ex);
