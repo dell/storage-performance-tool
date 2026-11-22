@@ -31,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -60,11 +61,13 @@ class RangeReadStopPublicationTest {
 		final AtomicReference<CountDownLatch> blockPublish = new AtomicReference<>();
 		final AtomicInteger publishCalls = new AtomicInteger();
 		final AtomicInteger delivered = new AtomicInteger();
+		final AtomicReference<Thread> publishThread = new AtomicReference<>();
 
 		Driver() {
 			super(STEP_ID, new SeedDataInput(1, 1024, 1, true), TestConfigBuilder.config().configVal("storage"), false);
 			runtime = new RangeReadRuntime<>(POLICY, 4, this, (op, circulation) -> {
 				publishCalls.incrementAndGet();
+				publishThread.set(Thread.currentThread());
 				if (failPublish.get())
 					throw new IllegalStateException("injected publication failure");
 				final var gate = blockPublish.get();
@@ -121,6 +124,7 @@ class RangeReadStopPublicationTest {
 		final Generator generator;
 		final LoadStepContextImpl<DataItemImpl, RangeReadOperation<DataItemImpl>> context;
 		final List<Runnable> scheduled = new ArrayList<>();
+		final MetricsContext metrics = mock(MetricsContext.class, RETURNS_DEEP_STUBS);
 
 		Rig(int items, boolean retry, boolean trace, boolean waitFinish) throws Exception {
 			driver = mock(Driver.class, withSettings().useConstructor().defaultAnswer(CALLS_REAL_METHODS));
@@ -153,7 +157,7 @@ class RangeReadStopPublicationTest {
 			config.val("load-op-limit-count", 0);
 			config.val("load-op-wait-finish", waitFinish);
 			config.val("load-op-wait-limit", 0);
-			context = new LoadStepContextImpl<>(STEP_ID, generatorView, driver, mock(MetricsContext.class, RETURNS_DEEP_STUBS),
+			context = new LoadStepContextImpl<>(STEP_ID, generatorView, driver, metrics,
 							null, config.configVal("load"), trace, null, null, config.configVal("item"));
 			context.setRetryScheduler((delay, task) -> {
 				scheduled.add(task);
@@ -196,26 +200,48 @@ class RangeReadStopPublicationTest {
 		}
 
 		/** Generates one item whose 206 is decoded, but whose completion callback has not run yet. */
-		void decodedSuccessAwaitingCompletion() throws Exception {
+		RangeReadAttempt decodedSuccessAwaitingCompletion() throws Exception {
 			generator.step();
 			final var attempt = dispatch(driver.accepted.getFirst());
 			assertTrue(attempt.headers(206, Status.SUCC, List.of("bytes 0-1/10"), List.of("2"), List.of(), false));
 			assertTrue(attempt.bodyBytes(2));
 			assertTrue(attempt.finish(true));
+			return attempt;
 		}
 
 		/**
-		 * Drains with a 100 ms bound on another thread. The deadline commits the success, but its
-		 * output is not run on the drain thread: the drain fails at its bound, as before the fix.
+		 * Runs the decoded success's transport callback as soon as the drain deadline commits it, as
+		 * Netty runs the completion it queued behind the rest of its read batch.
 		 */
-		void assertSuccessFailsAtTheBound(String label) throws Exception {
+		Thread completeOnceCommitted(RangeReadAttempt attempt) {
+			final var op = driver.accepted.getFirst();
+			return Thread.ofPlatform().start(() -> {
+				final long deadline = System.nanoTime() + 2 * LONG_BOUND_NANOS;
+				while (op.lifecycle().state() != OperationLifecycleState.TERMINAL && System.nanoTime() < deadline)
+					Thread.onSpinWait();
+				// False: the deadline already did the accounting; the callback only publishes.
+				runtime.completed(op, op.circulation(), attempt);
+			});
+		}
+
+		/**
+		 * Drains with a 100 ms bound on another thread while the success's late callback runs its
+		 * blocked output. The deadline commits the success but never runs its output on the drain
+		 * thread, and the drain fails at its bound instead of waiting on the blocked output.
+		 */
+		void assertSuccessFailsAtTheBound(String label, Thread callback) throws Exception {
+			final long bound = TimeUnit.MILLISECONDS.toNanos(100);
 			final var outcome = new CompletableFuture<Throwable>();
+			final var elapsed = new AtomicLong();
 			final var drainer = Thread.ofPlatform().start(() -> {
+				final long started = System.nanoTime();
 				try {
-					context.drainDispatchedOperationsForStepStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100));
+					context.drainDispatchedOperationsForStepStop(started + bound);
 					outcome.complete(null);
 				} catch (Throwable failure) {
 					outcome.complete(failure);
+				} finally {
+					elapsed.set(System.nanoTime() - started);
 				}
 			});
 			final Throwable failure;
@@ -225,10 +251,36 @@ class RangeReadStopPublicationTest {
 				throw new AssertionError(label + ": the drain ran blocking output past its bound", blocked);
 			}
 			drainer.join(5_000);
+			assertTrue(elapsed.get() < bound + TimeUnit.MILLISECONDS.toNanos(400), label + ": the drain ends at its bound");
 			final var terminal = assertInstanceOf(IntegrityTerminalException.class, failure, label);
 			assertEquals("Range result delivery exceeded the step drain bound", terminal.getCause().getMessage(), label);
-			assertEquals(0, driver.publishCalls.get(), label + ": no success output on the drain thread");
+			final var publisher = driver.publishThread.get();
+			assertNotSame(drainer, publisher, label + ": no success output on the drain thread");
+			if (publisher != null)
+				assertSame(callback, publisher, label + ": only the late callback publishes it");
 			assertEquals(1, runtime.snapshot().logical().accepted(), label + ": the committed outcome is kept");
+		}
+
+		/** Drains with a 5 s bound while the late callback publishes; it must end well within the bound. */
+		void assertDeliveredWellWithinTheBound(String label, Runnable whileDraining, Thread callback) throws Exception {
+			final var outcome = new CompletableFuture<Long>();
+			final var drainer = Thread.ofPlatform().start(() -> {
+				try {
+					outcome.complete(drain(LONG_BOUND_NANOS));
+				} catch (Throwable failure) {
+					outcome.completeExceptionally(failure);
+				}
+			});
+			whileDraining.run();
+			final long elapsed = outcome.get(2 * LONG_BOUND_NANOS, TimeUnit.NANOSECONDS);
+			drainer.join(5_000);
+			callback.join(5_000);
+			// A drain which waits for a result nothing will deliver takes the whole 5 s bound.
+			assertTrue(elapsed < LONG_BOUND_NANOS / 10, label + ": the drain ends once the result is out, took "
+							+ TimeUnit.NANOSECONDS.toMillis(elapsed) + " ms");
+			assertSame(callback, driver.publishThread.get(), label + ": the late callback publishes it");
+			assertSettledAndDelivered(1);
+			assertEquals(1, runtime.snapshot().logical().accepted(), label);
 		}
 
 		/** Drains with the given bound and returns its elapsed time. */
@@ -338,6 +390,33 @@ class RangeReadStopPublicationTest {
 	}
 
 	@Test
+	void retryWhoseSettlementThrowsAfterItCommittedIsStillPublished() throws Exception {
+		for (boolean viaDrainPending : List.of(false, true)) {
+			final var label = viaDrainPending ? "drainPendingRetries" : "recoverBufferedOperations";
+			try (var r = new Rig(2, true, false, true)) {
+				r.holdRetries();
+				// Terminal accounting of the second settled retry throws after its circulation committed.
+				final var calls = new AtomicInteger();
+				doAnswer(call -> {
+					if (calls.incrementAndGet() == 2)
+						throw new IllegalStateException("injected accounting failure");
+					return null;
+				}).when(r.metrics).markFail();
+				final var thrown = assertThrows(IllegalStateException.class, () -> {
+					if (viaDrainPending)
+						r.generator.drainPendingRetries();
+					else
+						r.generator.recoverBufferedOperations();
+				}, label);
+				assertEquals("injected accounting failure", thrown.getMessage(), label);
+				assertEquals(2, r.driver.delivered.get(), label + ": both settled retries are published");
+				assertFalse(r.runtime.hasPendingResults(), label);
+				assertEquals(2, r.runtime.snapshot().logical().failed(), label);
+			}
+		}
+	}
+
+	@Test
 	void throwingPublicationIsRecordedOnceAndReleasesEverySlot() throws Exception {
 		try (var r = new Rig(2, true, false, true)) {
 			r.holdRetries();
@@ -392,19 +471,50 @@ class RangeReadStopPublicationTest {
 	@Test
 	void deadlineSettlementOfSuccessWithBlockingOutputHonoursDrainBound() throws Exception {
 		for (boolean waitFinish : List.of(true, false)) {
+			final var label = "wait.finish=" + waitFinish;
 			final var gate = new CountDownLatch(1);
 			final Output<RangeReadOperation<DataItemImpl>> output = mock(Output.class);
 			when(output.put(any(RangeReadOperation.class))).thenAnswer(call -> gate.await(10, TimeUnit.SECONDS));
 			try (var r = new Rig(1, false, false, waitFinish)) {
 				r.context.operationsResultsOutput(output);
-				r.decodedSuccessAwaitingCompletion();
+				final var callback = r.completeOnceCommitted(r.decodedSuccessAwaitingCompletion());
 				try {
-					r.assertSuccessFailsAtTheBound("wait.finish=" + waitFinish);
-					verify(output, never()).put(any(RangeReadOperation.class));
+					r.assertSuccessFailsAtTheBound(label, callback);
 				} finally {
 					gate.countDown();
+					callback.join(5_000);
 				}
 			}
+		}
+	}
+
+	@Test
+	void deadlineSettlementOfSuccessWithOutputReleasedDuringTheDrainIsDelivered() throws Exception {
+		// wait.finish=false: the stop settles at once, and waits only while the result is on its way out.
+		final var gate = new CountDownLatch(1);
+		final var entered = new CountDownLatch(1);
+		final Output<RangeReadOperation<DataItemImpl>> output = mock(Output.class);
+		when(output.put(any(RangeReadOperation.class))).thenAnswer(call -> {
+			entered.countDown();
+			return gate.await(10, TimeUnit.SECONDS);
+		});
+		try (var r = new Rig(1, false, false, false)) {
+			r.context.operationsResultsOutput(output);
+			final var callback = r.completeOnceCommitted(r.decodedSuccessAwaitingCompletion());
+			try {
+				r.assertDeliveredWellWithinTheBound("released output", () -> {
+					try {
+						assertTrue(entered.await(5, TimeUnit.SECONDS), "the late callback runs the output");
+					} catch (InterruptedException interrupted) {
+						throw new AssertionError(interrupted);
+					} finally {
+						gate.countDown();
+					}
+				}, callback);
+			} finally {
+				gate.countDown();
+			}
+			verify(output).put(any(RangeReadOperation.class));
 		}
 	}
 
@@ -417,13 +527,28 @@ class RangeReadStopPublicationTest {
 			assertTrue(handoff.put(mock(RangeReadOperation.class)));
 			try (var r = new Rig(1, false, false, waitFinish)) {
 				r.context.operationsResultsOutput(handoff);
-				r.decodedSuccessAwaitingCompletion();
+				final var callback = r.completeOnceCommitted(r.decodedSuccessAwaitingCompletion());
 				try {
-					r.assertSuccessFailsAtTheBound("wait.finish=" + waitFinish);
+					r.assertSuccessFailsAtTheBound("wait.finish=" + waitFinish, callback);
 				} finally {
 					handoff.close(); // releases a spinning put
+					callback.join(5_000);
 				}
 			}
+		}
+	}
+
+	@Test
+	void successSettledAtTheDeadlineIsPublishedByItsLateCallbackWithWaitFinishOff() throws Exception {
+		// The stop settles at once while a decoded 206's callback is still queued on its event loop.
+		final Output<RangeReadOperation<DataItemImpl>> output = mock(Output.class);
+		when(output.put(any(RangeReadOperation.class))).thenReturn(true);
+		try (var r = new Rig(1, false, false, false)) {
+			r.context.operationsResultsOutput(output);
+			final var callback = r.completeOnceCommitted(r.decodedSuccessAwaitingCompletion());
+			r.assertDeliveredWellWithinTheBound("unblocked output", () -> {}, callback);
+			verify(output).put(any(RangeReadOperation.class));
+			assertEquals(1, r.driver.publishCalls.get(), "published once");
 		}
 	}
 

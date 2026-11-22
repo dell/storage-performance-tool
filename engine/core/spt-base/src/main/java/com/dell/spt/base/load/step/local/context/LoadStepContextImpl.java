@@ -2548,8 +2548,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			}
 			if (rangeRuntime != null) {
 				if (!waitOpFinishBeforeStop) {
-					// Without the in-flight wait, a range result settled before the stop may still be
-					// on its way to output; deliver it within the same bound instead of failing it.
+					// Without the in-flight wait, a range result settled before the stop, or a success the
+					// deadline settled whose transport callback is still queued, may still be on its way
+					// to output; deliver it within the same bound instead of failing it.
 					awaitOutstanding(rangeRuntime::hasPendingResults, deadlineNanos);
 				}
 				rangeRuntime.finishResults();

@@ -90,17 +90,34 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 			throw new IllegalArgumentException("Range retries require lifecycle tracking");
 	}
 
-	/** Sole attempt accounting/retry-decision entry point; stale or duplicate callbacks return false. */
+	/**
+	 * Sole attempt accounting/retry-decision entry point; stale or duplicate callbacks return false.
+	 * A callback whose attempt the drain deadline already committed (its response was decoded before
+	 * the callback ran) also returns false, after publishing that result once: the deadline leaves a
+	 * success's output to this route so that it never runs on the draining thread.
+	 */
 	public boolean completed(RangeReadOperation<I> operation, RangeReadCirculation circulation, RangeReadAttempt attempt) {
 		final RangeReadAttempt retry;
 		final int retryNumber;
+		final boolean owned;
+		boolean settledAtDeadline = false;
 		synchronized (circulation.lifecycle()) {
-			if (operation.circulation() != circulation
-							|| !tracker.hasOutstandingCustody(operation, circulation.lifecycle())
-							|| !metrics.recordAttempt(circulation, attempt))
-				return false;
-			retry = enabled && circulation.retryCount() < retryLimit ? circulation.beginAttempt(attempt) : null;
-			retryNumber = circulation.retryCount();
+			owned = operation.circulation() == circulation
+							&& tracker.hasOutstandingCustody(operation, circulation.lifecycle())
+							&& metrics.recordAttempt(circulation, attempt);
+			if (owned) {
+				retry = enabled && circulation.retryCount() < retryLimit ? circulation.beginAttempt(attempt) : null;
+				retryNumber = circulation.retryCount();
+			} else {
+				retry = null;
+				retryNumber = 0;
+				settledAtDeadline = operation.circulation() == circulation && circulation.isTerminalAttempt(attempt);
+			}
+		}
+		if (!owned) {
+			if (settledAtDeadline)
+				publishTerminal(operation, circulation, settledPublish);
+			return false;
 		}
 		if (retry == null) {
 			try {

@@ -1114,10 +1114,20 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
-	private static <T> List<T> appendSettled(final List<T> settled, final T entry) {
-		final var list = settled == null ? new ArrayList<T>() : settled;
-		list.add(entry);
-		return list;
+	/**
+	 * Settles a held range retry into the caller's publication list. Terminal accounting can throw
+	 * after the circulation committed: the entry is then collected before the throw, so the caller's
+	 * {@code finally} still publishes it; publication skips a circulation that is not terminal.
+	 */
+	private void collectSettledRangeRetry(final RetryEntry<O> entry, final List<RetryEntry<O>> settled) {
+		boolean collect = true;
+		try {
+			collect = settleRangeRetry(entry);
+		} finally {
+			if (collect) {
+				settled.add(entry);
+			}
+		}
 	}
 
 	private void releaseRetryEntry(final RetryEntry<O> entry) {
@@ -1199,7 +1209,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final List<O> recoverBufferedOperations() {
-		List<RetryEntry<O>> settledRetries = null;
+		// Allocated up front: an entry collected just before a settlement throws must still reach output.
+		final List<RetryEntry<O>> settledRetries = new ArrayList<>();
 		final List<O> unattemptedOperations;
 		assemblyLock.lock();
 		try {
@@ -1220,9 +1231,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 				if (retainedRetries != null) {
 					for (var retained : retainedRetries) {
-						if (settleRangeRetry(retained)) {
-							settledRetries = appendSettled(settledRetries, retained);
-						}
+						collectSettledRangeRetry(retained, settledRetries);
 					}
 					retainedRetries.clear();
 				}
@@ -1412,7 +1421,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final List<O> drainPendingRetries() {
 		final List<O> drained = new ArrayList<>();
-		List<RetryEntry<O>> settledRetries = null;
+		// Allocated up front: an entry collected just before a settlement throws must still reach output.
+		final List<RetryEntry<O>> settledRetries = new ArrayList<>();
 		admissionLock.lock();
 		try {
 			RetryEntry<O> entry;
@@ -1420,17 +1430,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				if (entry.circulation == null) {
 					drained.add(entry.operation);
 				} else {
-					if (settleRangeRetry(entry)) {
-						settledRetries = appendSettled(settledRetries, entry);
-					}
+					collectSettledRangeRetry(entry, settledRetries);
 					retainedRetries.remove(entry);
 				}
 			}
 			if (retainedRetries != null) {
 				for (var retained : retainedRetries) {
-					if (settleRangeRetry(retained)) {
-						settledRetries = appendSettled(settledRetries, retained);
-					}
+					collectSettledRangeRetry(retained, settledRetries);
 				}
 				retainedRetries.clear();
 			}

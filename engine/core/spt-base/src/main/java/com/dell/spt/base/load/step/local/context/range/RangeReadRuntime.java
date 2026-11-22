@@ -164,8 +164,9 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 		else if (settled && !settledSuccess(circulation))
 			// A failure's output is at most its op-trace row, so it stays within this bounded hook.
 			// A success would run item and timing output and recycling, which can wait on a consumer
-			// (a full pipeline handoff) past the drain bound, on the drain thread; it is left to its
-			// completion route, and finishResults fails it at the bound if it is still undelivered.
+			// (a full pipeline handoff) past the drain bound, on the drain thread. Its response was
+			// decoded, so its transport callback is queued: the coordinator publishes it there, and
+			// finishResults fails it at the bound if it is still undelivered.
 			publishSettled(op, circulation);
 		return settled;
 	}
