@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -104,7 +103,8 @@ class FailedStartBeforeAnySliceCloseTest {
 	}
 
 	@ParameterizedTest(name = "metadata={0}")
-	@ValueSource(booleans = {true, false})
+	@ValueSource(booleans = {true, false
+	})
 	void aStandaloneDeleteWithoutASelectionManifestClosesCleanly(final boolean metadata) throws Exception {
 		final FailedStartClient client = deleteClient(deleteConfig(metadata, false));
 
@@ -115,7 +115,8 @@ class FailedStartBeforeAnySliceCloseTest {
 	}
 
 	@ParameterizedTest(name = "metadata={0}")
-	@ValueSource(booleans = {true, false})
+	@ValueSource(booleans = {true, false
+	})
 	void aDurationStandaloneDeleteWithoutASelectionManifestRunsToItsOwnErrorOnly(final boolean metadata)
 					throws Exception {
 		final FailedStartClient client = deleteClient(deleteConfig(metadata, true));
@@ -196,7 +197,8 @@ class FailedStartBeforeAnySliceCloseTest {
 	}
 
 	@ParameterizedTest(name = "metadata={0}")
-	@ValueSource(booleans = {true, false})
+	@ValueSource(booleans = {true, false
+	})
 	void aStartWhoseEntrySliceFailsToStartClosesCleanly(final boolean metadata) throws Exception {
 		// As a READ whose items file is missing fails in its entry slice's start.
 		final LoadStep entry = mock(LoadStep.class);

@@ -20,7 +20,6 @@ import static org.mockito.Mockito.when;
 import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
-import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.load.step.LoadStep;
