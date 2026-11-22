@@ -6,9 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -39,6 +42,7 @@ import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 class DeleteArtifactAggregatorTest {
 	private static final List<String> DELETE_FILES = List.of(
@@ -525,6 +529,48 @@ class DeleteArtifactAggregatorTest {
 							Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 1)), artifact);
 			assertTrue(Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 2)),
 							"worker 2's " + artifact + " was not collected");
+		}
+	}
+
+	@Test
+	void aNonIoFailureOutsideAWorkersReadCountsAsThatFileMissing() throws Exception {
+		final Path output = temp.resolve("log/step");
+		Files.createDirectories(output);
+		final FileManager local = mock(FileManager.class);
+		final FileManager w1 = mock(FileManager.class);
+		final FileManager w2 = mock(FileManager.class);
+		final NodeArtifacts localArtifacts = nodeArtifacts(output, 0, "local");
+		final NodeArtifacts w1Artifacts = nodeArtifacts(temp.resolve("w1"), 1, "worker-a");
+		final NodeArtifacts w2Artifacts = nodeArtifacts(temp.resolve("w2"), 2, "worker-b");
+		register(local, localArtifacts);
+		register(w1, w1Artifacts);
+		register(w2, w2Artifacts);
+		write(localArtifacts);
+		write(w1Artifacts);
+		write(w2Artifacts);
+		serve(w1, w1Artifacts);
+		serve(w2, w2Artifacts);
+		final Path w1Totals = DeleteArtifactAggregator.nodeSourcePath(output.resolve(DeleteArtifacts.METRICS_FILE_NAME), 1);
+		final var aggregator = new DeleteArtifactAggregator(
+						"step", List.of(local, w1, w2), List.of("local", "worker-a", "worker-b"), selection(3), completion(3));
+
+		final IntegrityTerminalException failure;
+		try (var moves = mockStatic(IntegrityManifestCompletion.class, Mockito.CALLS_REAL_METHODS)) {
+			moves.when(() -> IntegrityManifestCompletion.atomicMove(any(), eq(w1Totals)))
+							.thenThrow(new IllegalStateException("not an I/O failure"));
+			failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+		}
+
+		assertInstanceOf(IllegalStateException.class, failure.getCause());
+		for (final String artifact : DELETE_FILES) {
+			final Path canonical = output.resolve(artifact);
+			assertEquals(!artifact.equals(DeleteArtifacts.METRICS_FILE_NAME),
+							Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 1)), artifact);
+			assertTrue(Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 2)),
+							"worker 2's " + artifact + " was not collected");
+		}
+		try (var files = Files.list(output)) {
+			assertEquals(List.of(), files.filter(file -> file.getFileName().toString().startsWith(".")).toList());
 		}
 	}
 

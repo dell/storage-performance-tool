@@ -9,14 +9,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
@@ -37,6 +41,7 @@ import java.util.stream.Stream;
 import org.apache.commons.csv.CSVFormat;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 class CsvLoggerArtifactAggregatorTest {
 
@@ -505,6 +510,25 @@ class CsvLoggerArtifactAggregatorTest {
 		assertInstanceOf(IllegalStateException.class, failure.getCause().getCause());
 		assertNodeFiles(canonical, "w0", null, "w2");
 		assertEquals(List.of(nodeName(0), nodeName(2)), files());
+	}
+
+	@Test
+	void aNonIoFailureOutsideAWorkersReadCountsAsThatNodeMissing() throws Exception {
+		final Path canonical = entryFile("w0");
+		final var aggregator = aggregator(entry(canonical), healthy(1), healthy(2));
+
+		final IntegrityTerminalException failure;
+		try (var moves = mockStatic(IntegrityManifestCompletion.class, Mockito.CALLS_REAL_METHODS)) {
+			moves.when(() -> IntegrityManifestCompletion.atomicMove(any(), eq(nodePath(1).toAbsolutePath())))
+							.thenThrow(new IllegalStateException("not an I/O failure"));
+			failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+		}
+
+		assertEquals("failed to aggregate " + ARTIFACT + ": not published, missing node-001; collected the other 2 of 3",
+						failure.getMessage());
+		assertInstanceOf(IllegalStateException.class, failure.getCause());
+		assertNodeFiles(canonical, "w0", null, "w2");
+		assertEquals(List.of(nodeName(0), nodeName(2)), files(), "a partial or temporary file was left");
 	}
 
 	@Test
