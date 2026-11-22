@@ -1243,8 +1243,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			}
 		} finally {
 			assemblyLock.unlock();
+			// After both locks; retries settled before a later step of this block threw still reach output.
+			publishSettledRangeRetries(settledRetries);
 		}
-		publishSettledRangeRetries(settledRetries);
 		return unattemptedOperations;
 	}
 
@@ -1435,8 +1436,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			}
 		} finally {
 			admissionLock.unlock();
+			// After the lock; retries settled before a later settlement threw still reach output.
+			publishSettledRangeRetries(settledRetries);
 		}
-		publishSettledRangeRetries(settledRetries);
 		return drained;
 	}
 
