@@ -391,7 +391,7 @@ class StopOutcomeConsistencyTest {
 	private List<String> resultsOutcomes() {
 		final List<String> outcomes = new ArrayList<>();
 		for (final String message : results.messages()) {
-			for (final String line : message.split("\\R")) {
+			for (final String line : message.lines().toList()) {
 				final int at = line.indexOf(RESULTS_OUTCOME);
 				if (at >= 0) {
 					outcomes.add(line.substring(at).strip());
