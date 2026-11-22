@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.IntConsumer;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -37,7 +38,15 @@ class StoppedStartAggregatorCloseTest {
 
 	@AfterEach
 	void cleanUp() throws IOException {
-		Files.deleteIfExists(Path.of(System.getProperty("java.io.tmpdir"), "spt", "timingMetrics_" + stepId));
+		// The timing aggregator writes its own file and one per worker, each named after the step id.
+		final Path timings = Path.of(System.getProperty("java.io.tmpdir"), "spt");
+		if (Files.isDirectory(timings)) {
+			try (Stream<Path> found = Files.list(timings)) {
+				for (final Path file : found.filter(f -> f.getFileName().toString().startsWith("timingMetrics_" + stepId)).toList()) {
+					Files.deleteIfExists(file);
+				}
+			}
+		}
 		if (tempDir != null) {
 			StepIdReuseAtStartTest.removeFolder(tempDir);
 		}
