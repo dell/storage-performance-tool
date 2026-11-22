@@ -62,7 +62,9 @@ class MainCliArgsLogMaskingTest {
 			logger.removeAppender(appender);
 			appender.stop();
 		} finally {
-			levels.close();
+			if (levels != null) {
+				levels.close();
+			}
 		}
 	}
 

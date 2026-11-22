@@ -1,6 +1,6 @@
 package com.dell.spt.base.load.step.client;
 
-import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -14,7 +14,8 @@ import org.apache.logging.log4j.core.config.LoggerConfig;
  * Changes Log4j logger levels for a test's window and, on close, puts back what it found, so that a later test in
  * the same JVM sees the configured levels. Use it with try-with-resources, so the levels come back when the test
  * fails too. Windows that name the same logger must close in the reverse order of opening, as nested
- * try-with-resources blocks do.
+ * try-with-resources blocks do. Levels set on a LoggerConfig without updateLoggers(), and other threads logging
+ * while a window opens or closes, are not covered.
  *
  * <p>It works on the configuration directly rather than through {@code Configurator.setLevel}, which leaves three
  * traps: it skips {@code updateLoggers()} when the configured level already matches, so a per-Logger level an
@@ -124,7 +125,7 @@ public final class LoggerLevels implements AutoCloseable {
 
 	/** The per-Logger levels of every Logger not named, which {@code updateLoggers()} would drop. */
 	private Map<Logger, Level> overridesExcept(final Set<String> names) {
-		final var overrides = new HashMap<Logger, Level>();
+		final var overrides = new IdentityHashMap<Logger, Level>();
 		for (final var logger : context.getLoggers()) {
 			final var level = names.contains(logger.getName()) ? null : override(logger);
 			if (level != null) {
