@@ -5,6 +5,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OperationRetryPolicy;
 import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadCirculation;
+import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
@@ -111,7 +112,9 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 			} else {
 				retry = null;
 				retryNumber = 0;
-				settledAtDeadline = operation.circulation() == circulation && circulation.isTerminalAttempt(attempt);
+				final var terminal = circulation.terminalOutcome();
+				settledAtDeadline = operation.circulation() == circulation && circulation.isTerminalAttempt(attempt)
+								&& terminal != null && terminal.status() == Operation.Status.SUCC;
 			}
 		}
 		if (!owned) {
