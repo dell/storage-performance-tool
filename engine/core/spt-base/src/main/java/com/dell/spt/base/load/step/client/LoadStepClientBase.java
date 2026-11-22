@@ -231,6 +231,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
+	// The thread running the await's own stop, which the run's close follows; null otherwise.
+	private volatile Thread awaitStopThread;
+	// Set by a duration slice stop that a stop request interrupted, which leaves the timing files open.
+	private boolean durationSliceStopInterrupted;
 	// Of this start: how many slices, in slice order, returned from their start() (used for stopped-start
 	// artifact publishing and lost-slice gating), and whether the start ended as a stop.
 	private volatile int startedSliceCount;
@@ -715,6 +719,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
 			failureBudgetMetricsOutputDeferred = false;
+			durationSliceStopInterrupted = false;
 			durationStopFailure = null;
 			durationAdmissionBarrierSatisfied = false;
 			durationCleanupRetryPending = false;
@@ -2809,7 +2814,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		if (standaloneDeletePreValidationEnabled() && standaloneDeletePostVerificationEnabled()) {
 			shutdown();
 		}
-		doStop();
+		stopBeforeClose(this::doStop);
 	}
 
 	/**
@@ -3238,7 +3243,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			awaitFailure = failure;
 		} finally {
 			Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
-			stop();
+			stopBeforeClose(this::stop);
 		}
 		if (awaitFailure != null) {
 			if (durationValidityFailure != null && durationValidityFailure != awaitFailure) {
@@ -3471,10 +3476,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// Each stage runs whatever an earlier one threw, so the stop's metrics output, its last stage, is
 		// written; the first failure is thrown at the end, with any later ones suppressed under it.
 		final var failures = new StopFailures();
+		// The await's stop has the run's close after it, which writes the output with the final outcome;
+		// a stop that throws skips the close it runs in, so its output cannot wait for that close.
+		final boolean closeFollows = awaitStopThread == Thread.currentThread();
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
 				failures.run(this::relayBucketVersioningNoticesAtStop);
+				if (durationSliceStopInterrupted) {
+					// The interrupted stop left them open: they are written with the rest of the output.
+					durationSliceStopInterrupted = false;
+					failures.run(this::closeItemTimingMetricsOutputFileAggregators);
+				}
 				failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
 				failures.run(super::doStop);
 				failures.throwFirst();
@@ -3493,20 +3506,70 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		failures.run(this::stopMetricsAggregator);
 		failures.run(this::closeItemTimingMetricsOutputFileAggregators);
 		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
-			if (failures.first() == null) {
+			if (failures.first() == null || closeFollows) {
+				// The close finalizes the outcome once the live probe ends, and writes the output then.
 				failureBudgetMetricsOutputDeferred = true;
+				failures.throwFirst();
 				return;
 			}
-			// A stop that throws skips the close, so the output cannot wait for the live probe there: as
-			// at an incomplete duration stop, the outcome is published failed and the output written now.
-			failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
+			// The outcome cannot wait for the live probe: it is final as failed, so a later close keeps it.
+			final Throwable cause = failures.first();
+			failures.run(() -> finalizeFailedFailureBudgetAtStop(cause));
+			failureBudgetMetricsOutputDeferred = false;
 			failures.run(super::doStop);
 			failures.throwFirst();
 			return;
 		}
 		failures.run(this::finalizeFailureBudgetBeforeMetricsOutput);
+		if (!failureBudgetFinalizedOrAbsent()) {
+			// The finalize failed, as when a stop request interrupts its counter capture: the outcome is
+			// still running, and the output never carries that.
+			if (closeFollows) {
+				// The close's stop finalizes the outcome and writes the output.
+				failures.throwFirst();
+				return;
+			}
+			final Throwable cause = failures.first();
+			failures.run(() -> finalizeFailedFailureBudgetAtStop(cause));
+		}
+		// Written here, the output is not written again by a close that an earlier stop deferred it to.
+		failureBudgetMetricsOutputDeferred = false;
 		failures.run(super::doStop);
 		failures.throwFirst();
+	}
+
+	/**
+	 * Runs the await's own stop, with the run's close after it: a stop that cannot finalize the
+	 * failure-budget outcome then leaves the outcome and the output to that close.
+	 */
+	private void stopBeforeClose(final Runnable stop) {
+		awaitStopThread = Thread.currentThread();
+		try {
+			stop.run();
+		} finally {
+			awaitStopThread = null;
+		}
+	}
+
+	private synchronized boolean failureBudgetFinalizedOrAbsent() {
+		return failureBudgetController == null || failureBudgetFinalized;
+	}
+
+	/**
+	 * Makes the outcome final as failed at a stop that writes the output without the terminal
+	 * counters, so that a later close reports that outcome and fails the run, not a clean one.
+	 */
+	private synchronized void finalizeFailedFailureBudgetAtStop(final Throwable cause) {
+		if (failureBudgetController == null || failureBudgetFinalized) {
+			return;
+		}
+		failureBudgetTerminalFailure = appendTerminalFailure(
+						appendExistingFailure(failureBudgetFailure, durationValidityFailure),
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE stop failed before its terminal failed-object counters were captured",
+						cause instanceof InterruptedException ? null : cause);
+		failureBudgetFinalized = true;
+		publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
 	}
 
 	private void stopDurationSlices() {
@@ -3524,7 +3587,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						durationStopPhaseDeadlineNanos(),
 						"spt-delete-step-stop-");
 		if (recordDurationPhaseResult("stop", result)) {
-			Thread.currentThread().interrupt();
+			// As a slice stop that throws it: the stop ends before its output.
+			durationSliceStopInterrupted = true;
+			throwUnchecked(new InterruptedException(loadStepId() + ": stopped while stopping the step slices"));
 		}
 	}
 
