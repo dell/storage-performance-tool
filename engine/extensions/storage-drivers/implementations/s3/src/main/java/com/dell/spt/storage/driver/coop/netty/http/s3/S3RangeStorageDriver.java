@@ -117,7 +117,8 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 		if (!unattempted && circulation.lifecycle().state() == OperationLifecycleState.TERMINAL) {
 			// A recovered retry settles its earlier attempt's failure, never a success, so this runs
 			// no item, timing or recycle output. Publish it before the drain checks for undelivered
-			// results; queue recovery holds no lock, and the publication claim is once-only.
+			// results. Direct dispatch is off here, so no caller holds the driver's admission lock;
+			// the publication claim is once-only.
 			publishRecovered(op, circulation);
 		}
 		return unattempted;
