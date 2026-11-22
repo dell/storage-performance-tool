@@ -396,9 +396,12 @@ class HalfBuiltDaemonCloseAllTest {
 		}
 	}
 
-	/** Its stop also reads the standalone DELETE stop coordination, which the client's own fields hold. */
+	/**
+	 * Its stop also reads the standalone DELETE stop coordination, which the client's own fields hold. Once built, the
+	 * never-started client closes cleanly: its stop skips the failure budget, as it started no DELETE work.
+	 */
 	@Test
-	void aStandaloneDeleteClientHeldInItsConstructorIsLeftAloneByCloseAll() throws Exception {
+	void aStandaloneDeleteClientHeldInItsConstructorIsLeftAloneByCloseAllAndClosesOnceBuilt() throws Exception {
 		try (final var building = build(() -> new HeldClient(standaloneDelete()))) {
 			final var held = building.awaitHeld();
 
@@ -408,9 +411,9 @@ class HalfBuiltDaemonCloseAllTest {
 			assertSame(held, client);
 			assertEquals(State.INITIAL, client.state());
 			assertTrue(registered(client));
-			// Not closed here: a never-started standalone DELETE client fails its failure budget at close, a
-			// separate defect (delete-prototype-close-integrity-error), and would stay registered for the next test.
-			client.abandonRegistration();
+			client.close();
+			assertTrue(client.isClosed());
+			assertFalse(registered(client));
 		}
 	}
 
