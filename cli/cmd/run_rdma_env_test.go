@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -14,10 +16,40 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
+	"github.com/spf13/pflag"
 )
 
+// applyRunEnvDefaultsForTest runs the env-defaults step of runCmd's PersistentPreRunE (without
+// loading .env files) and restores every run flag and annotation afterwards.
+func applyRunEnvDefaultsForTest(t *testing.T) {
+	t.Helper()
+	type saved struct {
+		value   string
+		changed bool
+	}
+	flags := map[string]saved{}
+	runCmd.Flags().VisitAll(func(f *pflag.Flag) { flags[f.Name] = saved{f.Value.String(), f.Changed} })
+	annotations := maps.Clone(runCmd.Annotations)
+	t.Cleanup(func() {
+		runCmd.Flags().VisitAll(func(f *pflag.Flag) {
+			if prev := flags[f.Name]; f.Value.String() != prev.value || f.Changed != prev.changed {
+				if sv, ok := f.Value.(pflag.SliceValue); ok {
+					_ = sv.Replace(strings.Split(strings.Trim(prev.value, "[]"), ","))
+				} else {
+					_ = f.Value.Set(prev.value)
+				}
+				f.Changed = prev.changed
+			}
+		})
+		runCmd.Annotations = annotations
+	})
+	if err := applyEnvDefaultsToRunFlags(runCmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags: %v", err)
+	}
+}
+
 // Engine containers get RDMA device passthrough when SPT_RDMA is truthy, so a run reaches its route
-// with SPT_RDMA set only when it uses the s3-rdma driver, whatever the environment held.
+// with SPT_RDMA set only when its workload uses the s3-rdma driver, whatever the environment held.
 func TestRunCmdKeepsSptRdmaOnlyForTheRdmaDriverOnEveryRoute(t *testing.T) {
 	for _, route := range []struct {
 		name, hosts, minHosts, reached string
@@ -27,27 +59,34 @@ func TestRunCmdKeepsSptRdmaOnlyForTheRdmaDriverOnEveryRoute(t *testing.T) {
 		{"distributed", "entry.example,worker.example", "2", "connect"},
 	} {
 		for _, tc := range []struct {
-			name, env, useRdma, driver string
-			want                       bool
+			name, workload, rdmaEnv, driverEnv string
+			flags                              map[string]string
+			want                               bool
 		}{
-			{"SPT_RDMA=true with --use-rdma=false", "true", "false", "", false},
-			{"SPT_RDMA=yes, which use-rdma does not parse", "yes", "", "", false},
-			{"SPT_RDMA=true with --s3-driver aws", "true", "", scenario.S3DriverAws, false},
-			{"SPT_RDMA unset with --s3-driver rdma", "", "", scenario.S3DriverRdma, true},
+			{"SPT_RDMA=true with --use-rdma=false", WorkloadTypeWrite, "true", "", map[string]string{"use-rdma": "false"}, false},
+			{"SPT_RDMA=yes, which use-rdma does not parse", WorkloadTypeWrite, "yes", "", nil, false},
+			{"SPT_RDMA=true with --s3-driver aws --use-rdma=false", WorkloadTypeWrite, "true", "",
+				map[string]string{"s3-driver": scenario.S3DriverAws, "use-rdma": "false"}, false},
+			{"SPT_RDMA=true with a mock workload", WorkloadTypeMock, "true", "", nil, false},
+			{"SPT_S3_DRIVER=rdma with a tables workload", WorkloadTypeTables, "", scenario.S3DriverRdma, nil, false},
+			{"SPT_RDMA=true", WorkloadTypeWrite, "true", "", nil, true},
+			{"SPT_S3_DRIVER=rdma", WorkloadTypeWrite, "", scenario.S3DriverRdma, nil, true},
+			{"--s3-driver rdma", WorkloadTypeWrite, "", "", map[string]string{"s3-driver": scenario.S3DriverRdma}, true},
 		} {
 			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
 				t.Chdir(t.TempDir())
-				t.Setenv(constants.EnvRdmaEnabled, tc.env)
+				clearEnvDefaultsTestEnv(t)
+				t.Setenv(constants.EnvRdmaEnabled, tc.rdmaEnv)
+				t.Setenv(constants.EnvS3Driver, tc.driverEnv)
 				setDeleteRouteFlags(t, route.hosts, route.minHosts)
-				if tc.useRdma != "" {
-					setGlobalRunFlagForTest(t, "use-rdma", tc.useRdma)
+				for name, value := range tc.flags {
+					setGlobalRunFlagForTest(t, name, value)
 				}
-				if tc.driver != "" {
-					setGlobalRunFlagForTest(t, "s3-driver", tc.driver)
-				}
+				applyRunEnvDefaultsForTest(t)
 
 				var reachedRoute string
 				var rdmaAtRoute bool
+				portChecks := 0
 				previousConnect := connectMultiHostOrchestratorFunc
 				previousPort := resolvePortConflictFunc
 				previousLocal := startLocalHeadlessRunFunc
@@ -62,6 +101,7 @@ func TestRunCmdKeepsSptRdmaOnlyForTheRdmaDriverOnEveryRoute(t *testing.T) {
 					return reached
 				}
 				resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
+					portChecks++
 					return &portcheck.ResolutionResult{Success: true}, nil
 				}
 				startLocalHeadlessRunFunc = func(string, string, scenario.Params, headless.HeadlessOptions) error {
@@ -69,11 +109,14 @@ func TestRunCmdKeepsSptRdmaOnlyForTheRdmaDriverOnEveryRoute(t *testing.T) {
 					return reached
 				}
 
-				if err := runCmd.RunE(runCmd, []string{WorkloadTypeWrite}); !errors.Is(err, reached) {
+				if err := runCmd.RunE(runCmd, []string{tc.workload}); !errors.Is(err, reached) {
 					t.Fatalf("RunE() error = %v, want the route to be reached", err)
 				}
 				if reachedRoute != route.reached {
 					t.Fatalf("reached %q, want %q", reachedRoute, route.reached)
+				}
+				if route.reached == "connect" && portChecks != 0 {
+					t.Fatalf("a remote route ran %d local port check(s)", portChecks)
 				}
 				if rdmaAtRoute != tc.want {
 					t.Fatalf("SPT_RDMA truthy at the route = %v, want %v", rdmaAtRoute, tc.want)
