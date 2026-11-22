@@ -373,15 +373,19 @@ class NettyStorageDriverPqcConfigTest {
 	}
 
 	private static void detachCapture(final CapturingAppender appender) throws InterruptedException {
-		LogUtil.flushAll();
-		Thread.sleep(25);
-		final var msgLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MSG.getName());
-		final var errLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
-		msgLogger.removeAppender(appender);
-		errLogger.removeAppender(appender);
-		msgLogger.setLevel(appender.previousMsgLevel);
-		errLogger.setLevel(appender.previousErrLevel);
-		appender.stop();
+		try {
+			LogUtil.flushAll();
+			Thread.sleep(25);
+		} finally {
+			// Even when the wait is interrupted or the flush fails, so that the appender and levels never stay
+			final var msgLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MSG.getName());
+			final var errLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+			msgLogger.removeAppender(appender);
+			errLogger.removeAppender(appender);
+			msgLogger.setLevel(appender.previousMsgLevel);
+			errLogger.setLevel(appender.previousErrLevel);
+			appender.stop();
+		}
 	}
 
 	private static final class CapturingAppender extends AbstractAppender {
