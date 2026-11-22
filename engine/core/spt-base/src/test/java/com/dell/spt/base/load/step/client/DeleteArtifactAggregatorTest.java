@@ -1,10 +1,17 @@
 package com.dell.spt.base.load.step.client;
 
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.item.op.deletion.DeleteArtifacts;
@@ -26,12 +33,20 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class DeleteArtifactAggregatorTest {
+	private static final List<String> DELETE_FILES = List.of(
+					DeleteArtifacts.METRICS_FILE_NAME,
+					DeleteArtifacts.REQUESTS_FILE_NAME,
+					DeleteArtifacts.OBJECTS_FILE_NAME,
+					DeleteArtifacts.RESIDUAL_FILE_NAME,
+					DeleteArtifacts.VERIFICATION_FILE_NAME);
+
 	@TempDir
 	Path temp;
 
@@ -162,6 +177,115 @@ class DeleteArtifactAggregatorTest {
 						"step", List.of(local, remote), List.of("local", "worker-a"),
 						selection, selectionCompletion).close();
 		assertFalse(Files.readString(output.resolve(DeleteArtifacts.COMPLETION_FILE_NAME)).isBlank());
+	}
+
+	@Test
+	void aLostWorkerStillLetsTheEntryCollectTheLaterWorkersEvidence() throws Exception {
+		final Path output = temp.resolve("log/step");
+		Files.createDirectories(output);
+		final FileManager local = mock(FileManager.class);
+		final FileManager lost = mock(FileManager.class);
+		final FileManager later = mock(FileManager.class);
+		final NodeArtifacts localArtifacts = nodeArtifacts(output, 0, "local");
+		final NodeArtifacts lostArtifacts = nodeArtifacts(temp.resolve("lost"), 1, "worker-a");
+		final NodeArtifacts laterArtifacts = nodeArtifacts(temp.resolve("later"), 2, "worker-b");
+		register(local, localArtifacts);
+		register(lost, lostArtifacts);
+		register(later, laterArtifacts);
+		write(localArtifacts);
+		write(laterArtifacts);
+		serve(later, laterArtifacts);
+		when(lost.readFromFile(anyString(), anyLong())).thenThrow(new LostNodeFileManager.NotCollected());
+		final var aggregator = new DeleteArtifactAggregator(
+						"step", List.of(local, lost, later), List.of("local", "worker-a", "worker-b"), selection(), completion());
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals("failed to collect and publish DELETE evidence", failure.getMessage());
+		assertEquals("remote DELETE artifact was not collected, as the entry lost its node's step slice: "
+						+ lostArtifacts.totals(), failure.getCause().getMessage());
+		assertEquals(0, failure.getCause().getSuppressed().length, "a lost node gets one failure, not one per file");
+		verify(lost, times(1)).readFromFile(anyString(), anyLong());
+		for (final String artifact : DELETE_FILES) {
+			final Path canonical = output.resolve(artifact);
+			assertTrue(Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 0)), artifact);
+			assertFalse(Files.exists(DeleteArtifactAggregator.nodeSourcePath(canonical, 1)), artifact);
+			assertTrue(Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 2)),
+							"worker 2's " + artifact + " was not collected");
+		}
+		assertFalse(Files.exists(output.resolve(DeleteArtifacts.COMPLETION_FILE_NAME)));
+	}
+
+	@Test
+	void aWorkersMissingFileKeepsItsOtherFilesAndTheLaterWorkersForARetry() throws Exception {
+		final Path output = temp.resolve("log/step");
+		Files.createDirectories(output);
+		final FileManager local = mock(FileManager.class);
+		final FileManager missing = mock(FileManager.class);
+		final FileManager later = mock(FileManager.class);
+		final NodeArtifacts localArtifacts = nodeArtifacts(output, 0, "local");
+		final NodeArtifacts missingArtifacts = nodeArtifacts(temp.resolve("missing"), 1, "worker-a");
+		final NodeArtifacts laterArtifacts = nodeArtifacts(temp.resolve("later"), 2, "worker-b");
+		register(local, localArtifacts);
+		register(missing, missingArtifacts);
+		register(later, laterArtifacts);
+		write(localArtifacts);
+		write(missingArtifacts);
+		write(laterArtifacts);
+		serve(missing, missingArtifacts);
+		serve(later, laterArtifacts);
+		when(missing.readFromFile(missingArtifacts.requests().toString(), 0))
+						.thenThrow(new NoSuchFileException(missingArtifacts.requests().toString()));
+		when(missing.readFromFile(missingArtifacts.residual().toString(), 0))
+						.thenThrow(new NoSuchFileException(missingArtifacts.residual().toString()));
+		final var aggregator = new DeleteArtifactAggregator(
+						"step", List.of(local, missing, later), List.of("local", "worker-a", "worker-b"), selection(), completion());
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals("failed to fetch remote DELETE artifact " + missingArtifacts.requests(), failure.getCause().getMessage());
+		assertEquals(1, failure.getCause().getSuppressed().length);
+		assertEquals("failed to fetch remote DELETE artifact " + missingArtifacts.residual(),
+						failure.getCause().getSuppressed()[0].getMessage());
+		for (final String artifact : DELETE_FILES) {
+			final Path canonical = output.resolve(artifact);
+			final boolean fetched = !artifact.equals(DeleteArtifacts.REQUESTS_FILE_NAME)
+							&& !artifact.equals(DeleteArtifacts.RESIDUAL_FILE_NAME);
+			assertEquals(fetched, Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 1)), artifact);
+			assertTrue(Files.isRegularFile(DeleteArtifactAggregator.nodeSourcePath(canonical, 2)),
+							"worker 2's " + artifact + " was not collected");
+		}
+		try (var files = Files.list(output)) {
+			assertEquals(List.of(), files.filter(file -> file.getFileName().toString().startsWith(".")).toList());
+		}
+		assertFalse(Files.exists(output.resolve(DeleteArtifacts.COMPLETION_FILE_NAME)));
+	}
+
+	@Test
+	void anInterruptStopsTheDeleteCollectionAtOnce() throws Exception {
+		final Path output = temp.resolve("log/step");
+		Files.createDirectories(output);
+		final FileManager local = mock(FileManager.class);
+		final FileManager interrupted = mock(FileManager.class);
+		final FileManager later = mock(FileManager.class);
+		final NodeArtifacts localArtifacts = nodeArtifacts(output, 0, "local");
+		final NodeArtifacts laterArtifacts = nodeArtifacts(temp.resolve("later"), 2, "worker-b");
+		register(local, localArtifacts);
+		register(interrupted, nodeArtifacts(temp.resolve("interrupted"), 1, "worker-a"));
+		register(later, laterArtifacts);
+		write(localArtifacts);
+		write(laterArtifacts);
+		serve(later, laterArtifacts);
+		when(interrupted.readFromFile(anyString(), anyLong())).thenAnswer(invocation -> {
+			throwUnchecked(new InterruptedException("stop collecting"));
+			return null;
+		});
+		final var aggregator = new DeleteArtifactAggregator(
+						"step", List.of(local, interrupted, later), List.of("local", "worker-a", "worker-b"), selection(), completion());
+
+		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, aggregator::close));
+		verify(interrupted, times(1)).readFromFile(anyString(), anyLong());
+		verify(later, never()).readFromFile(anyString(), anyLong());
 	}
 
 	@Test

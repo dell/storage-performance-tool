@@ -115,6 +115,19 @@ public class StepIdReuseAtStartTest {
 	}
 
 	@Test
+	void aSingleNodeStepIsRefusedWhenALargerEarlierStepLeftOnlyAWorkersNodeSource() throws Exception {
+		// An earlier 3-node step whose entry file was missing keeps its workers' files only.
+		final Path stale = earlierFile(nodeSource(Loggers.OPERATION_LIFECYCLE.getName(), 2));
+
+		final var failure = refused(client(config("create")));
+
+		assertEquals(stale.toAbsolutePath().toString(),
+						Path.of(failure.getMessage().replaceAll(".*\\((.*) exists\\).*", "$1")).toAbsolutePath().toString());
+		assertEquals("earlier", Files.readString(stale));
+		verify(factory, never()).createLocal(any(), anyList(), anyList(), any());
+	}
+
+	@Test
 	void aCreateStepIsRefusedWhenTheCanonicalFileExistsAndItsCloseLeavesItAlone() throws Exception {
 		final Path canonical = earlierFile(canonical(Loggers.OPERATION_LIFECYCLE.getName()));
 		final TestLoadStepClient client = client(config("create"));

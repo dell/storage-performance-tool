@@ -1,22 +1,56 @@
 package com.dell.spt.base.load.step.client;
 
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import java.io.EOFException;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.apache.commons.csv.CSVFormat;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class CsvLoggerArtifactAggregatorTest {
+
+	private static final String LOGGER = "OperationLifecycle";
+	private static final String ARTIFACT = OperationLifecycleArtifact.FILE_NAME;
+	private static final String HEADER = OperationLifecycleArtifact.HEADER;
+
+	private final String stepId = "missing-slice-" + java.util.UUID.randomUUID();
+
+	@TempDir
+	Path tempDir;
 
 	@Test
 	void collectsTerminalOperationEvidenceFromEveryContributor() throws Exception {
@@ -225,6 +259,307 @@ class CsvLoggerArtifactAggregatorTest {
 					Files.deleteIfExists(file);
 			}
 			Files.deleteIfExists(dir);
+		}
+	}
+
+	@Test
+	void aLostWorkerStillLetsTheEntryCollectEveryLaterWorker() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager lost = remote(1);
+		when(lost.readFromFile(remoteName(1), 0)).thenThrow(new LostNodeFileManager.NotCollected());
+		final var aggregator = aggregator(entry(canonical), lost, healthy(2), healthy(3));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals(Category.AGGREGATION, failure.category());
+		assertEquals("failed to aggregate " + ARTIFACT + ": not published, missing node-001; collected the other 3 of 4",
+						failure.getMessage());
+		assertEquals("remote logger artifact was not collected, as the entry lost its node's step slice: " + remoteName(1),
+						failure.getCause().getMessage());
+		assertEquals(0, failure.getSuppressed().length);
+		assertNodeFiles(canonical, "w0", null, "w2", "w3");
+		assertFalse(Files.exists(canonical), "a merged file without node 1 was published");
+	}
+
+	@Test
+	void aMissingWorkerFileKeepsTheOtherNodesFilesAndNamesTheMissingNode() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager missing = remote(1);
+		when(missing.readFromFile(remoteName(1), 0)).thenThrow(new NoSuchFileException(remoteName(1)));
+		final var aggregator = aggregator(entry(canonical), missing, healthy(2));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals("failed to aggregate " + ARTIFACT + ": not published, missing node-001; collected the other 2 of 3",
+						failure.getMessage());
+		assertInstanceOf(NoSuchFileException.class, failure.getCause().getCause());
+		assertNodeFiles(canonical, "w0", null, "w2");
+		assertFalse(Files.exists(canonical));
+	}
+
+	@Test
+	void aMissingEntryFileStillCollectsEveryWorker() throws Exception {
+		final Path canonical = tempDir.resolve(ARTIFACT);
+		final var aggregator = aggregator(entry(canonical), healthy(1), healthy(2));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals(Category.AGGREGATION, failure.category());
+		assertEquals("entry-node logger artifact is missing: " + canonical
+						+ "; not published, missing node-000; collected the other 2 of 3", failure.getMessage());
+		assertNull(failure.getCause());
+		assertEquals(0, failure.getSuppressed().length);
+		assertNodeFiles(canonical, null, "w1", "w2");
+		assertFalse(Files.exists(canonical));
+	}
+
+	@Test
+	void aSingleSlicesMissingFileFailsAsBefore() throws Exception {
+		final Path canonical = tempDir.resolve(ARTIFACT);
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator(entry(canonical))::close);
+
+		assertEquals("entry-node logger artifact is missing: " + canonical, failure.getMessage());
+		assertNull(failure.getCause());
+		assertEquals(List.of(), files());
+	}
+
+	@Test
+	void twoMissingSlicesAreBothNamedAndTheLaterFailureIsSuppressed() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager lost = remote(1);
+		when(lost.readFromFile(remoteName(1), 0)).thenThrow(new LostNodeFileManager.NotCollected());
+		final FileManager missing = remote(3);
+		when(missing.readFromFile(remoteName(3), 0)).thenThrow(new NoSuchFileException(remoteName(3)));
+		final var warnings = new WarningCapture();
+		final var aggregator = aggregator(entry(canonical), lost, healthy(2), missing);
+
+		final IntegrityTerminalException failure;
+		try (warnings) {
+			failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+			warnings.await("from node-001", "from node-003");
+		}
+
+		assertEquals("failed to aggregate " + ARTIFACT + ": not published, missing node-001, node-003; collected the other 2 of 4",
+						failure.getMessage());
+		assertTrue(failure.getCause().getMessage().contains(remoteName(1)), failure.getCause().getMessage());
+		assertEquals(1, failure.getSuppressed().length);
+		assertTrue(failure.getSuppressed()[0].getMessage().contains(remoteName(3)), failure.getSuppressed()[0].getMessage());
+		assertNodeFiles(canonical, "w0", null, "w2", null);
+		final List<String> lines = warnings.lines(stepId);
+		assertEquals(2, lines.size(), lines.toString());
+		assertTrue(lines.get(0).startsWith(stepId + ": failed to collect " + ARTIFACT + " from node-001: "), lines.get(0));
+		assertTrue(lines.get(1).startsWith(stepId + ": failed to collect " + ARTIFACT + " from node-003: "), lines.get(1));
+		assertTrue(lines.stream().noneMatch(line -> line.contains("failed to aggregate")), lines.toString());
+	}
+
+	@Test
+	void aPartlyFetchedWorkerFileLeavesNoNodeFileAndNoTempFile() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager partial = remote(1);
+		final byte[] half = (HEADER + "\n1,123," + stepId).getBytes(StandardCharsets.UTF_8);
+		when(partial.readFromFile(remoteName(1), 0)).thenReturn(half);
+		when(partial.readFromFile(remoteName(1), half.length)).thenThrow(new IOException("connection reset"));
+		final var aggregator = aggregator(entry(canonical), partial, healthy(2));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals("failed to fetch remote logger artifact " + remoteName(1), failure.getCause().getMessage());
+		assertNodeFiles(canonical, "w0", null, "w2");
+		assertEquals(List.of(nodeName(0), nodeName(2)), files(), "a partial or temporary file was left");
+	}
+
+	@Test
+	void aStaleLaterNodeSourceRefusesBeforeTheEntryFileMoves() throws Exception {
+		final Path canonical = entryFile("w0");
+		final Path stale = CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 2);
+		Files.writeString(stale, "stale");
+		final FileManager w1 = healthy(1);
+		final var aggregator = aggregator(entry(canonical), w1, healthy(2));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals(Category.PUBLICATION, failure.category());
+		assertEquals("stale node source exists: " + stale, failure.getMessage());
+		assertEquals("stale", Files.readString(stale));
+		assertTrue(Files.isRegularFile(canonical), "the entry's file moved before the stale check");
+		assertEquals(List.of(ARTIFACT, nodeName(2)), files());
+		verify(w1, never()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void aStoppedStartWithAMissingMiddleSliceCollectsTheOtherStartedSlicesOnly() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager missing = remote(1);
+		when(missing.readFromFile(remoteName(1), 0)).thenThrow(new NoSuchFileException(remoteName(1)));
+		final FileManager unstarted = healthy(3);
+		final var aggregator = aggregator(entry(canonical), missing, healthy(2), unstarted);
+
+		final var failure = assertThrows(IntegrityTerminalException.class, () -> aggregator.closeAfterStoppedStart(3));
+
+		assertEquals("failed to aggregate " + ARTIFACT + ": not published, missing node-001; collected the other 2 of 3",
+						failure.getMessage());
+		assertNodeFiles(canonical, "w0", null, "w2", null);
+		verify(unstarted, never()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void anInterruptStopsTheCollectionAtOnce() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager interrupted = remote(1);
+		when(interrupted.readFromFile(remoteName(1), 0)).thenAnswer(invocation -> {
+			throwUnchecked(new InterruptedException("stop collecting"));
+			return null;
+		});
+		final FileManager later = healthy(2);
+		final var aggregator = aggregator(entry(canonical), interrupted, later);
+
+		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, aggregator::close));
+		verify(later, never()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void aFailedMergeLeavesNoStagingFile() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager wrong = remote(1);
+		final byte[] bytes = "wrong,header\n1,2\n".getBytes(StandardCharsets.UTF_8);
+		when(wrong.readFromFile(remoteName(1), 0)).thenReturn(bytes);
+		when(wrong.readFromFile(remoteName(1), bytes.length)).thenThrow(new EOFException());
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator(entry(canonical), wrong)::close);
+
+		assertEquals("failed to aggregate " + ARTIFACT, failure.getMessage());
+		assertEquals(List.of(nodeName(0), nodeName(1)), files(), "the merge left its staging file");
+	}
+
+	@Test
+	void theStartCheckFindsTheNodeSourcesAnEarlierLargerStepLeft() throws Exception {
+		final Path canonical = tempDir.resolve(ARTIFACT);
+		final FileManager entry = entry(canonical);
+		assertThrows(IntegrityTerminalException.class, aggregator(entry, healthy(1), healthy(2))::close);
+		Files.writeString(tempDir.resolve("operation.lifecycle.node-1000.csv"), "a later node's");
+		Files.writeString(tempDir.resolve("operation.lifecycle.node-01.csv"), "not a node source");
+		Files.writeString(tempDir.resolve("range.read.node-003.csv"), "another artifact's");
+
+		// A later one-slice step with the same id must still be refused: it would publish beside them.
+		assertEquals(List.of(canonical, nodePath(0), nodePath(1), nodePath(2), tempDir.resolve("operation.lifecycle.node-1000.csv")),
+						CsvLoggerArtifactAggregator.publishedPaths(entry, LOGGER, stepId, 1));
+		assertEquals(List.of(canonical, nodePath(0), nodePath(1), nodePath(2), nodePath(3),
+						tempDir.resolve("operation.lifecycle.node-1000.csv")),
+						CsvLoggerArtifactAggregator.publishedPaths(entry, LOGGER, stepId, 4));
+	}
+
+	private Path entryFile(final String workerId) throws IOException {
+		final Path canonical = tempDir.resolve(ARTIFACT);
+		Files.writeString(canonical, body(workerId));
+		return canonical;
+	}
+
+	private String body(final String workerId) {
+		final var counters = new OperationLifecycleCounters(true, 4, 4, 0, 4, 0, 0, 0, 0, 0);
+		return HEADER + "\n" + OperationLifecycleArtifact.row(123, stepId, workerId, List.of(counters), true) + "\n";
+	}
+
+	private FileManager entry(final Path canonical) throws IOException {
+		final FileManager manager = mock(FileManager.class);
+		when(manager.logFileName(LOGGER, stepId)).thenReturn(canonical.toString());
+		return manager;
+	}
+
+	private static String remoteName(final int node) {
+		return "/w" + node + "/" + ARTIFACT;
+	}
+
+	private FileManager remote(final int node) throws IOException {
+		final FileManager manager = mock(FileManager.class);
+		when(manager.logFileName(LOGGER, stepId)).thenReturn(remoteName(node));
+		return manager;
+	}
+
+	private FileManager healthy(final int node) throws IOException {
+		final FileManager manager = remote(node);
+		final byte[] bytes = body("w" + node).getBytes(StandardCharsets.UTF_8);
+		when(manager.readFromFile(remoteName(node), 0)).thenReturn(bytes);
+		when(manager.readFromFile(remoteName(node), bytes.length)).thenThrow(new EOFException());
+		return manager;
+	}
+
+	private CsvLoggerArtifactAggregator aggregator(final FileManager... managers) throws IOException {
+		return new CsvLoggerArtifactAggregator(stepId, List.of(managers), LOGGER, ARTIFACT, HEADER);
+	}
+
+	private Path nodePath(final int node) {
+		return CsvLoggerArtifactAggregator.nodeSourcePath(tempDir.resolve(ARTIFACT), node);
+	}
+
+	private static String nodeName(final int node) {
+		return String.format("operation.lifecycle.node-%03d.csv", node);
+	}
+
+	/** Each node's file holds its own rows, or is absent where {@code workerIds} has null. */
+	private void assertNodeFiles(final Path canonical, final String... workerIds) throws IOException {
+		for (int i = 0; i < workerIds.length; i++) {
+			final Path node = CsvLoggerArtifactAggregator.nodeSourcePath(canonical, i);
+			if (workerIds[i] == null) {
+				assertFalse(Files.exists(node), node + " exists");
+			} else {
+				assertEquals(body(workerIds[i]), Files.readString(node), node.toString());
+			}
+		}
+	}
+
+	/** Every file name in the temporary directory, hidden ones included, sorted. */
+	private List<String> files() throws IOException {
+		try (Stream<Path> files = Files.list(tempDir)) {
+			return files.map(file -> file.getFileName().toString()).sorted().toList();
+		}
+	}
+
+	/** The WARN lines of the errors logger while it is open; the engine's loggers are asynchronous. */
+	private static final class WarningCapture extends AbstractAppender implements AutoCloseable {
+		private final List<String> messages = new CopyOnWriteArrayList<>();
+		private final org.apache.logging.log4j.core.Logger errors = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+		private final Level level = errors.getLevel();
+
+		WarningCapture() {
+			super("missingSliceWarnings", null, null, true, Property.EMPTY_ARRAY);
+			start();
+			errors.addAppender(this);
+			errors.setLevel(Level.WARN);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			if (Level.WARN.equals(event.getLevel())) {
+				messages.add(event.getMessage().getFormattedMessage());
+			}
+		}
+
+		void await(final String... parts) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			for (final String part : parts) {
+				while (messages.stream().noneMatch(message -> message.contains(part))) {
+					assertTrue(System.nanoTime() < deadline, "no warning with " + part + " in " + messages);
+					Thread.sleep(5);
+				}
+			}
+		}
+
+		List<String> lines(final String stepId) {
+			final List<String> lines = new ArrayList<>();
+			for (final String message : messages) {
+				if (message.startsWith(stepId + ": ")) {
+					lines.add(message);
+				}
+			}
+			return lines;
+		}
+
+		@Override
+		public void close() {
+			errors.removeAppender(this);
+			errors.setLevel(level);
+			stop();
 		}
 	}
 }
