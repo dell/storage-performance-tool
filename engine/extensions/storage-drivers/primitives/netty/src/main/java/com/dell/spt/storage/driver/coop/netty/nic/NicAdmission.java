@@ -51,11 +51,19 @@ public final class NicAdmission {
 	interface Gate {
 		boolean servesNow();
 
-		/** An attempt on the NIC ended with no response; every one, also while a trial interval runs. */
-		default void failedWithoutAnswer() {}
+		/**
+		 * An attempt on the NIC ended with no response; every one, also while a trial interval runs.
+		 * Runs {@code markFailing}, the admission's own update, under the same lock as the gate's, so the
+		 * two cannot disagree after a racing {@link #answered}.
+		 */
+		default void failedWithoutAnswer(final Runnable markFailing) {
+			markFailing.run();
+		}
 
-		/** An attempt on the failing NIC got a response, so it is no longer failing. */
-		default void answered() {}
+		/** An attempt on the failing NIC got a response; runs {@code markAnswered} as above. */
+		default void answered(final Runnable markAnswered) {
+			markAnswered.run();
+		}
 	}
 
 	/** Runs a task once, after a delay; the NIC set's event loops. */
@@ -335,7 +343,10 @@ public final class NicAdmission {
 	 * nothing. Reported before the attempt gives back its NIC.
 	 */
 	public void failed(final int nic) {
-		gates[nic].failedWithoutAnswer();
+		gates[nic].failedWithoutAnswer(() -> markFailed(nic));
+	}
+
+	private void markFailed(final int nic) {
 		final int inRow = failing.get(nic);
 		final long now = nanoClock.getAsLong();
 		if (inRow != 0 && now - trialAfter.get(nic) < 0) {
@@ -353,8 +364,7 @@ public final class NicAdmission {
 	 */
 	public void answered(final int nic) {
 		if (failing.get(nic) != 0) {
-			failing.set(nic, 0);
-			gates[nic].answered();
+			gates[nic].answered(() -> failing.set(nic, 0));
 		}
 	}
 

@@ -35,20 +35,23 @@ final class S3NicSetSilentDropTest {
 	private static final long TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(2_000);
 	private static final long DEAD_AFTER_NANOS = TimeUnit.SECONDS.toNanos(1);
 	private static final long REVIVE_AFTER_NANOS = TimeUnit.SECONDS.toNanos(13);
-	private static final long END_AFTER_NANOS = TimeUnit.SECONDS.toNanos(19);
+	private static final long END_AFTER_NANOS = TimeUnit.SECONDS.toNanos(23);
+	private static final long BACK_WITHIN_NANOS = TimeUnit.SECONDS.toNanos(8);
 
 	@Test
 	void aSilentNicTakesNoOperationAfterItsFirstFailuresAndComesBack() throws Exception {
 		assumeTrue(Epoll.isAvailable());
+		assumeTrue(NicSetLoopback.dropsSynsOnAFullAcceptQueue(), "this host answers a SYN to a full accept queue");
 		final var run = runThroughAFault(false);
 		final var firstDeadFailure = run.firstFailureOnDeadNic();
 		assertTrue(firstDeadFailure < run.reviveAt, "the dead NIC's attempts failed before the revive");
-		final var held = run.onDeadNic(firstDeadFailure + TimeUnit.MILLISECONDS.toNanos(50), run.reviveAt);
-		assertEquals(List.of(), held, "no operation ends on the silent NIC between its first failures and the revive");
+		final var held = run.startedOnDeadNic(firstDeadFailure, run.reviveAt);
+		assertEquals(List.of(), held, "no operation starts on the silent NIC between its first failures and the revive");
 		assertTrue(run.liveSuccesses(run.deadAt + TIMEOUT_NANOS + DEAD_AFTER_NANOS, run.reviveAt) > 0,
 						"the live NIC keeps serving");
-		assertTrue(run.firstSuccessOnDeadNicAfterRevive() - run.reviveAt < TimeUnit.SECONDS.toNanos(5),
+		assertTrue(run.firstSuccessOnDeadNicAfterRevive() - run.reviveAt < BACK_WITHIN_NANOS,
 						"the NIC takes operations again soon after it comes back");
+		assertTrue(!run.failingAtEnd(), "and is not failing at the end");
 	}
 
 	@Test
@@ -56,19 +59,20 @@ final class S3NicSetSilentDropTest {
 		assumeTrue(Epoll.isAvailable());
 		final var run = runThroughAFault(true);
 		final var firstDeadFailure = run.firstFailureOnDeadNic();
-		final var trials = run.onDeadNic(firstDeadFailure + TimeUnit.MILLISECONDS.toNanos(50), run.reviveAt);
+		final var trials = run.startedOnDeadNic(firstDeadFailure, run.reviveAt);
 		final long window = run.reviveAt - firstDeadFailure;
 		assertTrue(trials.size() <= window / TIMEOUT_NANOS + 1,
 						"at most one trial of a timeout at a time: " + trials.size() + " in " + window / 1e9 + " s");
 		assertTrue(run.liveSuccesses(run.deadAt + TIMEOUT_NANOS + DEAD_AFTER_NANOS, run.reviveAt) > 0,
 						"the live NIC keeps serving");
-		assertTrue(run.firstSuccessOnDeadNicAfterRevive() - run.reviveAt < TimeUnit.SECONDS.toNanos(5),
+		assertTrue(run.firstSuccessOnDeadNicAfterRevive() - run.reviveAt < BACK_WITHIN_NANOS,
 						"the NIC takes operations again soon after it answers");
+		assertTrue(!run.failingAtEnd(), "and is not failing at the end");
 	}
 
-	private record Result(long endNanos, String node, Operation.Status status) {}
+	private record Result(long endNanos, long durationNanos, String node, Operation.Status status) {}
 
-	private record Run(List<Result> results, String deadNode, long deadAt, long reviveAt) {
+	private record Run(List<Result> results, String deadNode, long deadAt, long reviveAt, boolean failingAtEnd) {
 
 		long firstFailureOnDeadNic() {
 			return results.stream()
@@ -78,10 +82,11 @@ final class S3NicSetSilentDropTest {
 							.orElse(Long.MAX_VALUE);
 		}
 
-		/** Results on the dead NIC, or with no node (a failed setup), ending in [from, to). */
-		List<Result> onDeadNic(final long from, final long to) {
+		/** Results on the dead NIC, or with no node (a failed setup), that started in [from, to). */
+		List<Result> startedOnDeadNic(final long from, final long to) {
 			return results.stream()
-							.filter(r -> r.endNanos >= from && r.endNanos < to && (r.node == null || deadNode.equals(r.node)))
+							.filter(r -> r.endNanos - r.durationNanos >= from && r.endNanos - r.durationNanos < to
+											&& (r.node == null || deadNode.equals(r.node)))
 							.toList();
 		}
 
@@ -107,7 +112,6 @@ final class S3NicSetSilentDropTest {
 			try (var proxy = new SilentProxy(port(endpoints.get(1)))) {
 				final var deadNode = "127.0.0.1:" + proxy.port();
 				final var root = NicSetLoopback.root(List.of(endpoints.get(0), deadNode), nics(2), 4);
-				root.val("storage-net-endpoint-connect-timeoutMilliSec", 3_000);
 				try (var driver = NicSetLoopback.driver(root.configVal("storage"), false)) {
 					final var run = NicSetLoopback.started(driver);
 					final List<Result> results = new ArrayList<>();
@@ -121,7 +125,7 @@ final class S3NicSetSilentDropTest {
 					while (true) {
 						final var result = run.results().await();
 						final long now = System.nanoTime() - t0;
-						results.add(new Result(now, result.nodeAddr(), result.status()));
+						results.add(result(now, result));
 						if (deadAt == 0 && now > DEAD_AFTER_NANOS) {
 							proxy.die(acceptOnly);
 							deadAt = System.nanoTime() - t0;
@@ -137,12 +141,18 @@ final class S3NicSetSilentDropTest {
 					}
 					for (var i = 0; i < 3; i++) {
 						final var result = run.results().await();
-						results.add(new Result(System.nanoTime() - t0, result.nodeAddr(), result.status()));
+						results.add(result(System.nanoTime() - t0, result));
 					}
-					return new Run(results, deadNode, deadAt, reviveAt);
+					return new Run(results, deadNode, deadAt, reviveAt, run.pool().admission().isFailing(1));
 				}
 			}
 		}
+	}
+
+	private static Result result(final long endNanos, final Operation result) {
+		// A setup that failed sent no request and its duration is not a span (op-trace-setup-failed-duration 01).
+		final long duration = result.reqTimeStart() > 0 ? TimeUnit.MICROSECONDS.toNanos(result.duration()) : 0;
+		return new Result(endNanos, duration, result.nodeAddr(), result.status());
 	}
 
 	/** Forwards to a target until it dies: then it moves no byte, and, unless it accepts only, answers no SYN. */

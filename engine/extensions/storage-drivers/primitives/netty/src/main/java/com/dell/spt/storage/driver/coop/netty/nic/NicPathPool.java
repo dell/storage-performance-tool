@@ -125,7 +125,7 @@ final class NicPathPool implements NicAdmission.Gate {
 			return backoff.inBackoff();
 		}
 
-		/** Connects started on this Path by acquisitions, pre-opening and recovery; probes not included. */
+		/** Connects started on this Path by acquisitions and pre-opening; probes and recovery connects not included. */
 		long connectsStarted() {
 			return connectsStarted.get();
 		}
@@ -289,8 +289,15 @@ final class NicPathPool implements NicAdmission.Gate {
 		Channel reused = null;
 		NicPath connectPath = null;
 		long epoch = PathBackoff.REJECTED;
+		long failures = 0;
+		int timeoutMillis = connectTimeoutMillis;
 		Throwable failure = null;
 		synchronized (this) {
+			failures = failureEpoch;
+			// A recovering NIC's connect holds its operation no longer than a recovery connect would.
+			if (recovering) {
+				timeoutMillis = recoveryTimeoutMillis;
+			}
 			if (admissionClosed) {
 				failure = closedFailure();
 			} else if ((reused = pollIdle()) == null) {
@@ -319,7 +326,7 @@ final class NicPathPool implements NicAdmission.Gate {
 				release(reused);
 			}
 		} else {
-			connect(connectPath, epoch, attempt);
+			connect(connectPath, epoch, attempt, timeoutMillis, failures, true);
 		}
 	}
 
@@ -337,6 +344,9 @@ final class NicPathPool implements NicAdmission.Gate {
 	public boolean servesNow() {
 		final NicPath path;
 		final long epoch;
+		final long failures;
+		final Pending recovery;
+		final List<Channel> inactive = new ArrayList<>(0);
 		synchronized (this) {
 			if (admissionClosed) {
 				return false;
@@ -344,21 +354,36 @@ final class NicPathPool implements NicAdmission.Gate {
 			if (!recovering) {
 				return idle > 0 || !paths.get(nextPath).backoff.rejectsNow();
 			}
-			// Every idle connection was opened after the last failure (release keeps no older one).
+			// Every idle connection was opened after the last failure (release keeps no older one); one
+			// that closed meanwhile does not serve.
+			pruneInactiveIdle(inactive);
 			if (idle > 0) {
 				return true;
 			}
 			if (recoveryConnecting || (openLimit > 0 && open >= openLimit)) {
-				return false;
+				path = null;
+				epoch = PathBackoff.REJECTED;
+			} else {
+				path = nextRecoveryPath();
+				epoch = path == null ? PathBackoff.REJECTED : path.backoff.tryConnect();
 			}
-			path = nextRecoveryPath();
-			if (path == null || (epoch = path.backoff.tryConnect()) == PathBackoff.REJECTED) {
-				return false;
+			if (epoch == PathBackoff.REJECTED) {
+				recovery = null;
+			} else {
+				recoveryConnecting = true;
+				open++;
+				recovery = recoveryAttempt();
+				// Tracked before the monitor is left, so a close that follows cancels it.
+				pending.add(recovery);
 			}
-			recoveryConnecting = true;
-			open++;
+			failures = failureEpoch;
 		}
-		startRecoveryConnect(path, epoch);
+		for (final var channel : inactive) {
+			final var unusedClose = channel.close();
+		}
+		if (recovery != null) {
+			connect(path, epoch, recovery, recoveryTimeoutMillis, failures, false);
+		}
 		return false;
 	}
 
@@ -368,11 +393,12 @@ final class NicPathPool implements NicAdmission.Gate {
 	 * failure are pooled.
 	 */
 	@Override
-	public void failedWithoutAnswer() {
+	public void failedWithoutAnswer(final Runnable markFailing) {
 		final List<Channel> idleNow;
 		synchronized (this) {
 			recovering = true;
 			failureEpoch++;
+			markFailing.run();
 			if (idle == 0) {
 				return;
 			}
@@ -390,8 +416,26 @@ final class NicPathPool implements NicAdmission.Gate {
 
 	/** An attempt on the NIC got a response: its connections are pooled as before. */
 	@Override
-	public synchronized void answered() {
+	public synchronized void answered(final Runnable markAnswered) {
 		recovering = false;
+		markAnswered.run();
+	}
+
+	/** Drops idle connections that closed while pooled, to close outside the monitor. Under the monitor. */
+	private void pruneInactiveIdle(final List<Channel> inactive) {
+		if (idle == 0) {
+			return;
+		}
+		for (final var path : paths) {
+			for (final var channels = path.idleChannels.iterator(); channels.hasNext();) {
+				final var channel = channels.next();
+				if (!channel.isActive()) {
+					channels.remove();
+					idle--;
+					inactive.add(channel);
+				}
+			}
+		}
 	}
 
 	/** The next Path for a recovery connect that is not in back-off, or {@code null}. Under the monitor. */
@@ -407,23 +451,24 @@ final class NicPathPool implements NicAdmission.Gate {
 	}
 
 	/**
-	 * Opens one connection that no operation waits for, with the recovery timeout. Once it connects
-	 * it is pooled as idle, so the trial takes it, and the dispatch task is woken (ticket 06).
+	 * A recovery connect's attempt, which no operation waits for. Once it connects the connection is
+	 * pooled as idle, so the trial takes it, and the dispatch task is woken (ticket 06).
 	 */
-	private void startRecoveryConnect(final NicPath path, final long epoch) {
-		final var recovery = new Pending((channel, failure) -> {
-			synchronized (this) {
-				recoveryConnecting = false;
-			}
-			if (failure == null) {
-				release(channel);
-				if (recheck != null) {
-					recheck.run();
+	private Pending recoveryAttempt() {
+		return new Pending((channel, failure) -> {
+			try {
+				if (failure == null) {
+					release(channel);
+				}
+			} finally {
+				synchronized (this) {
+					recoveryConnecting = false;
 				}
 			}
+			if (failure == null && recheck != null) {
+				recheck.run();
+			}
 		});
-		pending.add(recovery);
-		connect(path, epoch, recovery, recoveryTimeoutMillis);
 	}
 
 	/** Whether an acquisition now would not wait: an idle connection or a free slot. */
@@ -478,10 +523,12 @@ final class NicPathPool implements NicAdmission.Gate {
 		for (var i = 0; i < count; i++) {
 			final var path = paths.get(i % paths.size());
 			final long epoch;
+			final long failures;
 			synchronized (this) {
 				if (admissionClosed || (openLimit > 0 && open >= openLimit)) {
 					break;
 				}
+				failures = failureEpoch;
 				epoch = path.backoff.tryConnect();
 				if (epoch == PathBackoff.REJECTED) {
 					continue;
@@ -499,7 +546,7 @@ final class NicPathPool implements NicAdmission.Gate {
 				done.complete(null);
 			});
 			pending.add(preOpening);
-			connect(path, epoch, preOpening);
+			connect(path, epoch, preOpening, connectTimeoutMillis, failures, true);
 		}
 		return CompletableFuture.allOf(connects.toArray(CompletableFuture[]::new));
 	}
@@ -617,15 +664,12 @@ final class NicPathPool implements NicAdmission.Gate {
 		return epoch == null || epoch < failureEpoch;
 	}
 
-	private void connect(final NicPath path, final long epoch, final Pending attempt) {
-		connect(path, epoch, attempt, connectTimeoutMillis);
-	}
-
-	private void connect(final NicPath path, final long epoch, final Pending attempt, final int timeoutMillis) {
-		final long failures;
-		synchronized (this) {
-			failures = failureEpoch;
-		}
+	/**
+	 * @param failures the failure epoch read under the monitor that chose to connect
+	 * @param counted whether the connect counts in {@link NicPath#connectsStarted()}; a recovery connect does not
+	 */
+	private void connect(final NicPath path, final long epoch, final Pending attempt, final int timeoutMillis,
+					final long failures, final boolean counted) {
 		attempt.chose(path);
 		final EventLoop loop;
 		final ChannelFuture connect;
@@ -643,7 +687,9 @@ final class NicPathPool implements NicAdmission.Gate {
 							})
 							.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, timeoutMillis);
 			binding.apply(connecting, nic, address);
-			path.connectsStarted.incrementAndGet();
+			if (counted) {
+				path.connectsStarted.incrementAndGet();
+			}
 			connect = connecting.connect(path.destination);
 		} catch (final RuntimeException e) {
 			// A trial that never connected must not hold the Path in back-off for good.
@@ -691,6 +737,8 @@ final class NicPathPool implements NicAdmission.Gate {
 			final Pending waiter;
 			final NicPath path;
 			final long epoch;
+			final long failures;
+			final int timeoutMillis;
 			synchronized (this) {
 				open--;
 				if (closed || admissionClosed || waiters.isEmpty()) {
@@ -701,9 +749,11 @@ final class NicPathPool implements NicAdmission.Gate {
 				waiter.chose(path);
 				epoch = path.backoff.tryConnect();
 				open++;
+				failures = failureEpoch;
+				timeoutMillis = recovering ? recoveryTimeoutMillis : connectTimeoutMillis;
 			}
 			if (epoch != PathBackoff.REJECTED) {
-				connect(path, epoch, waiter);
+				connect(path, epoch, waiter, timeoutMillis, failures, true);
 				return;
 			}
 			waiter.fail(new PathBackoffException(path));

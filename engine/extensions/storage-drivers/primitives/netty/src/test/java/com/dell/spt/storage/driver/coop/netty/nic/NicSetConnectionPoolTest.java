@@ -313,8 +313,10 @@ class NicSetConnectionPoolTest {
 	@Test
 	void aPoolServesAFailingNicOnlyWithAConnectionOpenedSinceItsLastFailure() throws Exception {
 		final var a = listener();
+		final var rechecks = new AtomicInteger();
 		// No limit, so a connect never waits for a slot.
-		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
+		final var pool = open(rechecks::incrementAndGet, 0,
+						new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
 						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
 		final var nicPool = pool.pools().get(0);
 		assertTrue(nicPool.servesNow(), "a healthy Path");
@@ -331,12 +333,13 @@ class NicSetConnectionPoolTest {
 		assertFalse(nicPool.servesNow(), "no trial before a recovery connect lands");
 		assertFalse(nicPool.servesNow(), "one recovery connect at a time");
 		waitFor(() -> nicPool.idleCount() == 1);
-		assertEquals(connectsBefore + 1, nicPool.paths().get(0).connectsStarted());
+		waitFor(() -> rechecks.get() == 1);
+		assertEquals(connectsBefore, nicPool.paths().get(0).connectsStarted(), "a recovery connect is not counted");
 		assertEquals(0, nicPool.pendingCount(), "the recovery connect holds no acquisition");
 		assertTrue(nicPool.servesNow(), "the recovery connection serves the trial");
 		assertEquals(0, admission.take(), "and NIC 0 takes it");
 		final var trial = acquire(nicPool).get(5, TimeUnit.SECONDS);
-		assertEquals(connectsBefore + 1, nicPool.paths().get(0).connectsStarted(), "the trial takes it, no new connect");
+		assertEquals(connectsBefore, nicPool.paths().get(0).connectsStarted(), "the trial takes it, no new connect");
 
 		admission.answered(0);
 		nicPool.release(trial);
@@ -344,6 +347,44 @@ class NicSetConnectionPoolTest {
 
 		pool.closeAdmission();
 		advanceMillis(10_000);
+		assertFalse(nicPool.servesNow(), "a closed pool serves nothing");
+	}
+
+	@Test
+	void aRecoveringNicSkipsAClosedIdleConnectionKeepsItsRotationAndEvictsAgainOnTheNextFailure() throws Exception {
+		final var a = listener();
+		final var b = listener();
+		final var pool = open(0,
+						new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a), path("s3-b.example:9000", b))),
+										group("lo-a")),
+						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
+		final var nicPool = pool.pools().get(0);
+		final var admission = pool.admission();
+		admission.failed(0);
+		advanceMillis(100);
+		final var rotation = nicPool.nextConnectPathIndex();
+		assertFalse(nicPool.servesNow());
+		waitFor(() -> nicPool.idleCount() == 1);
+		assertEquals(rotation, nicPool.nextConnectPathIndex(), "the query moves no rotation");
+
+		// The peer closes the pooled recovery connection: it no longer serves, and the next recovery
+		// connect takes the other Path.
+		waitFor(() -> a.accepted.size() == 1);
+		a.accepted.get(0).close();
+		waitFor(() -> {
+			final var unusedServes = nicPool.servesNow();
+			return b.accepted.size() == 1;
+		});
+		waitFor(() -> nicPool.idleCount() == 1);
+		assertTrue(nicPool.servesNow());
+
+		admission.failed(0);
+		assertEquals(0, nicPool.idleCount(), "a later failure while recovering drops the idle connections again");
+
+		advanceMillis(10_000);
+		assertFalse(nicPool.servesNow(), "starts a recovery connect");
+		pool.closeAdmission();
+		assertEquals(0, nicPool.pendingCount(), "closing admission settles the recovery connect");
 		assertFalse(nicPool.servesNow(), "a closed pool serves nothing");
 	}
 
@@ -572,7 +613,14 @@ class NicSetConnectionPoolTest {
 	}
 
 	private NicSetConnectionPool open(final int concurrency, final OpenNic... nics) {
+		return open(null, concurrency, nics);
+	}
+
+	private NicSetConnectionPool open(final Runnable recheck, final int concurrency, final OpenNic... nics) {
 		final var pool = new NicSetConnectionPool(template(), handler, now::get);
+		if (recheck != null) {
+			pool.recheckDispatchWith(recheck);
+		}
 		pool.open(List.of(nics), NicBinding.SOURCE_ADDRESS, CONNECT_TIMEOUT_MILLIS, concurrency);
 		resources.add(pool);
 		return pool;
