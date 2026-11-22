@@ -10,6 +10,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,6 +42,7 @@ class StopFailureStillClosesTest {
 	private final Config config = TestConfigBuilder.config();
 	private final MetricsManager metricsMgr = mock(MetricsManager.class);
 	private final List<LoadStep> slices = new ArrayList<>();
+	private final List<TestLoadStepClient> clients = new ArrayList<>();
 
 	@BeforeEach
 	void configure() {
@@ -50,9 +52,29 @@ class StopFailureStillClosesTest {
 		config.val("item-data-verify", false);
 	}
 
+	/**
+	 * Disarms the failures a test injected and closes each client it made. A client left registered
+	 * whose close throws an InterruptedException fails the {@code DaemonBase.closeAll()} of a later test
+	 * class in the same JVM.
+	 */
 	@AfterEach
-	void clearInterrupt() {
+	void closeClients() throws Exception {
 		Thread.interrupted();
+		try {
+			for (var i = 0; i < slices.size(); i++) {
+				reset(slices.get(i));
+				stubName(slices.get(i), i);
+			}
+			for (final TestLoadStepClient client : clients) {
+				list(client, "itemTimingMetricsOutputFileAggregators").clear();
+				list(client, "operationLifecycleAggregators").clear();
+				list(client, "itemOutputFileAggregators").clear();
+				client.close();
+				assertTrue(client.isClosed(), "the test's client is closed after it");
+			}
+		} finally {
+			Thread.interrupted();
+		}
 	}
 
 	@Test
@@ -199,10 +221,10 @@ class StopFailureStillClosesTest {
 
 	private TestLoadStepClient clientWithThreeSlices() throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), metricsMgr);
+		clients.add(client);
 		for (var i = 0; i < 3; i++) {
 			final LoadStep slice = mock(LoadStep.class);
-			when(slice.loadStepId()).thenReturn("slice-" + i);
-			when(slice.toString()).thenReturn("slice-" + i);
+			stubName(slice, slices.size());
 			slices.add(slice);
 		}
 		list(client, "stepSlices").addAll(slices);
@@ -214,6 +236,12 @@ class StopFailureStillClosesTest {
 		started.setAccessible(true);
 		started.setInt(client, 3);
 		return client;
+	}
+
+	private static void stubName(final LoadStep slice, final int index) throws Exception {
+		final String name = "slice-" + index;
+		when(slice.loadStepId()).thenReturn(name);
+		when(slice.toString()).thenReturn(name);
 	}
 
 	@SuppressWarnings("unchecked")
