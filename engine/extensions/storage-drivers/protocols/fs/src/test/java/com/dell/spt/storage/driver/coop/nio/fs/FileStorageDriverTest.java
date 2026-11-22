@@ -455,6 +455,30 @@ public class FileStorageDriverTest {
 		}
 	}
 
+	// An empty source path is no source: the CREATE writes generated data instead of copying.
+	@Test
+	public void createWithAnEmptySrcPathWritesGeneratedData() throws Exception {
+		try (var drv = newDriver(false)) {
+			final String name = "create-empty-src-path.bin";
+			final long size = 4096;
+			final Path dstDir = tempDir.resolve("empty-src-dst");
+
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+
+			var op = newOp(OpType.CREATE, name, size, "", dstDir.toString());
+			assertTrue(drv.put(op));
+
+			Operation<DataItemImpl> res = out.await(5000);
+			assertNotNull(res);
+			assertEquals(Operation.Status.SUCC, res.status());
+			assertEquals(size, Files.size(dstDir.resolve(name)));
+
+			drv.stop();
+		}
+	}
+
 	@Test
 	public void createFromSrcCopiesContent() throws Exception {
 		final byte[] data = new byte[4096];
