@@ -11,6 +11,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
 func TestFailureLimitStopWarningRule(t *testing.T) {
@@ -350,4 +351,76 @@ func containsString(list []string, value string) bool {
 		}
 	}
 	return false
+}
+
+// A weighted step with one sub-load, fetched and masked the way spt replay fetches it: the base
+// document's failure limit is not the sub-load's, so the summary gives no failure-limit warning.
+// Before the fetch kept every document, the masked file held the base document only and the
+// summary warned from its limits (weighted-config-fetch-first-document 01).
+func TestOneSubLoadWeightedStepGetsNoFailureLimitWarning(t *testing.T) {
+	t.Parallel()
+
+	const stepID = "replay-001-20261121.100000.000-weighted"
+	const base = "---\nstorage:\n  auth:\n    uid: LOCALUID\n    secret: LOCALSECRET\nload:\n  op:\n    limit:\n      count: 1000\n      fail:\n        count: 5\n        rate: false\n  step:\n    id: \"" + stepID + "\"\n"
+	const subLoad = "---\nload:\n  op:\n    weight: 100\n    limit:\n      count: 10\n      fail:\n        count: 500\n"
+	const row = `"2026-11-21T10:00:10Z",CREATE,1,1,1,1,4,6,4096,0.5,0.5,8,8,0.01,0.01,100,10,50,90,120,200,100,10,50,90,120,200`
+	load := func(t *testing.T, config []byte) (*StepData, []string) {
+		t.Helper()
+		runDir := t.TempDir()
+		configName := stepID + "." + constants.ResultsArtifactSuffixConfig
+		metricsName := stepID + "." + constants.ResultsArtifactSuffixMetricsTotal
+		// The fetcher masks config.yaml with secretmask.YAML before the summary reads it.
+		if err := os.WriteFile(filepath.Join(runDir, configName), secretmask.YAML(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, metricsName), []byte(sampleMetricsCSV([]string{row})), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeManifest(t, runDir, &results.Manifest{
+			BaseURL: "http://example", OutputDir: runDir, GeneratedAt: time.Now().UTC(),
+			Steps: []results.StepManifest{{StepID: stepID, Files: []results.FileStatus{
+				{Name: metricsName, Status: fileStatusOK}, {Name: configName, Status: fileStatusOK},
+			}}},
+		})
+		writeParams(t, runDir, &RunParams{ExpectedStepIDs: []string{stepID}})
+		data, err := NewLoader().Load(context.Background(), runDir)
+		if err != nil || data == nil || data.Steps[stepID] == nil {
+			t.Fatalf("step not loaded: %v", err)
+		}
+		data.End = RunEndCompleted
+		summary, err := Aggregate(data)
+		if err != nil {
+			t.Fatalf("Aggregate: %v", err)
+		}
+		var warnings []string
+		for _, warning := range summary.Warnings {
+			if strings.Contains(warning, "failure limit") {
+				warnings = append(warnings, warning)
+			}
+		}
+		return data.Steps[stepID], warnings
+	}
+
+	t.Run("every document", func(t *testing.T) {
+		t.Parallel()
+		step, warnings := load(t, []byte(base+subLoad))
+		if step.Limits != nil {
+			t.Fatalf("limits = %+v, want nil", step.Limits)
+		}
+		if len(warnings) != 0 {
+			t.Fatalf("failure-limit warnings = %q, want none", warnings)
+		}
+	})
+	// The same step with the base document alone, as the truncated fetch left it, shows the
+	// warning the fix removes.
+	t.Run("base document only", func(t *testing.T) {
+		t.Parallel()
+		step, warnings := load(t, []byte(base))
+		if step.Limits == nil || step.Limits.FailCount != 5 {
+			t.Fatalf("limits = %+v, want FailCount 5", step.Limits)
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "load.op.limit.fail.count 5") {
+			t.Fatalf("failure-limit warnings = %q, want the base document's", warnings)
+		}
+	})
 }

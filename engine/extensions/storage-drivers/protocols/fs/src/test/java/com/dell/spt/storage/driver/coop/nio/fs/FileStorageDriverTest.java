@@ -9,8 +9,14 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,10 +25,12 @@ import org.junit.jupiter.api.Timeout;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -144,6 +152,250 @@ public class FileStorageDriverTest {
 			closed.await(15, TimeUnit.SECONDS);
 			drv.close();
 		}
+	}
+
+	/** A FIFO at {@code fifo}, or the test is skipped where there is no mkfifo or /proc. */
+	private static void mkfifoOrSkip(final Path fifo) throws InterruptedException {
+		assumeTrue(File.separatorChar == '/', "POSIX only");
+		assumeTrue(new File("/proc/self/fd").isDirectory(), "/proc/self/fd is not available");
+		final int mkfifo;
+		try {
+			mkfifo = new ProcessBuilder("mkfifo", fifo.toString()).inheritIO().start().waitFor();
+		} catch (final IOException e) {
+			assumeTrue(false, "mkfifo is not available: " + e);
+			return;
+		}
+		assumeTrue(mkfifo == 0 && Files.exists(fifo), "mkfifo failed");
+	}
+
+	/** How many descriptors of this process point at {@code path}. */
+	private static int descriptorsOn(final Path path) throws IOException {
+		final Path target = path.toRealPath();
+		final var fds = new File("/proc/self/fd").listFiles();
+		int n = 0;
+		if (fds != null) {
+			for (final var fd : fds) {
+				try {
+					if (Files.readSymbolicLink(fd.toPath()).equals(target)) {
+						n++;
+					}
+				} catch (final IOException ignore) {
+					// The descriptor closed while listing.
+				}
+			}
+		}
+		return n;
+	}
+
+	/** Waits until the operation has left ACTIVE and only the test's own descriptor is on the FIFO. */
+	private static void awaitSettled(final Operation<?> op, final Path fifo) throws IOException, InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while ((Operation.Status.ACTIVE.equals(op.status()) || descriptorsOn(fifo) != 1)
+						&& System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+	}
+
+	private static void awaitDispatched(
+					final FileStorageDriver<DataItemImpl, Operation<DataItemImpl>> drv, final Operation<DataItemImpl> op)
+					throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (drv.operationLifecycle().stateOf(op) != OperationLifecycleState.DISPATCHED
+						&& System.nanoTime() < deadline) {
+			Thread.sleep(1);
+		}
+		assertEquals(OperationLifecycleState.DISPATCHED, drv.operationLifecycle().stateOf(op));
+		// Give the worker time to enter the open that blocks.
+		Thread.sleep(200);
+	}
+
+	/** Collects the ERROR events of the errors logger. */
+	private static final class ErrorCapture extends AbstractAppender implements AutoCloseable {
+		private final org.apache.logging.log4j.core.Logger logger;
+		private final List<String> errors = Collections.synchronizedList(new ArrayList<>());
+		private static final String MARKER = "fsLateOpErrorCapture marker";
+		private final java.util.concurrent.CountDownLatch markerSeen = new java.util.concurrent.CountDownLatch(1);
+
+		ErrorCapture() {
+			super("fsLateOpErrorCapture", null, null, true, Property.EMPTY_ARRAY);
+			logger = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+			start();
+			logger.addAppender(this);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			if (MARKER.equals(event.getMessage().getFormattedMessage())) {
+				markerSeen.countDown();
+			} else if (event.getLevel().isMoreSpecificThan(Level.ERROR)) {
+				errors.add(event.getMessage().getFormattedMessage());
+			}
+		}
+
+		List<String> errors() throws InterruptedException {
+			// The loggers are asynchronous: a marker logged last arrives after every earlier event.
+			Loggers.ERR.warn(MARKER);
+			assertTrue(markerSeen.await(10, TimeUnit.SECONDS), "the capture marker was not logged");
+			synchronized (errors) {
+				return List.copyOf(errors);
+			}
+		}
+
+		@Override
+		public void close() {
+			logger.removeAppender(this);
+			stop();
+		}
+	}
+
+	/**
+	 * Starts {@code op} on the FIFO, stops and closes the driver while its worker is blocked in the
+	 * open, then lets the open go on (a FIFO opened read-write does not block on Linux) and checks
+	 * that the late operation leaves no descriptor of its own on the FIFO.
+	 */
+	private void lateOpenAfterTheClose(
+					final OpType type, final long size, final String srcPath, final String dstPath,
+					final boolean dedupable, final Operation.Status expectedStatus) throws Exception {
+		final Path fifo = tempDir.resolve("late.fifo");
+		mkfifoOrSkip(fifo);
+		final var input = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, dedupable);
+		final var drv = new FileStorageDriver<DataItemImpl, Operation<DataItemImpl>>(
+						"test-fs", input, baseCfg.configVal("storage"), false, baseCfg.intVal("load-batch-size"));
+		final var op = newOp(type, fifo.getFileName().toString(), size, srcPath, dstPath);
+		try {
+			drv.operationResultOutput(new CollectingOpOutput<>());
+			drv.start();
+			assertTrue(drv.put(op));
+			awaitDispatched(drv, op);
+			drv.operationLifecycle().resolveOutstandingAsUnresolved();
+			drv.stop();
+			drv.close();
+			assertTrue(drv.isClosed());
+		} finally {
+			// Never leave the worker blocked in the open: give the FIFO its other end.
+			try (var other = new RandomAccessFile(fifo.toFile(), "rw")) {
+				assertNotNull(other);
+				awaitSettled(op, fifo);
+				assertEquals(1, descriptorsOn(fifo), "only the test's own descriptor may stay on the FIFO");
+			}
+			drv.close();
+		}
+		assertEquals(expectedStatus, op.status());
+		final var lifecycle = drv.operationLifecycle().snapshot();
+		assertEquals(1, lifecycle.unresolved());
+		assertEquals(0, lifecycle.terminal());
+	}
+
+	@Test
+	@Timeout(60)
+	public void lateCreateOpenAfterTheCloseClosesItsFile() throws Exception {
+		lateOpenAfterTheClose(OpType.CREATE, 1024, null, tempDir.toString(), true, Operation.Status.INTERRUPTED);
+	}
+
+	@Test
+	@Timeout(60)
+	public void lateNonDedupableCreateOpenAfterTheCloseClosesItsFile() throws Exception {
+		lateOpenAfterTheClose(OpType.CREATE, 1024, null, tempDir.toString(), false, Operation.Status.INTERRUPTED);
+	}
+
+	@Test
+	@Timeout(60)
+	public void lateReadOpenAfterTheCloseClosesItsFile() throws Exception {
+		lateOpenAfterTheClose(OpType.READ, 1024, tempDir.toString(), null, true, Operation.Status.INTERRUPTED);
+	}
+
+	@Test
+	@Timeout(60)
+	public void lateUpdateOpenAfterTheCloseClosesItsFile() throws Exception {
+		lateOpenAfterTheClose(OpType.UPDATE, 1024, null, tempDir.toString(), true, Operation.Status.INTERRUPTED);
+	}
+
+	@Test
+	@Timeout(60)
+	public void lateCopyCreateOpenAfterTheCloseClosesItsFiles() throws Exception {
+		final Path srcDir = tempDir.resolve("src");
+		Files.createDirectories(srcDir);
+		Files.write(srcDir.resolve("late.fifo"), sourceBytes(1024, 3));
+		lateOpenAfterTheClose(OpType.CREATE, 1024, srcDir.toString(), tempDir.toString(), true, Operation.Status.INTERRUPTED);
+		assertEquals(0, descriptorsOn(srcDir.resolve("late.fifo")), "the source file must be closed");
+	}
+
+	@Test
+	@Timeout(60)
+	public void lateEmptyCreateOpenAfterTheCloseClosesItsFile() throws Exception {
+		lateOpenAfterTheClose(OpType.CREATE, 0, null, tempDir.toString(), true, Operation.Status.SUCC);
+	}
+
+	/**
+	 * The close sets CLOSED only after the driver's own close work, which closes the data input
+	 * first. A CREATE open that goes on in between finds the driver stopped and not yet closed: it
+	 * must still end as interrupted, with its file closed and no error logged.
+	 */
+	@Test
+	@Timeout(60)
+	public void lateCreateOpenInsideTheCloseLogsNoError() throws Exception {
+		final Path fifo = tempDir.resolve("late.fifo");
+		mkfifoOrSkip(fifo);
+		final var other = new AtomicReference<RandomAccessFile>();
+		final var opRef = new AtomicReference<Operation<DataItemImpl>>();
+		final var delegate = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false);
+		final DataInput releasingInput = new DataInput() {
+			@Override
+			public int getSize() {
+				return delegate.getSize();
+			}
+
+			@Override
+			public ByteBuffer getLayer(final int layerIndex) {
+				return delegate.getLayer(layerIndex);
+			}
+
+			@Override
+			public void close() throws IOException {
+				delegate.close();
+				// Let the blocked open go on now, and wait until its operation is done, so it ends
+				// while the driver is stopped and not yet closed.
+				if (other.get() == null) {
+					other.set(new RandomAccessFile(fifo.toFile(), "rw"));
+					try {
+						awaitSettled(opRef.get(), fifo);
+					} catch (final InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+				}
+			}
+		};
+		final var drv = new FileStorageDriver<DataItemImpl, Operation<DataItemImpl>>(
+						"test-fs", releasingInput, baseCfg.configVal("storage"), false, baseCfg.intVal("load-batch-size"));
+		final var op = newOp(OpType.CREATE, fifo.getFileName().toString(), 1024, null, tempDir.toString());
+		opRef.set(op);
+		try (var capture = new ErrorCapture()) {
+			try {
+				drv.operationResultOutput(new CollectingOpOutput<>());
+				drv.start();
+				assertTrue(drv.put(op));
+				awaitDispatched(drv, op);
+				drv.operationLifecycle().resolveOutstandingAsUnresolved();
+				drv.stop();
+				drv.close();
+				assertTrue(drv.isClosed());
+				assertNotNull(other.get(), "the close must have closed the data input");
+				assertEquals(1, descriptorsOn(fifo), "only the test's own descriptor may stay on the FIFO");
+			} finally {
+				// Never leave the worker blocked in the open: give the FIFO its other end.
+				if (other.get() == null) {
+					other.set(new RandomAccessFile(fifo.toFile(), "rw"));
+					awaitSettled(op, fifo);
+				}
+				other.get().close();
+				drv.close();
+			}
+			assertEquals(Operation.Status.INTERRUPTED, op.status());
+			assertEquals(List.of(), capture.errors());
+		}
+		final var lifecycle = drv.operationLifecycle().snapshot();
+		assertEquals(1, lifecycle.unresolved());
+		assertEquals(0, lifecycle.terminal());
 	}
 
 	@Test
