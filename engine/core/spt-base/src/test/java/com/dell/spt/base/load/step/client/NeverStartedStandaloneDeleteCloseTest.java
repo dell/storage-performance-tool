@@ -306,7 +306,9 @@ class NeverStartedStandaloneDeleteCloseTest {
 	private void assertNoVerdict() {
 		final List<String> budgetLines;
 		synchronized (messages) {
-			budgetLines = messages.stream().filter(message -> message.contains(BUDGET_LINE)).toList();
+			budgetLines = messages.stream()
+							.filter(message -> message.startsWith(stepId + ": ") && message.contains(BUDGET_LINE))
+							.toList();
 		}
 		assertEquals(List.of(), budgetLines);
 		verify(metricsMgr, never()).updateTerminalDeleteFailureOutcome(anyString(), anyString());
