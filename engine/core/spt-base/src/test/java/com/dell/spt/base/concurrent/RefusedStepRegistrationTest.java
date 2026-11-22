@@ -10,17 +10,24 @@ import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
 import com.dell.spt.base.load.step.linear.LinearLoadStepLocal;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.github.akurilov.confuse.Config;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Handler;
-import java.util.logging.LogRecord;
-import java.util.logging.Logger;
+import java.util.Collections;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 /** A step whose constructor refuses its configuration leaves nothing for the exit hook to close. */
@@ -61,49 +68,75 @@ class RefusedStepRegistrationTest {
 		return config;
 	}
 
-	/** Runs closeAll and returns what it logged about a step, leaving other daemons' records out. */
-	private static List<LogRecord> stepCloseFailures() {
-		final List<LogRecord> records = new ArrayList<>();
-		final Handler handler = new Handler() {
-			@Override
-			public void publish(final LogRecord record) {
-				records.add(record);
+	/**
+	 * Runs closeAll and returns the failures it logged about a step, leaving other daemons' records out. closeAll
+	 * logs them as warnings on the Errors logger, which lets them through meanwhile, whatever level an earlier test
+	 * in this JVM left it at.
+	 */
+	private static List<Throwable> stepCloseFailures() throws InterruptedException {
+		final var sentinel = new Throwable("closeAll test sentinel", null, false, false) {};
+		final var appender = new CloseFailureAppender(sentinel);
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+		try (var levels = LoggerLevels.atMost(Level.WARN, Loggers.ERR.getName())) {
+			logger.addAppender(appender);
+			try {
+				DaemonBase.closeAll();
+				// The engine's loggers are asynchronous but keep their order: what closeAll logged arrives first.
+				Loggers.ERR.warn("closeAll test sentinel", sentinel);
+				assertTrue(appender.awaitSentinel(), "the sentinel record never arrived");
+			} finally {
+				logger.removeAppender(appender);
+				appender.stop();
 			}
-
-			@Override
-			public void flush() {}
-
-			@Override
-			public void close() {}
-		};
-		final Logger logger = Logger.getLogger(DaemonBase.class.getSimpleName());
-		logger.addHandler(handler);
-		try {
-			DaemonBase.closeAll();
-		} finally {
-			logger.removeHandler(handler);
 		}
-		return records.stream()
+		return appender.failures().stream()
 						.filter(RefusedStepRegistrationTest::comesFromAStep)
 						.toList();
 	}
 
+	/** Collects the throwables of the Errors logger's warnings until the sentinel's record arrives. */
+	private static final class CloseFailureAppender extends AbstractAppender {
+		private final List<Throwable> failures = Collections.synchronizedList(new ArrayList<>());
+		private final CountDownLatch sentinelSeen = new CountDownLatch(1);
+		private final Throwable sentinel;
+
+		CloseFailureAppender(final Throwable sentinel) {
+			super("refused-step-close-capture", null, null, true, Property.EMPTY_ARRAY);
+			this.sentinel = sentinel;
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			final var thrown = event.getThrown();
+			if (thrown == sentinel) {
+				sentinelSeen.countDown();
+			} else if (thrown != null && sentinelSeen.getCount() > 0 && event.getLevel().isMoreSpecificThan(Level.WARN)) {
+				failures.add(thrown);
+			}
+		}
+
+		boolean awaitSentinel() throws InterruptedException {
+			return sentinelSeen.await(10, TimeUnit.SECONDS);
+		}
+
+		List<Throwable> failures() {
+			return List.copyOf(failures);
+		}
+	}
+
 	/**
-	 * Whether a record comes from closing a step, not another kind of daemon an earlier test class
+	 * Whether a failure comes from closing a step, not another kind of daemon an earlier test class
 	 * left registered. A step another class left open, whose close throws, would still show here.
 	 */
-	private static boolean comesFromAStep(final LogRecord record) {
-		final var thrown = record.getThrown();
-		if (thrown == null) {
-			return false;
-		}
+	private static boolean comesFromAStep(final Throwable thrown) {
 		final var stepPackage = LoadStepClientBase.class.getPackageName().replaceFirst("\\.client$", ".");
 		return Arrays.stream(thrown.getStackTrace())
 						.anyMatch(frame -> frame.getClassName().startsWith(stepPackage));
 	}
 
 	@Test
-	void aClientRefusedForItsIntegrityConfigurationThrowsNothingInCloseAll() {
+	void aClientRefusedForItsIntegrityConfigurationThrowsNothingInCloseAll() throws InterruptedException {
 		assertThrows(IntegrityTerminalException.class, () -> new Client(exactCountWithoutMode(), null));
 
 		assertFalse(stepRegistered());
@@ -154,7 +187,7 @@ class RefusedStepRegistrationTest {
 	}
 
 	@Test
-	void aFullyBuiltUnclosedStepIsStillClosedByCloseAll() {
+	void aFullyBuiltUnclosedStepIsStillClosedByCloseAll() throws InterruptedException {
 		final var step = new Client(TestConfigBuilder.config(), null);
 		assertTrue(DaemonBase.isRegistered(daemon -> daemon == step));
 
