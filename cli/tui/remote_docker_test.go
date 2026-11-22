@@ -838,7 +838,8 @@ func TestRemoteDocker_StartContainerInNodeMode_RdmaPassthrough(t *testing.T) {
 				t.Fatalf("expected a docker run command to be executed")
 			}
 			cmd := strings.Join(executed[len(executed)-1].Command, " ")
-			for _, s := range []string{constants.RdmaDevicePath, constants.RdmaCapIpcLock, constants.RdmaUlimitMemlock} {
+			for _, s := range []string{"--device " + constants.RdmaDevicePath, "--cap-add " + constants.RdmaCapIpcLock,
+				"--ulimit " + constants.RdmaUlimitMemlock} {
 				if strings.Contains(cmd, s) != tc.want {
 					t.Errorf("SPT_RDMA=%q: docker run contains %q = %v, want %v: %s", tc.rdma, s, !tc.want, tc.want, cmd)
 				}
