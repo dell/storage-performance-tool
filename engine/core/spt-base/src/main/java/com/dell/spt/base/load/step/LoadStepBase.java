@@ -84,6 +84,21 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					final List<Extension> extensions,
 					final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
+		this(config, extensions, ctxConfigs, metricsMgr, false);
+	}
+
+	/**
+	 * With {@code deferRegistration}, the subclass calls {@link #register()} as the last statement of
+	 * its constructor, so a signal while its fields are still unset does not close it half-built.
+	 * Otherwise this constructor registers the step at its end.
+	 */
+	protected LoadStepBase(
+					final Config config,
+					final List<Extension> extensions,
+					final List<Config> ctxConfigs,
+					final MetricsManager metricsMgr,
+					final boolean deferRegistration) {
+		super(true);
 		try {
 			final var buildInfo = EngineBuildInfoProvider.global();
 			this.config = buildInfo.copyWithProjectedVersion(config);
@@ -116,9 +131,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
 			Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
 		} catch (final RuntimeException | Error e) {
-			// DaemonBase() has registered this object: the exit hook must not close a half-built step.
+			// A subclass's registration must not follow: the exit hook must not close a half-built step.
 			abandonRegistration();
 			throw e;
+		}
+		if (!deferRegistration) {
+			register();
 		}
 	}
 

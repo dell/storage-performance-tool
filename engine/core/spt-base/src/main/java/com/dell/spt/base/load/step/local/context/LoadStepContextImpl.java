@@ -371,6 +371,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final String immutableListRootPrefix,
 					final Config explicitItemConfig,
 					final DeleteArtifactRecorderFactory deleteArtifactRecorderFactory) {
+		// Registered at the end, once its fields are set: a constructor that throws leaves nothing registered.
+		super(true);
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
@@ -544,6 +546,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			throw failure;
 		}
 		warnIfSizeLimitCannotStop(configSizeLimit.get(), standaloneDelete.enabled());
+		register();
 	}
 
 	/**
