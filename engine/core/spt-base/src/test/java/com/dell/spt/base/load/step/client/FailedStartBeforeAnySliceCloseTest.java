@@ -12,6 +12,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -23,6 +25,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -34,6 +37,7 @@ import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.github.akurilov.confuse.Config;
 import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -41,9 +45,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
@@ -71,9 +79,13 @@ class FailedStartBeforeAnySliceCloseTest {
 
 	private static final String RMI_HOSTNAME = "java.rmi.server.hostname";
 	private static final long WAIT_SECONDS = 30;
+	// What the step's own loggers write in its folder, a failed start's messages among them.
+	private static final Set<String> STEP_LOGS = Set.of("messages.log", "errors.log");
 
 	private final String stepId = "failed-start-close-" + UUID.randomUUID();
 	private final MetricsManager metricsMgr = mock(MetricsManager.class);
+	private final List<String> itemOutputHandedToTheStep = new CopyOnWriteArrayList<>();
+	private MetricsContext<AllMetricsSnapshot> stepMetrics;
 	@TempDir
 	Path tempDir;
 	private Path stepDir;
@@ -174,15 +186,20 @@ class FailedStartBeforeAnySliceCloseTest {
 		assertNothingPublished();
 	}
 
-	@Test
-	void aMetadataReadWhoseItemsFileIsNotCanonicalClosesCleanly() throws Exception {
-		final Path items = Files.writeString(tempDir.resolve("items.csv"), "not,a,canonical,manifest\n");
+	@ParameterizedTest(name = "items={0}")
+	@ValueSource(strings = {"not,a,canonical,manifest\n", ""
+	})
+	void aMetadataReadWhoseItemsFileIsNotCanonicalOrEmptyClosesCleanly(final String items) throws Exception {
+		// An external manifest has no completion record to check: the items scatter refuses the file.
 		final Config config = readConfig();
-		config.val("item-input-file", items.toString());
+		config.val("storage-integrity-input-provenance", "external");
+		config.val("item-input-file", Files.writeString(tempDir.resolve("items.csv"), items).toString());
 
 		final TestLoadStepClient client = metadataClient(config, entryFactory(mock(LoadStep.class)), OpType.READ);
 
-		assertStartFails(client, "integrity input is not committed by the expected producer");
+		final Throwable failure = assertStartFails(client, "failed to parse or scatter canonical integrity input");
+		assertTrue(causes(failure).contains("strict item scatter requires a canonical integrity manifest input"),
+						() -> causes(failure));
 		assertClosesCleanlyTwice(client);
 		assertNothingPublished();
 	}
@@ -219,6 +236,72 @@ class FailedStartBeforeAnySliceCloseTest {
 		assertNothingPublished();
 	}
 
+	@ParameterizedTest(name = "{0}")
+	@ValueSource(strings = {"create", "list"
+	})
+	void aMetadataStepWithItemOutputWhoseEntrySliceFailsToStartPublishesNoManifest(final String opType)
+					throws Exception {
+		final LoadStep entry = mock(LoadStep.class);
+		when(entry.runId()).thenReturn(7L);
+		doAnswer(call -> {
+			throw new IllegalStateException("the entry slice did not start");
+		}).when(entry).start();
+		final Config config = baseConfig();
+		config.val("load-op-type", opType);
+		final Path itemOutput = tempDir.resolve("items.csv");
+		config.val("item-output-file", itemOutput.toString());
+		final OpType type = OpType.valueOf(opType.toUpperCase(Locale.ROOT));
+		final TestLoadStepClient client = metadataClient(config, entryFactory(entry), type);
+
+		assertThrows(Throwable.class, client::start);
+		Thread.interrupted();
+
+		verify(entry).start();
+		assertClosesCleanlyTwice(client);
+		assertNothingPublished();
+		assertFalse(Files.exists(itemOutput), "the step published " + itemOutput);
+		for (final Path published : CsvArtifactAggregator.publishedPaths(itemOutput.toString(), 1, type)) {
+			assertFalse(Files.exists(published), "the step published " + published);
+		}
+	}
+
+	@Test
+	void aMetadataStepWhoseInitFailsClosesCleanly() throws Exception {
+		// As a weighted step whose second context's item.data.size is invalid: its init() fails after
+		// the first context's metrics exist.
+		final Config config = createConfig();
+		final TestLoadStepClient client = metadataClient(config, entryFactory(mock(LoadStep.class)), initClient -> {
+			initClient.addMetricsContextForTest(metricsWithoutFinalSnapshot(OpType.CREATE));
+			throw new IllegalArgumentException("invalid item.data.size of the second context");
+		});
+
+		assertStartFails(client, "invalid item.data.size of the second context");
+
+		assertClosesCleanlyTwice(client);
+		assertNothingPublished();
+	}
+
+	@Test
+	void aMetadataStepRefusedByItsStepIdCheckAfterInitClosesCleanly() throws Exception {
+		// An auto-generated step id is checked only after init(): an earlier step published this item output.
+		final Config config = createConfig();
+		config.val("load-step-idAutoGenerated", true);
+		final Path itemOutput = tempDir.resolve("items.csv");
+		config.val("item-output-file", itemOutput.toString());
+		final Path earlier = CsvArtifactAggregator.publishedPaths(itemOutput.toString(), 1, OpType.CREATE).get(0);
+		Files.writeString(earlier, "earlier step\n");
+		final LoadStepFactory<LoadStep, ?> entryFactory = entryFactory(mock(LoadStep.class));
+		final TestLoadStepClient client = metadataClient(config, entryFactory, OpType.CREATE);
+
+		assertStartFails(client, "item output file is already published");
+
+		verify(entryFactory, never()).createLocal(any(), anyList(), anyList(), any());
+		assertClosesCleanlyTwice(client);
+		assertNothingPublished();
+		assertEquals("earlier step\n", Files.readString(earlier));
+		assertFalse(Files.exists(itemOutput), "the step published " + itemOutput);
+	}
+
 	@Test
 	void theExitHooksCloseLogsNoFailureAfterAStartThatFailedBeforeAnySlice() throws Exception {
 		final FailedStartClient client = deleteClient(deleteConfig(true, false));
@@ -246,8 +329,9 @@ class FailedStartBeforeAnySliceCloseTest {
 		System.setProperty(RMI_HOSTNAME, "127.0.0.1");
 		final Config config = createConfig();
 		config.val("load-step-node-addrs", new ArrayList<>(List.of(nodeAddr)));
+		final FileManager worker = workerFiles();
 		final TestLoadStepClient client = metadataClient(config, entryFactory(entry), OpType.CREATE)
-						.withNodeFileManagers(Map.of(nodeAddr, workerFiles()));
+						.withNodeFileManagers(Map.of(nodeAddr, worker));
 
 		assertThrows(Throwable.class, client::start);
 		Thread.interrupted();
@@ -257,6 +341,7 @@ class FailedStartBeforeAnySliceCloseTest {
 		assertTrue(failure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
 						failure.getMessage());
 		assertFalse(client.isClosed());
+		closeOnceTheCountsAndLifecycleFilesArrive(client, worker);
 	}
 
 	@Test
@@ -272,13 +357,44 @@ class FailedStartBeforeAnySliceCloseTest {
 		assertTrue(failure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
 						failure.getMessage());
 		assertFalse(client.isClosed());
+		closeOnceTheCountsAndLifecycleFilesArrive(client);
 	}
 
-	private void assertStartFails(final TestLoadStepClient client, final String message) {
+	/**
+	 * Gives a step that failed closed its final counts and every slice's lifecycle file, empty, so
+	 * its next close succeeds, and the exit's closeAll finds no step of this test left.
+	 */
+	private void closeOnceTheCountsAndLifecycleFilesArrive(final TestLoadStepClient client, final FileManager... workers)
+					throws Exception {
+		when(stepMetrics.lastSnapshot()).thenReturn(mock(AllMetricsSnapshot.class, RETURNS_DEEP_STUBS));
+		final byte[] header = (OperationLifecycleArtifact.HEADER + "\n").getBytes(StandardCharsets.UTF_8);
+		final Path entryLifecycle = Path.of(
+						FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), stepId)).toAbsolutePath();
+		Files.createDirectories(entryLifecycle.getParent());
+		Files.write(entryLifecycle, header);
+		for (final FileManager worker : workers) {
+			when(worker.readFromFile(eq("/w/" + Loggers.OPERATION_LIFECYCLE.getName()), anyLong()))
+							.thenAnswer(call -> (long) call.getArgument(1) == 0 ? header : new byte[0]);
+		}
+
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+	}
+
+	private Throwable assertStartFails(final TestLoadStepClient client, final String message) {
 		final Throwable failure = assertThrows(Throwable.class, client::start);
 		Thread.interrupted();
 		assertFalse(failure instanceof InterruptedException, failure::toString);
 		assertTrue(String.valueOf(failure.getMessage()).contains(message), failure::toString);
+		return failure;
+	}
+
+	private static String causes(final Throwable failure) {
+		final var causes = new StringBuilder();
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			causes.append(cause).append('\n');
+		}
+		return causes.toString();
 	}
 
 	private static void assertClosesCleanlyTwice(final TestLoadStepClient client) {
@@ -295,15 +411,20 @@ class FailedStartBeforeAnySliceCloseTest {
 		assertTrue(client.isClosed(), "the run's close failed");
 	}
 
-	/** No slice file was collected or published, and no DELETE verdict was given. */
+	/**
+	 * No step file but the step's own logs is in its folder, no item output was handed on, and no
+	 * DELETE verdict was given.
+	 */
 	private void assertNothingPublished() throws Exception {
 		verify(metricsMgr, never()).updateTerminalDeleteFailureOutcome(anyString(), anyString());
+		assertEquals(List.of(), itemOutputHandedToTheStep, "item output handed to the step");
 		if (!Files.isDirectory(stepDir)) {
 			return;
 		}
 		try (Stream<Path> files = Files.list(stepDir)) {
 			assertEquals(List.of(), files.map(file -> file.getFileName().toString())
-							.filter(name -> name.contains(".node-") || name.startsWith("delete."))
+							.filter(name -> !STEP_LOGS.contains(name))
+							.sorted()
 							.toList());
 		}
 	}
@@ -316,14 +437,33 @@ class FailedStartBeforeAnySliceCloseTest {
 
 	private TestLoadStepClient metadataClient(
 					final Config config, final LoadStepFactory<LoadStep, ?> entryFactory, final OpType opType) {
+		final TestLoadStepClient client = metadataClient(config, entryFactory, initClient -> {});
+		stepMetrics = metricsWithoutFinalSnapshot(opType);
+		client.addMetricsContextForTest(stepMetrics);
+		return client;
+	}
+
+	/** A metadata-mode client whose init() runs {@code init}, and which records the item output handed to it. */
+	private TestLoadStepClient metadataClient(
+					final Config config, final LoadStepFactory<LoadStep, ?> entryFactory,
+					final Consumer<TestLoadStepClient> init) {
 		config.val("run-id", 7L);
 		config.val("storage-driver-type", "s3");
 		config.val("storage-integrity-mode", "metadata");
 		final List<Extension> extensions = new ArrayList<>(extensions());
 		extensions.add(0, entryFactory);
-		final TestLoadStepClient client = new TestLoadStepClient(config, extensions, null, metricsMgr);
-		client.addMetricsContextForTest(metricsWithoutFinalSnapshot(opType));
-		return client;
+		return new TestLoadStepClient(config, extensions, null, metricsMgr) {
+			@Override
+			protected void init() {
+				super.init();
+				init.accept(this);
+			}
+
+			@Override
+			protected void itemOutputCollected(final String itemOutputFile, final Map<OpType, Long> successCounts) {
+				itemOutputHandedToTheStep.add(itemOutputFile);
+			}
+		};
 	}
 
 	/** A mock s3 driver factory: a metadata-mode step needs one at its start. */

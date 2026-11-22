@@ -54,8 +54,9 @@ import org.mockito.MockedStatic;
 /**
  * A start that ends as a stop publishes the slice files of the slices whose start returned, and
  * nothing when none did: a slice refused at JVM exit, never reached, or cut partway through its
- * start is left out. A start that fails after a slice started still needs every started slice's
- * files; one that fails before any slice's start returned publishes nothing, as a stopped one.
+ * start is left out. A start that fails after a slice started still needs every slice's files, the
+ * failed slice's and those never reached among them; one that fails before any slice's start
+ * returned publishes nothing, as a stopped one.
  */
 class StoppedStartSliceArtifactsTest {
 
