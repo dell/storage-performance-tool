@@ -122,6 +122,10 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 					collected.add(collect(nodeIndex, remoteNames.get(k), ARTIFACT_NAMES.get(k)));
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
+					if (CollectionInterrupt.isInterrupt(e)) {
+						// Not a missing file: stop at once, reading no later file or node.
+						throw e;
+					}
 					if (sliceCount > 1) {
 						Loggers.ERR.warn(
 										"{}: failed to collect {} from node-{}: {}",

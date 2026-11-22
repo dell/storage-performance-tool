@@ -20,6 +20,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.apache.commons.csv.CSVFormat;
@@ -152,6 +153,10 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 				nodeSources.add(nodePath);
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
+				if (CollectionInterrupt.isInterrupt(e)) {
+					// Not a missing node: stop at once, reading no later slice.
+					throw e;
+				}
 				final String node = String.format(Locale.ROOT, "node-%03d", i);
 				missingNodes.add(node);
 				if (sliceCount > 1) {
@@ -231,7 +236,9 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 
 	/**
 	 * Fetches a remote node's file into a temporary file beside {@code target}, created at the first
-	 * chunk, and moves it to {@code target} only when complete, so a failed fetch leaves no file.
+	 * chunk, and moves it to {@code target} only when complete, so a failed fetch leaves no file. The
+	 * temporary file gets the default permissions of a new file, as {@code target} had when it was
+	 * written in place, not those of {@link Files#createTempFile}, which is owner-only.
 	 */
 	private static void copyRemoteSource(
 					final FileManager fileManager, final String remoteName, final Path target) throws IOException {
@@ -245,8 +252,8 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 						break;
 					}
 					if (staging[0] == null) {
-						staging[0] = Files.createTempFile(
-										target.toAbsolutePath().getParent(), "." + target.getFileName() + ".", ".fetching");
+						staging[0] = Files.createFile(target.toAbsolutePath().resolveSibling(
+										"." + target.getFileName() + "." + UUID.randomUUID() + ".fetching"));
 					}
 					Files.write(staging[0], bytes, StandardOpenOption.APPEND);
 					offset += bytes.length;

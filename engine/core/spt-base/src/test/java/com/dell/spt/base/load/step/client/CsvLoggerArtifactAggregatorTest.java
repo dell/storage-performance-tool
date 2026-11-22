@@ -7,10 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -20,24 +22,19 @@ import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.load.step.file.FileManager;
-import com.dell.spt.base.logging.Loggers;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.file.Path;
-import java.util.ArrayList;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.apache.commons.csv.CSVFormat;
-import org.apache.logging.log4j.Level;
-import org.apache.logging.log4j.core.LogEvent;
-import org.apache.logging.log4j.core.LoggerContext;
-import org.apache.logging.log4j.core.appender.AbstractAppender;
-import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -331,7 +328,7 @@ class CsvLoggerArtifactAggregatorTest {
 		when(lost.readFromFile(remoteName(1), 0)).thenThrow(new LostNodeFileManager.NotCollected());
 		final FileManager missing = remote(3);
 		when(missing.readFromFile(remoteName(3), 0)).thenThrow(new NoSuchFileException(remoteName(3)));
-		final var warnings = new WarningCapture();
+		final var warnings = new CollectionWarnings();
 		final var aggregator = aggregator(entry(canonical), lost, healthy(2), missing);
 
 		final IntegrityTerminalException failure;
@@ -416,6 +413,128 @@ class CsvLoggerArtifactAggregatorTest {
 
 		assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, aggregator::close));
 		verify(later, never()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void anInterruptedFileReadStopsTheCollectionAtOnce() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager interrupted = remote(1);
+		when(interrupted.readFromFile(remoteName(1), 0)).thenThrow(new ClosedByInterruptException());
+		final FileManager later = healthy(2);
+		final var warnings = new CollectionWarnings();
+		final var aggregator = aggregator(entry(canonical), interrupted, later);
+
+		final IntegrityTerminalException failure;
+		try (warnings) {
+			failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+			warnings.flush(stepId);
+		}
+
+		assertEquals("failed to aggregate " + ARTIFACT, failure.getMessage());
+		assertInstanceOf(ClosedByInterruptException.class, failure.getCause().getCause());
+		assertEquals(List.of(), warnings.lines(stepId), "an interrupt was taken for a missing node");
+		verify(later, never()).readFromFile(anyString(), anyLong());
+		assertFalse(Files.exists(canonical));
+	}
+
+	@Test
+	void anInterruptFlagStopsTheCollectionAtOnce() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager interrupted = remote(1);
+		when(interrupted.readFromFile(remoteName(1), 0)).thenAnswer(invocation -> {
+			Thread.currentThread().interrupt();
+			throw new IOException("connection reset");
+		});
+		final FileManager later = healthy(2);
+		final var warnings = new CollectionWarnings();
+		final var aggregator = aggregator(entry(canonical), interrupted, later);
+
+		final IntegrityTerminalException failure;
+		try (warnings) {
+			try {
+				failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+				assertTrue(Thread.currentThread().isInterrupted(), "the interrupt flag was cleared");
+			} finally {
+				Thread.interrupted();
+			}
+			warnings.flush(stepId);
+		}
+
+		assertEquals("failed to aggregate " + ARTIFACT, failure.getMessage());
+		assertEquals(List.of(), warnings.lines(stepId), "an interrupt was taken for a missing node");
+		verify(later, never()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void anInterruptFlagSetBeforeTheCloseBlamesNoNode() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager w1 = healthy(1);
+		final FileManager w2 = healthy(2);
+		final var warnings = new CollectionWarnings();
+		final var aggregator = aggregator(entry(canonical), w1, w2);
+
+		final IntegrityTerminalException failure;
+		try (warnings) {
+			Thread.currentThread().interrupt();
+			try {
+				failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+				assertTrue(Thread.currentThread().isInterrupted(), "the interrupt flag was cleared");
+			} finally {
+				Thread.interrupted();
+			}
+			warnings.flush(stepId);
+		}
+
+		assertEquals("failed to aggregate " + ARTIFACT, failure.getMessage());
+		assertEquals(List.of(), warnings.lines(stepId), "healthy nodes were blamed for an interrupt");
+		verify(w2, never()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void aNonIoFailureOfAWorkersReadCountsAsThatNodeMissing() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager broken = remote(1);
+		when(broken.readFromFile(remoteName(1), 0)).thenThrow(new IllegalStateException("not an I/O failure"));
+		final var aggregator = aggregator(entry(canonical), broken, healthy(2));
+
+		final var failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+
+		assertEquals("failed to aggregate " + ARTIFACT + ": not published, missing node-001; collected the other 2 of 3",
+						failure.getMessage());
+		assertEquals("failed to fetch remote logger artifact " + remoteName(1), failure.getCause().getMessage());
+		assertInstanceOf(IllegalStateException.class, failure.getCause().getCause());
+		assertNodeFiles(canonical, "w0", null, "w2");
+		assertEquals(List.of(nodeName(0), nodeName(2)), files());
+	}
+
+	@Test
+	void aSingleSlicesMissingFileLogsNoWarning() throws Exception {
+		final Path canonical = tempDir.resolve(ARTIFACT);
+		final var warnings = new CollectionWarnings();
+
+		try (warnings) {
+			assertThrows(IntegrityTerminalException.class, aggregator(entry(canonical))::close);
+			warnings.flush(stepId);
+		}
+
+		assertEquals(List.of(), warnings.lines(stepId));
+	}
+
+	@Test
+	void aWorkersCopyGetsTheDefaultPermissionsOfANewFile() throws Exception {
+		assumeTrue(Files.getFileStore(tempDir).supportsFileAttributeView(PosixFileAttributeView.class));
+		final Set<PosixFilePermission> fresh = Files.getPosixFilePermissions(Files.createFile(tempDir.resolve("fresh")));
+		Files.delete(tempDir.resolve("fresh"));
+		assumeTrue(fresh.contains(PosixFilePermission.GROUP_READ) || fresh.contains(PosixFilePermission.OTHERS_READ),
+						"the umask makes every new file owner-only");
+		final Path canonical = entryFile("w0");
+		final FileManager w1 = healthy(1);
+
+		aggregator(entry(canonical), w1, healthy(2)).close();
+
+		assertEquals(fresh, Files.getPosixFilePermissions(nodePath(1)));
+		assertEquals(fresh, Files.getPosixFilePermissions(nodePath(2)));
+		verify(w1, times(2)).readFromFile(anyString(), anyLong());
 	}
 
 	@Test
@@ -512,54 +631,6 @@ class CsvLoggerArtifactAggregatorTest {
 	private List<String> files() throws IOException {
 		try (Stream<Path> files = Files.list(tempDir)) {
 			return files.map(file -> file.getFileName().toString()).sorted().toList();
-		}
-	}
-
-	/** The WARN lines of the errors logger while it is open; the engine's loggers are asynchronous. */
-	private static final class WarningCapture extends AbstractAppender implements AutoCloseable {
-		private final List<String> messages = new CopyOnWriteArrayList<>();
-		private final org.apache.logging.log4j.core.Logger errors = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
-		private final Level level = errors.getLevel();
-
-		WarningCapture() {
-			super("missingSliceWarnings", null, null, true, Property.EMPTY_ARRAY);
-			start();
-			errors.addAppender(this);
-			errors.setLevel(Level.WARN);
-		}
-
-		@Override
-		public void append(final LogEvent event) {
-			if (Level.WARN.equals(event.getLevel())) {
-				messages.add(event.getMessage().getFormattedMessage());
-			}
-		}
-
-		void await(final String... parts) throws InterruptedException {
-			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-			for (final String part : parts) {
-				while (messages.stream().noneMatch(message -> message.contains(part))) {
-					assertTrue(System.nanoTime() < deadline, "no warning with " + part + " in " + messages);
-					Thread.sleep(5);
-				}
-			}
-		}
-
-		List<String> lines(final String stepId) {
-			final List<String> lines = new ArrayList<>();
-			for (final String message : messages) {
-				if (message.startsWith(stepId + ": ")) {
-					lines.add(message);
-				}
-			}
-			return lines;
-		}
-
-		@Override
-		public void close() {
-			errors.removeAppender(this);
-			errors.setLevel(level);
-			stop();
 		}
 	}
 }
