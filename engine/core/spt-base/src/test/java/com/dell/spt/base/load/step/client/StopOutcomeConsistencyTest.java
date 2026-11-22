@@ -290,6 +290,8 @@ class StopOutcomeConsistencyTest {
 		final MetricsAggregator aggregator = mock(MetricsAggregator.class);
 		doAnswer(invocation -> {
 			if (stops.incrementAndGet() == 1) {
+				// Let the monitor's first probe end, so the stop does not defer its output to that probe.
+				awaitFailureBudgetSnapshotProbeCount(0);
 				Thread.currentThread().interrupt();
 			}
 			return null;

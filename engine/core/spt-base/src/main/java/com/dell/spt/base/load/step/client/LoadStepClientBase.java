@@ -3611,6 +3611,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		if (recordDurationPhaseResult("stop", result)) {
 			// As a slice stop that throws it: the stop ends before its output.
 			durationSliceStopInterrupted = true;
+			// The exception carries the stop request, so the flag the phase restored is cleared, as in normal mode.
+			Thread.interrupted();
 			throwUnchecked(new InterruptedException(loadStepId() + ": stopped while stopping the step slices"));
 		}
 	}
