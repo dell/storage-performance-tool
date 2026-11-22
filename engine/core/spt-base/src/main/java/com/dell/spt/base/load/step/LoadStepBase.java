@@ -78,12 +78,30 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private volatile long startTimeSec = -1;
 	private volatile Throwable runFailure;
 	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
+	// Set when a start reaches this step: one stopped or closed before it never ran.
+	private volatile boolean startReached;
 
 	protected LoadStepBase(
 					final Config config,
 					final List<Extension> extensions,
 					final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
+		this(config, extensions, ctxConfigs, metricsMgr, false);
+	}
+
+	/**
+	 * With {@code deferRegistration}, the subclass calls {@link #registerForCloseAll()} as the last
+	 * statement of its constructor, so a signal while its fields are still unset does not close it
+	 * half-built.
+	 * Otherwise this constructor registers the step at its end.
+	 */
+	protected LoadStepBase(
+					final Config config,
+					final List<Extension> extensions,
+					final List<Config> ctxConfigs,
+					final MetricsManager metricsMgr,
+					final boolean deferRegistration) {
+		super(true);
 		try {
 			final var buildInfo = EngineBuildInfoProvider.global();
 			this.config = buildInfo.copyWithProjectedVersion(config);
@@ -116,9 +134,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
 			Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
 		} catch (final RuntimeException | Error e) {
-			// DaemonBase() has registered this object: the exit hook must not close a half-built step.
+			// A subclass's registration must not follow: the exit hook must not close a half-built step.
 			abandonRegistration();
 			throw e;
+		}
+		if (!deferRegistration) {
+			registerForCloseAll();
 		}
 	}
 
@@ -406,6 +427,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void onStartRefusedAtJvmExit() {}
 
 	/**
+	 * Whether a start reached this step. An entry that a stop cut between creating a slice and
+	 * starting it stops and closes that slice without it.
+	 */
+	protected final boolean startReached() {
+		return startReached;
+	}
+
+	/**
 	 * The shutdown hook ends the running step without stopping the scenario, which reaches its next
 	 * step here. Ending as a stop, this step touches neither the target nor a result directory.
 	 */
@@ -419,6 +448,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStart() throws IllegalStateException {
 
+		startReached = true;
 		refuseStartAtJvmExit();
 		try {
 			startStep();

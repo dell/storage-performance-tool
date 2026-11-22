@@ -235,10 +235,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
+	// The thread running the await's own stop, which the run's close follows; null otherwise.
+	private volatile Thread awaitStopThread;
+	// Set by a duration slice stop that a stop request interrupted, which leaves the timing files open.
+	private boolean durationSliceStopInterrupted;
 	// Of this start: how many slices, in slice order, returned from their start() (used for stopped-start
 	// artifact publishing and lost-slice gating), and whether the start ended as a stop.
 	private volatile int startedSliceCount;
 	private volatile boolean startStopped;
+	// Whether this start created a slice and never called its start(): it ended between the two.
+	private volatile boolean createdSliceUnreached;
+	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
+	private volatile boolean startEntered;
 
 	static int activeFailureBudgetSnapshotFlightCount() {
 		return FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS
@@ -256,17 +264,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	public LoadStepClientBase(
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
-		super(config, extensions, ctxConfigs, metricsMgr);
+		super(config, extensions, ctxConfigs, metricsMgr, true);
 		try {
 			this.failureBudgetController = standaloneDeleteEnabled()
 							? new ObjectFailureBudgetController(
 											ObjectFailureBudgetConfig.from(this.config.configVal("load")))
 							: null;
 		} catch (final RuntimeException | Error e) {
-			// The base constructor finished, so this object is registered; a subclass's fields are not set.
 			abandonRegistration();
 			throw e;
 		}
+		// Only now, with this class's fields set, may the exit hook close this client.
+		registerForCloseAll();
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {
@@ -361,8 +370,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throws IllegalArgumentException {
 		// Reset where a start really begins: a restart the base class refuses (at JVM exit) keeps the
 		// count of the start before it, so its close still publishes that start's slices.
+		startEntered = true;
 		startedSliceCount = 0;
 		startStopped = false;
+		createdSliceUnreached = false;
 		stepSliceNodeAddrs.clear();
 		slicesClosing = false;
 		resetDurationLifecycleForStart();
@@ -722,6 +733,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
 			failureBudgetMetricsOutputDeferred = false;
+			durationSliceStopInterrupted = false;
 			durationStopFailure = null;
 			durationAdmissionBarrierSatisfied = false;
 			durationCleanupRetryPending = false;
@@ -1426,6 +1438,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final boolean validateRunId = IntegrityConfig.fromStorage(config.configVal("storage")).enabled();
 		final long expectedRunId = runId();
 		for (var i = 0; i < sliceCount; i++) {
+			checkStartStopped("stopped before starting step slice " + i);
 			final var configSlice = configSlices.get(i);
 			final LoadStep stepSlice;
 			if (i == 0) {
@@ -1443,13 +1456,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			stepSliceNodeAddrs.add(i == 0 ? null : nodeAddrs.get(i - 1));
 			stepSlices.add(stepSlice);
+			createdSliceUnreached = true;
+			checkStartStopped("stopped after resolving step slice " + i);
+			// A stop during either node call: the slice is closed unstarted, and an armed one fenced.
 			if (validateRunId) {
 				requireMatchingRunId(stepSlice, expectedRunId);
+				checkStartStopped("stopped while checking the run id of step slice " + i);
 			}
 			if (barrier != null) {
 				barrier.arm(i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1), stepSlice);
+				checkStartStopped("stopped while preparing step slice " + i);
 			}
 			try {
+				createdSliceUnreached = false;
 				stepSlice.start();
 				startedSliceCount = i + 1;
 			} catch (final Exception e) {
@@ -1471,6 +1490,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				// One engine missing would leave a lower load reported as the one asked for.
 				throw sliceStartFailure(e, i, sliceCount);
 			}
+			checkStartStopped("stopped while starting step slice " + i);
+		}
+	}
+
+	private void checkStartStopped(final String detail) {
+		if (Thread.currentThread().isInterrupted() || JvmExit.begun()) {
+			throwUnchecked(new InterruptedException(loadStepId() + ": " + detail));
 		}
 	}
 
@@ -2469,7 +2495,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		stepSlices.stream().filter(s -> s != null && !isLostSlice(s)).parallel().forEach(stepSlice -> {
 			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				stepSlice.shutdown();
-			} catch (final RemoteException e) {
+			} catch (final RemoteException | RuntimeException e) {
+				// A local slice rethrows its context's shutdown failure, as a drain or driver shutdown that throws:
+				// the other slices still shut down, and the step's stop and close still run.
 				if (!isLostSlice(stepSlice)) {
 					LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the step service {}", loadStepId(), stepSlice);
 				}
@@ -2502,7 +2530,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final List<LoadStep> activeSlices = stepSlices.stream()
 						.filter(slice -> slice != null)
 						.collect(Collectors.toList());
-		if (activeSlices.isEmpty()) {
+		if (activeSlices.isEmpty() || !hasStartedStandaloneDeleteWork()) {
 			durationAdmissionBarrierSatisfied = true;
 			return;
 		}
@@ -2829,7 +2857,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		if (standaloneDeletePreValidationEnabled() && standaloneDeletePostVerificationEnabled()) {
 			shutdown();
 		}
-		doStop();
+		stopBeforeClose(this::doStop);
 	}
 
 	/**
@@ -3118,12 +3146,30 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		collector.close();
 	}
 
+	/**
+	 * Whether this client has standalone DELETE work to judge: a slice started, or a failure is held.
+	 * A client that never started a slice, as an engine prototype built from a base configuration with
+	 * {@code load-op-delete-standalone} or a step refused, stopped or failed before its first slice
+	 * started, has none, and its stop and close give no failure-budget verdict. Slices held without a
+	 * start, as tests add them, are judged.
+	 */
+	private boolean hasStartedStandaloneDeleteWork() {
+		if (failureBudgetFailure != null || durationValidityFailure != null || startedSliceCount > 0) {
+			return true;
+		}
+		return !startEntered && !startStopped && !stepSlices.isEmpty();
+	}
+
 	private synchronized IntegrityTerminalException finalizeFailureBudget() {
 		if (failureBudgetController == null) {
 			return null;
 		}
 		if (failureBudgetFinalized) {
 			return failureBudgetTerminalFailure;
+		}
+		// After the finalized check, so a failure already given stays sticky at a later close.
+		if (!hasStartedStandaloneDeleteWork()) {
+			return null;
 		}
 		final ObjectFailureBudgetDecision terminalDecision;
 		try {
@@ -3258,7 +3304,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			awaitFailure = failure;
 		} finally {
 			Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
-			stop();
+			stopBeforeClose(this::stop);
 		}
 		if (awaitFailure != null) {
 			if (durationValidityFailure != null && durationValidityFailure != awaitFailure) {
@@ -3488,44 +3534,143 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private void stopUnderLock() {
 		metricsFetchLosesSlices = false;
 		final var stoppedAtOnce = disarmLostSliceStop();
+		// Each stage runs whatever an earlier one threw, so the stop's metrics output, its last stage, is
+		// written; the first failure is thrown at the end, with any later ones suppressed under it.
+		final var failures = new StopFailures();
+		// The await's stop has the run's close after it, which writes the output with the final outcome;
+		// a stop that throws skips the close it runs in, so its output cannot wait for that close.
+		final boolean closeFollows = awaitStopThread == Thread.currentThread();
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
-				relayBucketVersioningNoticesAtStop();
-				publishFailedOutcomeBeforeIncompleteDurationMetricsOutput();
-				super.doStop();
+				failures.run(this::relayBucketVersioningNoticesAtStop);
+				if (durationSliceStopInterrupted) {
+					// The interrupted stop left them open: they are written with the rest of the output.
+					durationSliceStopInterrupted = false;
+					failures.run(this::closeItemTimingMetricsOutputFileAggregators);
+				}
+				failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
+				failures.run(super::doStop);
+				failures.throwFirst();
 				return;
 			}
-			final List<LoadStep> activeSlices = stepSlices.stream()
-							.filter(slice -> slice != null)
-							.collect(Collectors.toList());
-			final var result = invokeStepSlicePhase(
-							activeSlices,
-							stepSlice -> {
-								try (final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
-												KEY_CLASS_NAME, getClass().getSimpleName())) {
-									stepSlice.stop();
-								}
-							},
-							durationStopPhaseDeadlineNanos(),
-							"spt-delete-step-stop-");
-			if (recordDurationPhaseResult("stop", result)) {
-				Thread.currentThread().interrupt();
-			}
+			failures.run(this::stopDurationSlices);
 		} else {
-			// Each slice that no stop at once reached stops now, without waiting for a stop at once that a
-			// slow drain holds up; a slice stopped at once, the entry's own among them, is not stopped again.
-			stepSlices.stream()
-							.filter(s -> s != null && !stoppedAtOnce.containsKey(s))
-							.parallel()
-							.forEach(this::stopSlice);
-			// A stop at once that failed before it was sent, as at a slow loadStepId call, is sent now, once
-			// its thread has ended, so the two never overlap. After an interrupt, the close's stop does it.
-			if (awaitStopsAtOnce(stoppedAtOnce.values())) {
-				takeUnsentStopsAtOnce().parallelStream().forEach(this::stopSlice);
-			}
+			failures.run(() -> stopSlicesAtStop(stoppedAtOnce));
 		}
-		relayBucketVersioningNoticesAtStop();
+		if (failures.first() instanceof InterruptedException) {
+			// An interrupted slice stop ends the stop here, as before: the stages below expect stopped
+			// slices, and the close's stop runs them once the slices have stopped.
+			failures.throwFirst();
+		}
+		failures.run(this::relayBucketVersioningNoticesAtStop);
+		failures.run(this::stopMetricsAggregator);
+		failures.run(this::closeItemTimingMetricsOutputFileAggregators);
+		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
+			if (failures.first() == null || closeFollows) {
+				// The close finalizes the outcome once the live probe ends, and writes the output then.
+				failureBudgetMetricsOutputDeferred = true;
+				failures.throwFirst();
+				return;
+			}
+			// The outcome cannot wait for the live probe: it is final as failed, so a later close keeps it.
+			final Throwable cause = failures.first();
+			failures.run(() -> finalizeFailedFailureBudgetAtStop(cause));
+			failureBudgetMetricsOutputDeferred = false;
+			failures.run(super::doStop);
+			failures.throwFirst();
+			return;
+		}
+		failures.run(this::finalizeFailureBudgetBeforeMetricsOutput);
+		if (!failureBudgetFinalizedOrAbsent()) {
+			// The finalize failed, as when a stop request interrupts its counter capture: the outcome is
+			// still running, and the output never carries that.
+			if (closeFollows) {
+				// The close's stop finalizes the outcome and writes the output.
+				failures.throwFirst();
+				return;
+			}
+			final Throwable cause = failures.first();
+			failures.run(() -> finalizeFailedFailureBudgetAtStop(cause));
+		}
+		// Written here, the output is not written again by a close that an earlier stop deferred it to.
+		failureBudgetMetricsOutputDeferred = false;
+		failures.run(super::doStop);
+		failures.throwFirst();
+	}
+
+	/**
+	 * Runs the await's own stop, with the run's close after it: a stop that cannot finalize the
+	 * failure-budget outcome then leaves the outcome and the output to that close.
+	 */
+	private void stopBeforeClose(final Runnable stop) {
+		awaitStopThread = Thread.currentThread();
+		try {
+			stop.run();
+		} finally {
+			awaitStopThread = null;
+		}
+	}
+
+	private synchronized boolean failureBudgetFinalizedOrAbsent() {
+		return failureBudgetController == null || failureBudgetFinalized || !hasStartedStandaloneDeleteWork();
+	}
+
+	/**
+	 * Makes the outcome final as failed at a stop that writes the output without the terminal
+	 * counters, so that a later close reports that outcome and fails the run, not a clean one.
+	 */
+	private synchronized void finalizeFailedFailureBudgetAtStop(final Throwable cause) {
+		if (failureBudgetController == null || failureBudgetFinalized || !hasStartedStandaloneDeleteWork()) {
+			return;
+		}
+		failureBudgetTerminalFailure = appendTerminalFailure(
+						appendExistingFailure(failureBudgetFailure, durationValidityFailure),
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE stop failed before its terminal failed-object counters were captured",
+						cause instanceof InterruptedException ? null : cause);
+		failureBudgetFinalized = true;
+		publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
+	}
+
+	private void stopDurationSlices() {
+		final List<LoadStep> activeSlices = stepSlices.stream()
+						.filter(slice -> slice != null)
+						.collect(Collectors.toList());
+		final var result = invokeStepSlicePhase(
+						activeSlices,
+						stepSlice -> {
+							try (final var logCtx = put(KEY_STEP_ID, stepSlice.loadStepId()).put(
+											KEY_CLASS_NAME, getClass().getSimpleName())) {
+								stepSlice.stop();
+							}
+						},
+						durationStopPhaseDeadlineNanos(),
+						"spt-delete-step-stop-");
+		if (recordDurationPhaseResult("stop", result)) {
+			// As a slice stop that throws it: the stop ends before its output.
+			durationSliceStopInterrupted = true;
+			// The exception carries the stop request, so the flag the phase restored is cleared, as in normal mode.
+			Thread.interrupted();
+			throwUnchecked(new InterruptedException(loadStepId() + ": stopped while stopping the step slices"));
+		}
+	}
+
+	private void stopSlicesAtStop(final IdentityHashMap<LoadStep, Thread> stoppedAtOnce) {
+		// Each slice that no stop at once reached stops now, without waiting for a stop at once that a
+		// slow drain holds up; a slice stopped at once, the entry's own among them, is not stopped again.
+		stepSlices.stream()
+						.filter(s -> s != null && !stoppedAtOnce.containsKey(s))
+						.parallel()
+						.forEach(this::stopSlice);
+		// A stop at once that failed before it was sent, as at a slow loadStepId call, is sent now, once
+		// its thread has ended, so the two never overlap. After an interrupt, the close's stop does it.
+		if (awaitStopsAtOnce(stoppedAtOnce.values())) {
+			takeUnsentStopsAtOnce().parallelStream().forEach(this::stopSlice);
+		}
+	}
+
+	private void stopMetricsAggregator() {
 		if (null != metricsAggregator) {
 			try {
 				metricsAggregator.stop();
@@ -3538,9 +3683,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								loadStepId());
 			}
 		}
+	}
+
+	private void closeItemTimingMetricsOutputFileAggregators() {
+		final int timingSlicesStarted = startedSliceCount;
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {
-				itemMetricsOutputFileAggregator.close();
+				if (startStopped && itemMetricsOutputFileAggregator instanceof ItemTimingMetricOutputFileAggregator timingAggregator) {
+					timingAggregator.closeAfterStoppedStart(timingSlicesStarted);
+				} else {
+					itemMetricsOutputFileAggregator.close();
+				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				LogUtil.exception(Level.WARN, e, "{}: failed to close the item metrics output file aggregator \"{}\"",
@@ -3549,12 +3702,45 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		});
 		itemTimingMetricsOutputFileAggregators.clear();
 		timingMetricsStepIds.clear();
-		if (deferMetricsOutputForActiveFailureBudgetProbe()) {
-			failureBudgetMetricsOutputDeferred = true;
-			return;
+	}
+
+	/**
+	 * The failures of one stop: the first is thrown at its end, with each later one suppressed under it,
+	 * never under itself. A stop request suppressed under another failure sets the interrupt flag again,
+	 * so the caller still sees it.
+	 */
+	static final class StopFailures {
+
+		private Throwable first;
+		private boolean interrupted;
+
+		/** Runs one stage of the stop, whatever an earlier stage threw. */
+		void run(final Runnable stage) {
+			try {
+				stage.run();
+			} catch (final Throwable e) {
+				interrupted |= e instanceof InterruptedException;
+				if (first == null) {
+					first = e;
+				} else if (first != e) {
+					first.addSuppressed(e);
+				}
+			}
 		}
-		finalizeFailureBudgetBeforeMetricsOutput();
-		super.doStop();
+
+		Throwable first() {
+			return first;
+		}
+
+		void throwFirst() {
+			if (first == null) {
+				return;
+			}
+			if (interrupted && !(first instanceof InterruptedException)) {
+				Thread.currentThread().interrupt();
+			}
+			throwUnchecked(first);
+		}
 	}
 
 	/**
@@ -3595,7 +3781,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void publishFailedOutcomeBeforeIncompleteDurationMetricsOutput() {
-		if (failureBudgetController != null) {
+		if (failureBudgetController != null && hasStartedStandaloneDeleteWork()) {
 			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
 		}
 	}
@@ -3711,6 +3897,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				durationStopFailure = null;
 				durationAdmissionBarrierSatisfied = false;
 				standaloneDeleteStopCoordinated = false;
+			} else if (!hasStartedStandaloneDeleteWork()) {
+				// No slice started, so no operation admission is open to close.
+				durationAdmissionBarrierSatisfied = true;
 			} else if (durationStopFailure != null || !durationAdmissionBarrierSatisfied) {
 				durationCleanupRetryPending = true;
 				if (durationStopFailure == null) {
@@ -3749,7 +3938,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			durationStopFailure = null;
 			boolean durationSlicesClosed = true;
 			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
-			if (integrityModeEnabled()) {
+			if (integrityModeEnabled() && (!startStopped || startedSliceCount > 0)) {
 				try {
 					terminalFailureCountsByOpType = terminalFailureCounts(metricsContexts);
 				} catch (final Throwable cause) {
@@ -3877,7 +4066,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
 			for (final var aggregator : operationLifecycleAggregators) {
 				try {
-					closeSliceLoggerArtifact(aggregator, slicesStarted);
+					closeOperationLifecycleArtifact(aggregator, slicesStarted);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					terminalCause = appendTerminalFailure(terminalCause,
@@ -3952,6 +4141,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						} else {
 							csvAggregator.close(failedOperationCount);
 						}
+					} else if (startStopped && itemOutputFileAggregator instanceof ItemOutputFileAggregator itemAggregator) {
+						itemAggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						itemOutputFileAggregator.close();
 					}
@@ -3974,7 +4165,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			itemOutputFileAggregators.clear();
-			if (itemOutputCollected) {
+			if (itemOutputCollected && (!startStopped || slicesStarted > 0)) {
 				try {
 					itemOutputCollected(config.stringVal("item-output-file"), successCounts);
 				} catch (final Exception e) {
@@ -3984,7 +4175,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var opTraceLogFileAggregator : opTraceLogFileAggregators) {
 				try {
-					opTraceLogFileAggregator.close();
+					if (startStopped && opTraceLogFileAggregator instanceof OpTraceLogFileAggregator traceAggregator) {
+						traceAggregator.closeAfterStoppedStart(slicesStarted);
+					} else {
+						opTraceLogFileAggregator.close();
+					}
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.WARN, e,
@@ -4043,6 +4238,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
 			aggregator.close();
+		}
+	}
+
+	/**
+	 * Publishes the operation lifecycle file as {@link #closeSliceLoggerArtifact} does. A slice that no
+	 * start reached writes none, so after a start that failed between creating a slice and starting
+	 * it, the file is collected from the slices started before it, as after a stopped start.
+	 */
+	private void closeOperationLifecycleArtifact(final AutoCloseable aggregator, final int slicesStarted)
+					throws Exception {
+		if (!startStopped && createdSliceUnreached && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+			sliceArtifact.closeAfterStoppedStart(slicesStarted);
+		} else {
+			closeSliceLoggerArtifact(aggregator, slicesStarted);
 		}
 	}
 

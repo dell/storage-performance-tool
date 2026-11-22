@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.rmi.RemoteException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -30,44 +31,49 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
 
 public class OpTraceLogFileAggregator implements Closeable {
 
 	private final String loadStepId;
-	private final Map<FileManager, String> opTraceLogFileSlices;
+	private final int sliceCount;
+	private final List<Map.Entry<FileManager, String>> remoteSlicesByIndex;
 
 	public OpTraceLogFileAggregator(final String loadStepId, final List<FileManager> fileMgrs) {
 		this.loadStepId = loadStepId;
-		this.opTraceLogFileSlices = fileMgrs.stream()
-						// exclude local I/O trace log file
-						.filter(fileMgr -> fileMgr instanceof FileManagerService)
-						.collect(
-										Collectors.toMap(
-														Function.identity(),
-														fileMgr -> {
-															String ioTraceLogFileSliceName = null;
-															try {
-																ioTraceLogFileSliceName = fileMgr.logFileName(Loggers.OP_TRACES.getName(), loadStepId);
-																Loggers.MSG.debug(
-																				"{}: the remote file manager \"{}\" returned the file name \"{}\" for the I/O traces",
-																				loadStepId,
-																				fileMgr,
-																				ioTraceLogFileSliceName);
-															} catch (final IOException e) {
-																LogUtil.exception(
-																				Level.WARN,
-																				e,
-																				"{}: failed to get the remote log file name",
-																				loadStepId);
-															}
-															return ioTraceLogFileSliceName;
-														}));
+		this.sliceCount = fileMgrs.size();
+		// One entry per remote slice, in slice order; the local trace log of slice 0 is left out.
+		this.remoteSlicesByIndex = new ArrayList<>(Math.max(0, sliceCount - 1));
+		for (var i = 1; i < sliceCount; i++) {
+			final var fileMgr = fileMgrs.get(i);
+			if (!(fileMgr instanceof FileManagerService)) {
+				remoteSlicesByIndex.add(null);
+				continue;
+			}
+			String ioTraceLogFileSliceName = null;
+			try {
+				ioTraceLogFileSliceName = fileMgr.logFileName(Loggers.OP_TRACES.getName(), loadStepId);
+				Loggers.MSG.debug(
+								"{}: the remote file manager \"{}\" returned the file name \"{}\" for the I/O traces",
+								loadStepId,
+								fileMgr,
+								ioTraceLogFileSliceName);
+			} catch (final IOException e) {
+				LogUtil.exception(
+								Level.WARN,
+								e,
+								"{}: failed to get the remote log file name",
+								loadStepId);
+			}
+			remoteSlicesByIndex.add(ioTraceLogFileSliceName == null ? null : Map.entry(fileMgr, ioTraceLogFileSliceName));
+		}
 	}
 
 	public final void collectToLocal() {
+		collectToLocal(remoteSlicesByIndex);
+	}
+
+	private void collectToLocal(final List<Map.Entry<FileManager, String>> remoteSlices) {
 
 		final LongAdder byteCounter = new LongAdder();
 		final ScheduledExecutorService executor = Executors.newScheduledThreadPool(
@@ -77,11 +83,10 @@ public class OpTraceLogFileAggregator implements Closeable {
 		final Future<?> transferTask = executor.submit(
 						() -> {
 							try {
-								opTraceLogFileSlices
-												.entrySet()
+								remoteSlices
 												.parallelStream()
 												// don't transfer the local file data
-												.filter(entry -> entry.getKey() instanceof FileManagerService)
+												.filter(entry -> entry != null && entry.getKey() instanceof FileManagerService)
 												.forEach(
 																entry -> {
 																	final var fileMgr = entry.getKey();
@@ -185,8 +190,25 @@ public class OpTraceLogFileAggregator implements Closeable {
 	@Override
 	public final void close() {
 		try (final Instance logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			collectToLocal();
+			collectToLocal(remoteSlicesByIndex);
 		}
-		opTraceLogFileSlices.clear();
+		remoteSlicesByIndex.clear();
+	}
+
+	/** Collects remote operation traces only from the first {@code startedSlices} slices whose start returned. */
+	void closeAfterStoppedStart(final int startedSlices) {
+		if (startedSlices < 0 || startedSlices > sliceCount) {
+			throw new IllegalArgumentException(
+							"started slices " + startedSlices + " not in 0.." + sliceCount);
+		}
+		try (final Instance logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+			// A close repeated after the first emptied the list collects nothing again.
+			final int remoteStarted = Math.min(startedSlices - 1, remoteSlicesByIndex.size());
+			if (remoteStarted > 0) {
+				collectToLocal(remoteSlicesByIndex.subList(0, remoteStarted));
+			}
+		} finally {
+			remoteSlicesByIndex.clear();
+		}
 	}
 }

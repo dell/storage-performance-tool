@@ -184,7 +184,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 					final List<Extension> extensions,
 					final List<Config> contextConfigs,
 					final MetricsManager metricsManager) {
-		super(baseConfig, extensions, contextConfigs, metricsManager);
+		super(baseConfig, extensions, contextConfigs, metricsManager, true);
+		// Only now, with this class's fields set, may the exit hook close this step.
+		registerForCloseAll();
 	}
 
 	@Override
@@ -249,7 +251,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						reconciled);
 	}
 
-	/** A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at close. */
+	/**
+	 * A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at
+	 * close. Neither does one whose start never reached it, as when a stop cut the entry's start
+	 * after the slice was created.
+	 */
 	@Override
 	protected final void onStartRefusedAtJvmExit() {
 		startRefused = true;
@@ -1271,7 +1277,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * warns; they are evidence, not a step outcome.
 	 */
 	private void publishNicPaths() {
-		if (nicPathsPublished || startRefused) {
+		if (nicPathsPublished || publishesNothing()) {
 			return;
 		}
 		nicPathsPublished = true;
@@ -1333,6 +1339,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
+	/** Refused, or no start reached it: neither the start nor its wrapped part, which sets the worker id. */
+	private boolean publishesNothing() {
+		return startRefused || (!startReached() && operationLifecycleWorkerId == null);
+	}
+
 	private boolean publishesOperationLifecycle() {
 		final String operation = config.stringVal("load-op-type");
 		return "create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation);
@@ -1365,7 +1376,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void publishOperationLifecycle() {
-		if (operationLifecyclePublished || startRefused || !publishesOperationLifecycle()) {
+		if (operationLifecyclePublished || publishesNothing() || !publishesOperationLifecycle()) {
 			return;
 		}
 		final var counters = new ArrayList<OperationLifecycleCounters>();
