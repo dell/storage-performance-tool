@@ -1426,6 +1426,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final boolean validateRunId = IntegrityConfig.fromStorage(config.configVal("storage")).enabled();
 		final long expectedRunId = runId();
 		for (var i = 0; i < sliceCount; i++) {
+			checkStartStopped("stopped before starting step slice " + i);
 			final var configSlice = configSlices.get(i);
 			final LoadStep stepSlice;
 			if (i == 0) {
@@ -1443,6 +1444,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			stepSliceNodeAddrs.add(i == 0 ? null : nodeAddrs.get(i - 1));
 			stepSlices.add(stepSlice);
+			checkStartStopped("stopped after resolving step slice " + i);
 			if (validateRunId) {
 				requireMatchingRunId(stepSlice, expectedRunId);
 			}
@@ -1471,6 +1473,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				// One engine missing would leave a lower load reported as the one asked for.
 				throw sliceStartFailure(e, i, sliceCount);
 			}
+			checkStartStopped("stopped while starting step slice " + i);
+		}
+	}
+
+	private void checkStartStopped(final String detail) {
+		if (Thread.currentThread().isInterrupted() || JvmExit.begun()) {
+			throwUnchecked(new InterruptedException(loadStepId() + ": " + detail));
 		}
 	}
 
@@ -3538,9 +3547,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								loadStepId());
 			}
 		}
+		final int timingSlicesStarted = startedSliceCount;
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {
-				itemMetricsOutputFileAggregator.close();
+				if (startStopped && itemMetricsOutputFileAggregator instanceof ItemTimingMetricOutputFileAggregator timingAggregator) {
+					timingAggregator.closeAfterStoppedStart(timingSlicesStarted);
+				} else {
+					itemMetricsOutputFileAggregator.close();
+				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				LogUtil.exception(Level.WARN, e, "{}: failed to close the item metrics output file aggregator \"{}\"",
@@ -3749,7 +3763,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			durationStopFailure = null;
 			boolean durationSlicesClosed = true;
 			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
-			if (integrityModeEnabled()) {
+			if (integrityModeEnabled() && (!startStopped || startedSliceCount > 0)) {
 				try {
 					terminalFailureCountsByOpType = terminalFailureCounts(metricsContexts);
 				} catch (final Throwable cause) {
@@ -3952,6 +3966,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						} else {
 							csvAggregator.close(failedOperationCount);
 						}
+					} else if (startStopped && itemOutputFileAggregator instanceof ItemOutputFileAggregator itemAggregator) {
+						itemAggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						itemOutputFileAggregator.close();
 					}
@@ -3974,7 +3990,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			itemOutputFileAggregators.clear();
-			if (itemOutputCollected) {
+			if (itemOutputCollected && (!startStopped || slicesStarted > 0)) {
 				try {
 					itemOutputCollected(config.stringVal("item-output-file"), successCounts);
 				} catch (final Exception e) {
@@ -3984,7 +4000,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var opTraceLogFileAggregator : opTraceLogFileAggregators) {
 				try {
-					opTraceLogFileAggregator.close();
+					if (startStopped && opTraceLogFileAggregator instanceof OpTraceLogFileAggregator traceAggregator) {
+						traceAggregator.closeAfterStoppedStart(slicesStarted);
+					} else {
+						opTraceLogFileAggregator.close();
+					}
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.WARN, e,

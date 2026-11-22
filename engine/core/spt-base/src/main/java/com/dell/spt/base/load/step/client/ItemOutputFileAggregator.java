@@ -19,7 +19,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -41,7 +41,8 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 
 	private final String loadStepId;
 	private final String itemOutputFile;
-	private final Map<FileManager, String> itemOutputFileSlices;
+	private final int sliceCount;
+	private final List<Map.Entry<FileManager, String>> remoteSlicesByIndex;
 	private final long readRetryDelayMillis;
 
 	public ItemOutputFileAggregator(
@@ -61,8 +62,8 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 		this.loadStepId = loadStepId;
 		this.itemOutputFile = itemOutputFile;
 		this.readRetryDelayMillis = readRetryDelayMillis;
-		final var sliceCount = fileMgrs.size();
-		this.itemOutputFileSlices = new HashMap<>(sliceCount);
+		this.sliceCount = fileMgrs.size();
+		this.remoteSlicesByIndex = new ArrayList<>(Math.max(0, sliceCount - 1));
 		for (var i = 0; i < sliceCount; i++) {
 			final var fileMgr = fileMgrs.get(i);
 			if (i == 0) {
@@ -74,11 +75,12 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 					try {
 						final var remoteItemOutputFileName = fileMgr.newTmpFileName();
 						configSlices.get(i).val("item-output-file", remoteItemOutputFileName);
-						itemOutputFileSlices.put(fileMgr, remoteItemOutputFileName);
+						remoteSlicesByIndex.add(Map.entry(fileMgr, remoteItemOutputFileName));
 						Loggers.MSG.debug(
 										"\"{}\": new tmp item output file \"{}\"", fileMgr, remoteItemOutputFileName);
 					} catch (final Exception e) {
 						throwUncheckedIfInterrupted(e);
+						remoteSlicesByIndex.add(null);
 						LogUtil.exception(
 										Level.ERROR,
 										e,
@@ -95,13 +97,28 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 	@Override
 	public final void close() {
 		try {
-			collectToLocal();
+			collectToLocal(remoteSlicesByIndex);
 		} finally {
-			itemOutputFileSlices.clear();
+			remoteSlicesByIndex.clear();
 		}
 	}
 
-	private void collectToLocal() {
+	/** Collects remote item output only from the first {@code startedSlices} slices whose start returned. */
+	void closeAfterStoppedStart(final int startedSlices) {
+		if (startedSlices < 0 || startedSlices > sliceCount) {
+			throw new IllegalArgumentException(
+							"started slices " + startedSlices + " not in 0.." + sliceCount);
+		}
+		try {
+			if (startedSlices > 1) {
+				collectToLocal(remoteSlicesByIndex.subList(0, startedSlices - 1));
+			}
+		} finally {
+			remoteSlicesByIndex.clear();
+		}
+	}
+
+	private void collectToLocal(final List<Map.Entry<FileManager, String>> remoteSlices) {
 		final var byteCounter = new LongAdder();
 		final var executor = Executors.newScheduledThreadPool(
 						2, new LogContextThreadFactory("collectItemOutputFileWorker", true));
@@ -112,11 +129,10 @@ public final class ItemOutputFileAggregator implements AutoCloseable {
 						() -> {
 							try (final var localItemOutput = Files.newOutputStream(itemOutputPath, FileManager.appendOpenOptions())) {
 								final Lock localItemOutputLock = new ReentrantLock();
-								itemOutputFileSlices
-												.entrySet()
+								remoteSlices
 												.parallelStream()
 												// don't transfer & delete local item output file
-												.filter(entry -> entry.getKey() instanceof FileManagerService)
+												.filter(entry -> entry != null && entry.getKey() instanceof FileManagerService)
 												.forEach(
 																entry -> {
 																	final var fileMgr = entry.getKey();
