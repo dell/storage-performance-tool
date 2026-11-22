@@ -355,12 +355,12 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 			op.status(writeFailStatusOf(op, e));
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (!isClosed() && !isStopped()) { // shared content source may be already closed from the load generator
+			if (!isStopped() && !isClosed()) { // shared content source may be already closed from the load generator
 				LogUtil.trace(Loggers.ERR, Level.ERROR, e, "File I/O invocation failure");
 				op.status(Operation.Status.FAIL_UNKNOWN);
 			} else {
 				op.status(Operation.Status.INTERRUPTED);
-				Loggers.ERR.debug("Load operation caused a failure while being interrupted: {}", op);
+				Loggers.ERR.debug("Load operation caused a failure while being interrupted: {}", op, e);
 			}
 		}
 

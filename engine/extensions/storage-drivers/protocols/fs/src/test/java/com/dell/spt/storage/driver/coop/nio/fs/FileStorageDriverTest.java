@@ -9,7 +9,6 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
-import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -214,6 +213,8 @@ public class FileStorageDriverTest {
 	private static final class ErrorCapture extends AbstractAppender implements AutoCloseable {
 		private final org.apache.logging.log4j.core.Logger logger;
 		private final List<String> errors = Collections.synchronizedList(new ArrayList<>());
+		private static final String MARKER = "fsLateOpErrorCapture marker";
+		private final java.util.concurrent.CountDownLatch markerSeen = new java.util.concurrent.CountDownLatch(1);
 
 		ErrorCapture() {
 			super("fsLateOpErrorCapture", null, null, true, Property.EMPTY_ARRAY);
@@ -224,13 +225,17 @@ public class FileStorageDriverTest {
 
 		@Override
 		public void append(final LogEvent event) {
-			if (event.getLevel().isMoreSpecificThan(Level.ERROR)) {
+			if (MARKER.equals(event.getMessage().getFormattedMessage())) {
+				markerSeen.countDown();
+			} else if (event.getLevel().isMoreSpecificThan(Level.ERROR)) {
 				errors.add(event.getMessage().getFormattedMessage());
 			}
 		}
 
-		List<String> errors() {
-			LogUtil.flushAll();
+		List<String> errors() throws InterruptedException {
+			// The loggers are asynchronous: a marker logged last arrives after every earlier event.
+			Loggers.ERR.warn(MARKER);
+			assertTrue(markerSeen.await(10, TimeUnit.SECONDS), "the capture marker was not logged");
 			synchronized (errors) {
 				return List.copyOf(errors);
 			}
