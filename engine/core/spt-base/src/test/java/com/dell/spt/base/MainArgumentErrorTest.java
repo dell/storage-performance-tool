@@ -11,6 +11,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.config.CliArgumentException;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.load.step.ScriptEngineNotInstalledException;
+import com.dell.spt.base.load.step.client.LoggerLevels;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.io.ByteArrayOutputStream;
@@ -21,6 +23,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,6 +39,24 @@ import org.junit.jupiter.params.provider.ValueSource;
  * bad one; the engine stops without using it, so the tests do not check that nothing was applied.
  */
 class MainArgumentErrorTest {
+
+	/**
+	 * The root and Messages loggers at INFO for each test, and their own levels back after it: applying the
+	 * arguments sets both to the shipped log level.
+	 */
+	private LoggerLevels levels;
+
+	@BeforeEach
+	void setLevelsToInfo() {
+		levels = LoggerLevels.set(Map.of(LogManager.ROOT_LOGGER_NAME, Level.INFO, Loggers.MSG.getName(), Level.INFO));
+	}
+
+	@AfterEach
+	void restoreLevels() {
+		if (levels != null) {
+			levels.close();
+		}
+	}
 
 	/** The shipped base schema with the shipped defaults, as {@code Main} loads them before the arguments. */
 	private static Config shippedDefaults() throws Exception {
