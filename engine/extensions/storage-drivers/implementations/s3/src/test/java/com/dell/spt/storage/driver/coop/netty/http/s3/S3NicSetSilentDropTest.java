@@ -87,8 +87,8 @@ final class S3NicSetSilentDropTest {
 		assumeTrue(Epoll.isAvailable());
 		assumeTrue(NicSetLoopback.dropsSynsOnAFullAcceptQueue(), "this host answers a SYN to a full accept queue");
 		final var run = runUploadsThroughAFault();
-		// With no part on the silent NIC at the fault, nothing may fail there before the revive.
-		final var firstDeadFailure = Math.min(run.firstFailureOnDeadNic(), run.reviveAt);
+		final var firstDeadFailure = run.firstFailureOnDeadNic();
+		assertTrue(firstDeadFailure < run.reviveAt, "the dead NIC's requests failed before the revive");
 		assertEquals(List.of(), run.startedOnDeadNic(firstDeadFailure, run.reviveAt),
 						"no part starts on the silent NIC between its first failures and the revive");
 		// The uploads whose parts were in flight at the fault fail together; on the base the trial's part
@@ -183,13 +183,15 @@ final class S3NicSetSilentDropTest {
 		}
 	}
 
-	/** Keeps 4 uploads active through the fault; the results are the uploads' requests, not the uploads. */
+	/** Keeps 4 uploads active through the fault; the results are every request of the uploads. */
 	private static Run runUploadsThroughAFault() throws Exception {
 		try (var stub = new NicSetLoopback()) {
 			final var endpoints = stub.listeners(2);
 			try (var proxy = new SilentProxy(port(endpoints.get(1)))) {
 				final var deadNode = "127.0.0.1:" + proxy.port();
 				final var root = NicSetLoopback.root(List.of(endpoints.get(0), deadNode), nics(2), 8);
+				// 4 uploads active at once, as on SC26; by default 8 threads and 5 parts give 2.
+				root.val("storage-driver-limit-multipart-objects", 4);
 				try (var driver = NicSetLoopback.driver(root.configVal("storage"), false)) {
 					final var run = NicSetLoopback.started(driver);
 					final List<Result> results = new ArrayList<>();
@@ -205,9 +207,9 @@ final class S3NicSetSilentDropTest {
 					while (finished.size() < started) {
 						final var result = run.results().await();
 						final long now = System.nanoTime() - t0;
-						if (!(result instanceof CompositeDataOperation<?> upload)) {
-							results.add(result(now, result));
-						} else if ((upload.allSubOperationsDone() || upload.status() != Operation.Status.SUCC)
+						// Every request, the uploads' initiations and completions too: those also run over the NIC set.
+						results.add(result(now, result));
+						if (result instanceof CompositeDataOperation<?> upload && (upload.allSubOperationsDone() || upload.status() != Operation.Status.SUCC)
 										&& finished.add(upload.item().name())) {
 							if (upload.status() != Operation.Status.SUCC) {
 								uploadFailures.add(now);
