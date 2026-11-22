@@ -78,6 +78,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private volatile long startTimeSec = -1;
 	private volatile Throwable runFailure;
 	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
+	// Whether run() will close this step again after the stop or close now running.
+	private volatile boolean runClosesAgain;
+	// Whether the close now running is one of run()'s close attempts.
+	private volatile boolean runClosing;
 	// Set when a start reaches this step: one stopped or closed before it never ran.
 	private volatile boolean startReached;
 
@@ -249,6 +253,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		// Set when the flag was set before the close or by its end. An InterruptedException that is
 		// already propagating skips the code after the finally block, so it alone carries the stop.
 		boolean stoppedAtClose = false;
+		// The run's close follows the start and the await, with its retries in duration mode.
+		runClosesAgain = standaloneDeleteDurationMode;
 		try {
 			start();
 			try {
@@ -382,38 +388,73 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		final int attemptLimit = standaloneDeleteDurationMode
 						? DURATION_RUN_CLOSE_ATTEMPT_LIMIT
 						: 1;
-		Throwable firstFailure = null;
-		for (var attempt = 0; attempt < attemptLimit; attempt++) {
-			try {
-				close();
-				return null;
-			} catch (final Throwable closeCause) {
-				throwUncheckedIfInterrupted(closeCause);
-				if (firstFailure == null) {
-					firstFailure = closeCause;
-				} else if (closeCause != firstFailure) {
-					firstFailure.addSuppressed(closeCause);
+		boolean closed = false;
+		runClosing = true;
+		try {
+			Throwable firstFailure = null;
+			for (var attempt = 0; attempt < attemptLimit; attempt++) {
+				runClosesAgain = standaloneDeleteDurationMode && attempt < attemptLimit - 1;
+				try {
+					close();
+					closed = true;
+					return null;
+				} catch (final Throwable closeCause) {
+					throwUncheckedIfInterrupted(closeCause);
+					if (firstFailure == null) {
+						firstFailure = closeCause;
+					} else if (closeCause != firstFailure) {
+						firstFailure.addSuppressed(closeCause);
+					}
 				}
 			}
-		}
-		if (standaloneDeleteDurationMode) {
-			// A normal run has no caller left to perform another explicit close. Cancel any
-			// still-owned lifecycle resources after the bounded retries so they cannot leak.
-			try {
-				cancelDurationRunCleanupResourcesAfterExhaustion();
-			} catch (final Throwable cleanupCause) {
-				throwUncheckedIfInterrupted(cleanupCause);
-				if (cleanupCause != firstFailure) {
-					firstFailure.addSuppressed(cleanupCause);
+			if (standaloneDeleteDurationMode) {
+				// A normal run has no caller left to perform another explicit close. Cancel any
+				// still-owned lifecycle resources after the bounded retries so they cannot leak.
+				try {
+					cancelDurationRunCleanupResourcesAfterExhaustion();
+				} catch (final Throwable cleanupCause) {
+					throwUncheckedIfInterrupted(cleanupCause);
+					if (cleanupCause != firstFailure) {
+						firstFailure.addSuppressed(cleanupCause);
+					}
+				} finally {
+					closeRetainedDurationPhases();
 				}
-			} finally {
+			} else {
 				closeRetainedDurationPhases();
 			}
-		} else {
-			closeRetainedDurationPhases();
+			return firstFailure;
+		} finally {
+			runClosesAgain = false;
+			runClosing = false;
+			if (standaloneDeleteDurationMode && !closed) {
+				// No close of this run settled the step, as when one is stopped: what waited for one is written now.
+				writeOutputLeftToTheRunsClose();
+			}
 		}
-		return firstFailure;
 	}
+
+	/**
+	 * Whether {@link #run()} closes this step again after the stop or close now running: true from
+	 * the start of a duration-mode run to the close attempt before its last, false otherwise. A stop
+	 * whose metrics output needs a later close to be complete may leave it to that close while this is
+	 * true; the run's last close attempt, or {@link #writeOutputLeftToTheRunsClose()}, writes it.
+	 */
+	protected final boolean runClosesAgain() {
+		return runClosesAgain;
+	}
+
+	/** Whether the close now running is one of {@link #run()}'s close attempts, whose failure the run reports. */
+	protected final boolean runClosing() {
+		return runClosing;
+	}
+
+	/**
+	 * Called once a duration-mode run's close attempts end without one that closed the step, as when
+	 * they run out or a stop request ends one: writes any output a stop left to a later close. It
+	 * must not throw.
+	 */
+	protected void writeOutputLeftToTheRunsClose() {}
 
 	/** Stops the step after a failed close outside a terminal failure; a failure it throws ends the run. */
 	protected void stopAfterFailedClose() {

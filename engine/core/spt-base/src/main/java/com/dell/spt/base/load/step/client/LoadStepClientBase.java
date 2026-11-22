@@ -235,6 +235,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
+	// The failed outcome an incomplete duration stop wrote: a close after the one that threw its stop
+	// failure cleans up and closes with it, as a run's close retry does.
+	private IntegrityTerminalException incompleteDurationStopFailure;
 	// The thread running the await's own stop, which the run's close follows; null otherwise.
 	private volatile Thread awaitStopThread;
 	// Set by a duration slice stop that a stop request interrupted, which leaves the timing files open.
@@ -732,6 +735,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deletePostVerificationGloballySkipped = false;
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
+			incompleteDurationStopFailure = null;
 			failureBudgetMetricsOutputDeferred = false;
 			durationSliceStopInterrupted = false;
 			durationStopFailure = null;
@@ -3544,13 +3548,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
 				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
 				failures.run(this::relayBucketVersioningNoticesAtStop);
-				if (durationSliceStopInterrupted) {
-					// The interrupted stop left them open: they are written with the rest of the output.
-					durationSliceStopInterrupted = false;
-					failures.run(this::closeItemTimingMetricsOutputFileAggregators);
+				if (runClosesAgain() && !JvmExit.begun()) {
+					// The run closes again: the close that settles the cleanup writes the output, with its
+					// outcome and the counts captured after the drain, or the run writes it failed at its end.
+					failureBudgetMetricsOutputDeferred = true;
+					failures.throwFirst();
+					return;
 				}
-				failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
-				failures.run(super::doStop);
+				writeIncompleteDurationStopOutput(failures);
 				failures.throwFirst();
 				return;
 			}
@@ -3780,9 +3785,70 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
-	private void publishFailedOutcomeBeforeIncompleteDurationMetricsOutput() {
-		if (failureBudgetController != null && hasStartedStandaloneDeleteWork()) {
-			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
+	/**
+	 * Writes the metrics output of an incomplete duration stop, or the output a stop left to a later
+	 * close, with the outcome final as failed: no close can settle the cleanup first. A later close
+	 * still cleans up, and keeps that outcome. Each stage runs whatever an earlier one threw.
+	 */
+	private void writeIncompleteDurationStopOutput(final StopFailures failures) {
+		if (durationSliceStopInterrupted) {
+			// The interrupted stop left them open: they are written with the rest of the output.
+			durationSliceStopInterrupted = false;
+			failures.run(this::closeItemTimingMetricsOutputFileAggregators);
+		}
+		final Throwable cause = durationStopFailure;
+		failures.run(() -> finalizeFailedFailureBudgetAtIncompleteDurationStop(cause));
+		failureBudgetMetricsOutputDeferred = false;
+		failures.run(super::doStop);
+	}
+
+	private synchronized void finalizeFailedFailureBudgetAtIncompleteDurationStop(final Throwable cause) {
+		if (failureBudgetFinalizedOrAbsent()) {
+			return;
+		}
+		final boolean onlyTheStopFailed = failureBudgetFailure == null && durationValidityFailure == null;
+		finalizeFailedFailureBudgetAtStop(cause);
+		if (onlyTheStopFailed) {
+			incompleteDurationStopFailure = failureBudgetTerminalFailure;
+		}
+	}
+
+	/** A stop left the output to a close that did not come: it is written now, failed. */
+	private void writeOutputLeftToALaterClose(final Throwable closeFailure) {
+		if (!failureBudgetMetricsOutputDeferred) {
+			return;
+		}
+		final var failures = new StopFailures();
+		writeIncompleteDurationStopOutput(failures);
+		final Throwable writeFailure = failures.first();
+		if (writeFailure != null && writeFailure != closeFailure) {
+			closeFailure.addSuppressed(writeFailure);
+		}
+	}
+
+	@Override
+	protected final void writeOutputLeftToTheRunsClose() {
+		// The run's last close may have ended on a stop request: the output is still written.
+		final boolean interrupted = Thread.interrupted();
+		stopCloseLock.lock();
+		try {
+			if (!failureBudgetMetricsOutputDeferred) {
+				return;
+			}
+			final var failures = new StopFailures();
+			writeIncompleteDurationStopOutput(failures);
+			if (failures.first() != null) {
+				LogUtil.exception(
+								Level.WARN,
+								failures.first(),
+								"{}: failed to write the metrics output after the run's last close",
+								loadStepId());
+			}
+		} finally {
+			stopCloseLock.unlock();
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
 		}
 	}
 
@@ -3816,6 +3882,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} catch (final IOException | RuntimeException | Error e) {
 				// A close that fails keeps the relay for its retry, but relays what the nodes wrote so far.
 				relayBucketVersioningNoticesAtClose(e);
+				if (!runClosesAgain() || JvmExit.begun()) {
+					// No close of the run follows this one to settle the cleanup.
+					writeOutputLeftToALaterClose(e);
+				}
 				throw e;
 			}
 			return;
@@ -3925,11 +3995,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 		}
-		final IntegrityTerminalException budgetTerminal;
+		IntegrityTerminalException budgetTerminal;
 		try {
 			budgetTerminal = finalizeFailureBudget();
 		} finally {
 			closeFailureBudgetSnapshotCollector();
+		}
+		if (budgetTerminal != null && budgetTerminal == incompleteDurationStopFailure && !runClosing()) {
+			// An earlier close threw the stop failure behind this outcome, and the output carries it: this
+			// close, whose stop has now completed, cleans up and closes. A run's close still fails with it,
+			// so the run ends failed, as its output says.
+			budgetTerminal = null;
 		}
 		emitDeferredFailureBudgetMetricsOutput();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
