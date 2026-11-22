@@ -1684,7 +1684,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/**
 	 * Settles a recovered queue entry. Return true only when it became unattempted and should
 	 * enter the legacy recovery output. Retained retries instead settle their known failure
-	 * and return false; no result output or transport action may run here. Called at most once
+	 * and return false; the hook may publish that settled failure, once and on the calling thread,
+	 * but no success output or transport action may run here. Called at most once
 	 * per queued operation in each recovery call, and not for a queued composite that recovery
 	 * settles through one of its recovered parts. An operation this hook leaves queued can be
 	 * visited again by a later recovery call, so the hook must be safe to repeat.

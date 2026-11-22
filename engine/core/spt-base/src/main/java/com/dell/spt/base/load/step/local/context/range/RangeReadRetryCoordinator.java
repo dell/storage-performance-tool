@@ -46,6 +46,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 	private final RangeReadMetrics metrics;
 	private final Scheduler scheduler;
 	private final BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish;
+	private final BiConsumer<RangeReadOperation<I>, RangeReadCirculation> settledPublish;
 	private final boolean enabled;
 	private final int retryLimit;
 	private final int capacity;
@@ -61,6 +62,19 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 					OperationLifecycleTracker<? super RangeReadOperation<I>> tracker,
 					RangeReadMetrics metrics, Scheduler scheduler,
 					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish) {
+		this(enabled, retryLimit, capacity, generator, tracker, metrics, scheduler, publish, publish);
+	}
+
+	/**
+	 * Settled publish delivers a retry this coordinator settles without a completion: at close, or
+	 * when it is refused, past its bound, or its scheduling or handoff fails. Completions use publish.
+	 */
+	public RangeReadRetryCoordinator(boolean enabled, int retryLimit, int capacity,
+					LoadGenerator<I, RangeReadOperation<I>> generator,
+					OperationLifecycleTracker<? super RangeReadOperation<I>> tracker,
+					RangeReadMetrics metrics, Scheduler scheduler,
+					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish,
+					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> settledPublish) {
 		if (retryLimit < 0 || capacity <= 0)
 			throw new IllegalArgumentException("Invalid range retry bounds");
 		this.enabled = enabled;
@@ -71,6 +85,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 		this.metrics = Objects.requireNonNull(metrics);
 		this.scheduler = Objects.requireNonNull(scheduler);
 		this.publish = Objects.requireNonNull(publish);
+		this.settledPublish = Objects.requireNonNull(settledPublish);
 		if (!tracker.isEnabled())
 			throw new IllegalArgumentException("Range retries require lifecycle tracking");
 	}
@@ -93,7 +108,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 			} catch (RuntimeException accountingFailure) {
 				recordFailure(accountingFailure);
 			} finally {
-				publishTerminal(operation, circulation);
+				publishTerminal(operation, circulation, publish);
 			}
 			return true;
 		}
@@ -170,11 +185,12 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 		} catch (RuntimeException accountingFailure) {
 			recordFailure(accountingFailure);
 		} finally {
-			publishTerminal(entry.operation, entry.circulation);
+			publishTerminal(entry.operation, entry.circulation, settledPublish);
 		}
 	}
 
-	private void publishTerminal(RangeReadOperation<I> operation, RangeReadCirculation circulation) {
+	private void publishTerminal(RangeReadOperation<I> operation, RangeReadCirculation circulation,
+					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> output) {
 		if (operation.circulation() == circulation
 						&& circulation.lifecycle().state() == OperationLifecycleState.TERMINAL) {
 			// A synchronous terminal callback releases its logical slot before optional output,
@@ -183,7 +199,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 				pending.remove(circulation);
 			}
 			try {
-				publish.accept(operation, circulation);
+				output.accept(operation, circulation);
 			} catch (RuntimeException outputFailure) {
 				recordFailure(outputFailure);
 			}

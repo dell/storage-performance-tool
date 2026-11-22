@@ -46,7 +46,8 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 		this.publish = Objects.requireNonNull(publish);
 		metrics = new RangeReadMetrics(policy);
 		tracker = OperationLifecycleTracker.withDeadlineSettlement(this::settleAtDeadline);
-		admission = new RangeReadAdmission<>(driver, tracker, capacity, System::nanoTime, this::publishLocalResult);
+		admission = new RangeReadAdmission<>(driver, tracker, capacity, System::nanoTime, this::publishLocalResult,
+						this::publishSettled);
 		tracker.terminalObserver(this::recordTerminal);
 	}
 
@@ -90,7 +91,7 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 		resultOutput = op -> output.accept((O) op);
 		retries = new RangeReadRetryCoordinator<>(retryEnabled, Math.max(0, retryLimit), capacity,
 						(LoadGenerator<I, RangeReadOperation<I>>) (LoadGenerator<?, ?>) generator,
-						tracker, metrics, scheduler, publish);
+						tracker, metrics, scheduler, publish, this::publishSettled);
 		return (Output<O>) (Output<?>) this;
 	}
 
@@ -128,6 +129,30 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 		}
 	}
 
+	/**
+	 * Publishes, once, a result settled outside the driver's completion route: a retry its holder
+	 * settled at a stop, or an outcome the drain deadline settled. Only a terminal circulation still
+	 * awaiting delivery is published. A failed output is recorded and retired, never retried, so the
+	 * drain does not wait for it. Never call under a lifecycle, generator or admission lock.
+	 */
+	private void publishSettled(RangeReadOperation<I> op, RangeReadCirculation circulation) {
+		if (op.circulation() != circulation || circulation.lifecycle().state() != OperationLifecycleState.TERMINAL)
+			return;
+		synchronized (resultLock) {
+			if (!pendingResults.contains(circulation))
+				return;
+		}
+		try {
+			publish.accept(op, circulation);
+		} catch (RuntimeException failure) {
+			recordFailure(failure);
+			admission.releaseSettled(circulation);
+			synchronized (resultLock) {
+				pendingResults.remove(circulation);
+			}
+		}
+	}
+
 	private boolean settleAtDeadline(RangeReadOperation<I> op,
 					OperationLifecycleTracker<RangeReadOperation<I>> owner) {
 		final var circulation = op.circulation();
@@ -136,6 +161,8 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 			metrics.recordFinal(circulation);
 		if (circulation.lifecycle().state() != OperationLifecycleState.TERMINAL)
 			admission.releaseSettled(circulation);
+		else if (settled)
+			publishSettled(op, circulation);
 		return settled;
 	}
 

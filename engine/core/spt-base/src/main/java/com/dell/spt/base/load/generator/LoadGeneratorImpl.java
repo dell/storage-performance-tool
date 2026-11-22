@@ -21,6 +21,7 @@ import com.dell.spt.base.item.op.OperationsBuilderAssembler;
 import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.DurationTime;
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
@@ -36,6 +37,7 @@ import java.util.Collections;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadCirculation;
+import com.dell.spt.base.load.generator.range.RangeReadAdmission;
 import java.util.ConcurrentModificationException;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1051,6 +1053,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		if (!(op instanceof RangeReadOperation<?> range)) {
 			throw new IllegalArgumentException("Expected a range operation");
 		}
+		final RetryEntry<O> entry;
+		final boolean settled;
 		admissionLock.lock();
 		try {
 			final var circulation = range.circulation();
@@ -1058,34 +1062,62 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							|| !circulation.claimRetryQueue(attempt)) {
 				return false;
 			}
-			final var entry = new RetryEntry<>(op, circulation, attempt);
-			if (!admissionAllowedLocked()) {
-				settleRangeRetry(entry);
-				return false;
+			entry = new RetryEntry<>(op, circulation, attempt);
+			if (admissionAllowedLocked()) {
+				if (retainedRetries == null) {
+					retainedRetries = ConcurrentHashMap.newKeySet();
+				}
+				retainedRetries.add(entry);
+				retryQueue.add(entry);
+				return true;
 			}
-			if (retainedRetries == null) {
-				retainedRetries = ConcurrentHashMap.newKeySet();
-			}
-			retainedRetries.add(entry);
-			retryQueue.add(entry);
-			return true;
+			settled = settleRangeRetry(entry);
 		} finally {
 			admissionLock.unlock();
 		}
+		if (settled) {
+			publishSettledRangeRetry(entry);
+		}
+		return false;
 	}
 
+	/**
+	 * Settles a held range retry with its earlier attempt's failure. Returns whether this call made
+	 * the circulation terminal; the caller then publishes it, outside the generator's locks.
+	 */
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
-	private void settleRangeRetry(final RetryEntry<O> entry) {
+	private boolean settleRangeRetry(final RetryEntry<O> entry) {
 		final var range = (RangeReadOperation<?>) entry.operation;
 		synchronized (entry.circulation.lifecycle()) {
 			synchronized (entry.attempt) {
-				if (range.circulation() == entry.circulation
-								&& entry.circulation.isPendingAttempt(entry.attempt)) {
-					entry.circulation.settleAtDeadline(range, (OperationLifecycleTracker) operationLifecycle);
-				}
+				return range.circulation() == entry.circulation
+								&& entry.circulation.isPendingAttempt(entry.attempt)
+								&& entry.circulation.settleAtDeadline(range, (OperationLifecycleTracker) operationLifecycle)
+								&& entry.circulation.lifecycle().state() == OperationLifecycleState.TERMINAL;
 			}
 		}
+	}
+
+	/** A held retry settled terminal has no transport completion to publish it; publish it here. */
+	private void publishSettledRangeRetry(final RetryEntry<O> entry) {
+		if (opOutput instanceof RangeReadAdmission<?> admission) {
+			admission.publishSettled((RangeReadOperation<?>) entry.operation, entry.circulation);
+		}
+	}
+
+	private void publishSettledRangeRetries(final List<RetryEntry<O>> entries) {
+		if (entries != null) {
+			for (final var entry : entries) {
+				publishSettledRangeRetry(entry);
+			}
+		}
+	}
+
+	private static <T> List<T> appendSettled(final List<T> settled, final T entry) {
+		final var list = settled == null ? new ArrayList<T>() : settled;
+		list.add(entry);
+		return list;
 	}
 
 	private void releaseRetryEntry(final RetryEntry<O> entry) {
@@ -1167,6 +1199,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final List<O> recoverBufferedOperations() {
+		List<RetryEntry<O>> settledRetries = null;
+		final List<O> unattemptedOperations;
 		assemblyLock.lock();
 		try {
 			admissionLock.lock();
@@ -1186,7 +1220,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 				if (retainedRetries != null) {
 					for (var retained : retainedRetries) {
-						settleRangeRetry(retained);
+						if (settleRangeRetry(retained)) {
+							settledRetries = appendSettled(settledRetries, retained);
+						}
 					}
 					retainedRetries.clear();
 				}
@@ -1201,13 +1237,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						unattempted.add(buffered);
 					}
 				}
-				return List.copyOf(unattempted);
+				unattemptedOperations = List.copyOf(unattempted);
 			} finally {
 				admissionLock.unlock();
 			}
 		} finally {
 			assemblyLock.unlock();
 		}
+		publishSettledRangeRetries(settledRetries);
+		return unattemptedOperations;
 	}
 
 	private void recoverUnconsumedStandaloneDeleteItems() {
@@ -1300,8 +1338,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 				if (e instanceof EOFException) {
 					if (entry.circulation != null) {
-						settleRangeRetry(entry);
+						final boolean settled = settleRangeRetry(entry);
 						releaseRetryEntry(entry);
+						if (settled) {
+							publishSettledRangeRetry(entry);
+						}
 					}
 					// The output itself is done and will never accept anything again
 					// (including a re-enqueue) - matches how the normal dispatch path
@@ -1322,6 +1363,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	private void requeueRetry(final RetryEntry<O> entry) {
+		boolean settled = false;
 		admissionLock.lock();
 		try {
 			if (admissionAllowedLocked()) {
@@ -1330,12 +1372,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				if (entry.circulation == null) {
 					operationLifecycle.unattempted(entry.operation);
 				} else {
-					settleRangeRetry(entry);
+					settled = settleRangeRetry(entry);
 				}
 				releaseRetryEntry(entry);
 			}
 		} finally {
 			admissionLock.unlock();
+		}
+		if (settled) {
+			publishSettledRangeRetry(entry);
 		}
 	}
 
@@ -1366,6 +1411,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final List<O> drainPendingRetries() {
 		final List<O> drained = new ArrayList<>();
+		List<RetryEntry<O>> settledRetries = null;
 		admissionLock.lock();
 		try {
 			RetryEntry<O> entry;
@@ -1373,19 +1419,24 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				if (entry.circulation == null) {
 					drained.add(entry.operation);
 				} else {
-					settleRangeRetry(entry);
+					if (settleRangeRetry(entry)) {
+						settledRetries = appendSettled(settledRetries, entry);
+					}
 					retainedRetries.remove(entry);
 				}
 			}
 			if (retainedRetries != null) {
 				for (var retained : retainedRetries) {
-					settleRangeRetry(retained);
+					if (settleRangeRetry(retained)) {
+						settledRetries = appendSettled(settledRetries, retained);
+					}
 				}
 				retainedRetries.clear();
 			}
 		} finally {
 			admissionLock.unlock();
 		}
+		publishSettledRangeRetries(settledRetries);
 		return drained;
 	}
 
