@@ -131,7 +131,7 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 
 	/**
 	 * Publishes, once, a result settled outside the driver's completion route: a retry its holder
-	 * settled at a stop, or an outcome the drain deadline settled. Only a terminal circulation still
+	 * settled at a stop, or a failure the drain deadline settled. Only a terminal circulation still
 	 * awaiting delivery is published. A failed output is recorded and retired, never retried, so the
 	 * drain does not wait for it. Never call under a lifecycle, generator or admission lock.
 	 */
@@ -161,9 +161,18 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 			metrics.recordFinal(circulation);
 		if (circulation.lifecycle().state() != OperationLifecycleState.TERMINAL)
 			admission.releaseSettled(circulation);
-		else if (settled)
+		else if (settled && !settledSuccess(circulation))
+			// A failure's output is at most its op-trace row, so it stays within this bounded hook.
+			// A success would run item and timing output and recycling, which can wait on a consumer
+			// (a full pipeline handoff) past the drain bound, on the drain thread; it is left to its
+			// completion route, and finishResults fails it at the bound if it is still undelivered.
 			publishSettled(op, circulation);
 		return settled;
+	}
+
+	private static boolean settledSuccess(RangeReadCirculation circulation) {
+		final var outcome = circulation.terminalOutcome();
+		return outcome != null && outcome.status() == Operation.Status.SUCC;
 	}
 
 	public boolean completed(RangeReadOperation<I> op, RangeReadCirculation circulation, RangeReadAttempt attempt) {

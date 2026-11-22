@@ -8,6 +8,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.data.SeedDataInput;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.io.DelayedTransferConvertBuffer;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.data.range.*;
 import com.dell.spt.base.load.generator.LoadGenerator;
@@ -194,6 +195,42 @@ class RangeReadStopPublicationTest {
 			return attempt;
 		}
 
+		/** Generates one item whose 206 is decoded, but whose completion callback has not run yet. */
+		void decodedSuccessAwaitingCompletion() throws Exception {
+			generator.step();
+			final var attempt = dispatch(driver.accepted.getFirst());
+			assertTrue(attempt.headers(206, Status.SUCC, List.of("bytes 0-1/10"), List.of("2"), List.of(), false));
+			assertTrue(attempt.bodyBytes(2));
+			assertTrue(attempt.finish(true));
+		}
+
+		/**
+		 * Drains with a 100 ms bound on another thread. The deadline commits the success, but its
+		 * output is not run on the drain thread: the drain fails at its bound, as before the fix.
+		 */
+		void assertSuccessFailsAtTheBound(String label) throws Exception {
+			final var outcome = new CompletableFuture<Throwable>();
+			final var drainer = Thread.ofPlatform().start(() -> {
+				try {
+					context.drainDispatchedOperationsForStepStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100));
+					outcome.complete(null);
+				} catch (Throwable failure) {
+					outcome.complete(failure);
+				}
+			});
+			final Throwable failure;
+			try {
+				failure = outcome.get(2, TimeUnit.SECONDS);
+			} catch (java.util.concurrent.TimeoutException blocked) {
+				throw new AssertionError(label + ": the drain ran blocking output past its bound", blocked);
+			}
+			drainer.join(5_000);
+			final var terminal = assertInstanceOf(IntegrityTerminalException.class, failure, label);
+			assertEquals("Range result delivery exceeded the step drain bound", terminal.getCause().getMessage(), label);
+			assertEquals(0, driver.publishCalls.get(), label + ": no success output on the drain thread");
+			assertEquals(1, runtime.snapshot().logical().accepted(), label + ": the committed outcome is kept");
+		}
+
 		/** Drains with the given bound and returns its elapsed time. */
 		long drain(long boundNanos) {
 			final long started = System.nanoTime();
@@ -293,8 +330,7 @@ class RangeReadStopPublicationTest {
 			r.generator.closeAdmission();
 			final var attempt = op.circulation().pendingAttempt();
 			assertFalse(r.generator.retryRange(op, attempt));
-			assertEquals(1, r.driver.delivered.get());
-			// The coordinator's own handoff then finds the retry settled and publishes nothing more.
+			// The refusal or the coordinator's own handoff publishes the settled retry, never both.
 			r.scheduled.forEach(Runnable::run);
 			assertTrue(r.drain(LONG_BOUND_NANOS) < PROMPT_NANOS);
 			r.assertSettledAndDelivered(1);
@@ -337,27 +373,55 @@ class RangeReadStopPublicationTest {
 	}
 
 	@Test
-	void outcomeSettledAtTheDrainDeadlineIsPublishedWithRetryOff() throws Exception {
-		for (boolean success : List.of(false, true)) {
-			for (boolean waitFinish : List.of(true, false)) {
-				try (var r = new Rig(1, false, false, waitFinish)) {
-					r.generator.step();
-					final var op = r.driver.accepted.getFirst();
-					final var attempt = r.dispatch(op);
-					// The response arrived, but its completion callback has not run yet.
-					if (success) {
-						assertTrue(attempt.headers(206, Status.SUCC, List.of("bytes 0-1/10"), List.of("2"), List.of(),
-										false));
-						assertTrue(attempt.bodyBytes(2));
-						assertTrue(attempt.finish(true));
-					} else {
-						assertFalse(attempt.headers(503, Status.RESP_FAIL_SVC, List.of(), List.of(), List.of(), false));
-					}
-					final var label = "success=" + success + ", wait.finish=" + waitFinish;
-					assertDoesNotThrow(() -> r.drain(0), label);
-					r.assertSettledAndDelivered(1);
-					assertEquals(success ? 1 : 0, r.runtime.snapshot().logical().accepted(), label);
-					assertEquals(success ? 0 : 1, r.runtime.snapshot().logical().failed(), label);
+	void failureSettledAtTheDrainDeadlineIsPublishedWithRetryOff() throws Exception {
+		for (boolean waitFinish : List.of(true, false)) {
+			try (var r = new Rig(1, false, false, waitFinish)) {
+				r.generator.step();
+				final var op = r.driver.accepted.getFirst();
+				final var attempt = r.dispatch(op);
+				// The response arrived, but its completion callback has not run yet.
+				assertFalse(attempt.headers(503, Status.RESP_FAIL_SVC, List.of(), List.of(), List.of(), false));
+				final var label = "wait.finish=" + waitFinish;
+				assertDoesNotThrow(() -> r.drain(0), label);
+				r.assertSettledAndDelivered(1);
+				assertEquals(1, r.runtime.snapshot().logical().failed(), label);
+			}
+		}
+	}
+
+	@Test
+	void deadlineSettlementOfSuccessWithBlockingOutputHonoursDrainBound() throws Exception {
+		for (boolean waitFinish : List.of(true, false)) {
+			final var gate = new CountDownLatch(1);
+			final Output<RangeReadOperation<DataItemImpl>> output = mock(Output.class);
+			when(output.put(any(RangeReadOperation.class))).thenAnswer(call -> gate.await(10, TimeUnit.SECONDS));
+			try (var r = new Rig(1, false, false, waitFinish)) {
+				r.context.operationsResultsOutput(output);
+				r.decodedSuccessAwaitingCompletion();
+				try {
+					r.assertSuccessFailsAtTheBound("wait.finish=" + waitFinish);
+					verify(output, never()).put(any(RangeReadOperation.class));
+				} finally {
+					gate.countDown();
+				}
+			}
+		}
+	}
+
+	@Test
+	void deadlineSettlementOfSuccessIntoAFullPipelineHandoffHonoursDrainBound() throws Exception {
+		for (boolean waitFinish : List.of(true, false)) {
+			// A pipeline stage's handoff whose next stage has stopped consuming: its put spins.
+			final var handoff = new DelayedTransferConvertBuffer<DataItemImpl, RangeReadOperation<DataItemImpl>>(
+							1, 0, TimeUnit.SECONDS);
+			assertTrue(handoff.put(mock(RangeReadOperation.class)));
+			try (var r = new Rig(1, false, false, waitFinish)) {
+				r.context.operationsResultsOutput(handoff);
+				r.decodedSuccessAwaitingCompletion();
+				try {
+					r.assertSuccessFailsAtTheBound("wait.finish=" + waitFinish);
+				} finally {
+					handoff.close(); // releases a spinning put
 				}
 			}
 		}
@@ -383,7 +447,7 @@ class RangeReadStopPublicationTest {
 			// Publish once the drain waits for the result, or once it has ended without waiting.
 			final long deadline = System.nanoTime() + LONG_BOUND_NANOS;
 			while (drainer.isAlive() && !waitsForOutput(drainer) && System.nanoTime() < deadline)
-				Thread.onSpinWait();
+				Thread.sleep(1);
 			final boolean published = r.driver.publishNow(op);
 			drainer.join(10_000);
 			assertNull(outcome.get(1, TimeUnit.SECONDS), "the drain waits for a settled result within its bound");
