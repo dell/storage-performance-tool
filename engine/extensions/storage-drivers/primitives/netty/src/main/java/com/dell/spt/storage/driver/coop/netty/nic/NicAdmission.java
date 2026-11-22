@@ -225,7 +225,21 @@ public final class NicAdmission {
 	 */
 	private boolean trialReady(final int nic) {
 		return trials.get(nic) == 0 && counts.get(nic) == 0 && nanoClock.getAsLong() - trialAfter.get(nic) >= 0
-						&& gates[nic].servesNow();
+						&& anyWorking() && gates[nic].servesNow();
+	}
+
+	/**
+	 * Whether a NIC is not failing. Only then is a trial asked of the gate: with every NIC failing the
+	 * rotation takes the attempt, and a recovery connect started by the gate would take the Path's
+	 * connect trial from it.
+	 */
+	private boolean anyWorking() {
+		for (var nic = 0; nic < limits.length; nic++) {
+			if (failing.get(nic) == 0) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

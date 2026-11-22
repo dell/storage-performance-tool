@@ -347,6 +347,7 @@ final class NicPathPool implements NicAdmission.Gate {
 		final long failures;
 		final Pending recovery;
 		final List<Channel> inactive = new ArrayList<>(0);
+		final boolean serves;
 		synchronized (this) {
 			if (admissionClosed) {
 				return false;
@@ -357,10 +358,8 @@ final class NicPathPool implements NicAdmission.Gate {
 			// Every idle connection was opened after the last failure (release keeps no older one); one
 			// that closed meanwhile does not serve.
 			pruneInactiveIdle(inactive);
-			if (idle > 0) {
-				return true;
-			}
-			if (recoveryConnecting || (openLimit > 0 && open >= openLimit)) {
+			serves = idle > 0;
+			if (serves || recoveryConnecting || (openLimit > 0 && open >= openLimit)) {
 				path = null;
 				epoch = PathBackoff.REJECTED;
 			} else {
@@ -384,7 +383,7 @@ final class NicPathPool implements NicAdmission.Gate {
 		if (recovery != null) {
 			connect(path, epoch, recovery, recoveryTimeoutMillis, failures, false);
 		}
-		return false;
+		return serves;
 	}
 
 	/**
