@@ -192,6 +192,7 @@ final class S3NicSetSilentDropTest {
 				final var root = NicSetLoopback.root(List.of(endpoints.get(0), deadNode), nics(2), 8);
 				// 4 uploads active at once, as on SC26; by default 8 threads and 5 parts give 2.
 				root.val("storage-driver-limit-multipart-objects", 4);
+				root.val("storage-driver-limit-multipart-parts", 20);
 				try (var driver = NicSetLoopback.driver(root.configVal("storage"), false)) {
 					final var run = NicSetLoopback.started(driver);
 					final List<Result> results = new ArrayList<>();
@@ -212,7 +213,9 @@ final class S3NicSetSilentDropTest {
 						if (result instanceof CompositeDataOperation<?> upload && (upload.allSubOperationsDone() || upload.status() != Operation.Status.SUCC)
 										&& finished.add(upload.item().name())) {
 							if (upload.status() != Operation.Status.SUCC) {
-								uploadFailures.add(now);
+								// By its last request's start, as parts are judged: an upload sent while the proxy died fails later.
+								final var last = result(now, upload);
+								uploadFailures.add(last.endNanos() - last.durationNanos());
 							}
 							if (now < END_AFTER_NANOS) {
 								assertTrue(run.driver().put(upload("u" + started++)));
