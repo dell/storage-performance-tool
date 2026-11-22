@@ -78,7 +78,6 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
-import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.logging.log4j.core.config.Property;
 
 /**
@@ -4086,31 +4085,28 @@ class LoadStepClientBaseTest {
 		@DisplayName("Linear client accepts IEC item size and executes slice/aggregator init")
 		void testLinearClientStartAndAwait() throws Exception {
 			// Silence noisy INFO/ERROR logs produced during partial init in this integration smoke
-			Configurator.setLevel("com.dell.spt.base.logging.Messages", Level.WARN);
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.OFF);
-			// Use real extensions from classpath: LinearLoadStepExtension + DummyStorageDriverMockExtension
-			List<Extension> classpathExts = Extension.load(LoadStepClientBaseTest.class.getClassLoader());
-			Config cfg = TestConfigBuilder.config();
-			// Its artifacts stay under the test directory, so a rerun must not find them as stale.
-			cfg.val("load-step-id", "linear-client-test-" + java.util.UUID.randomUUID());
-			cfg.val("item-data-size", "10KiB");
-			cfg.val("item-output-file", ""); // avoid writing
-			// Ensure no remote nodes to avoid retries
-			cfg.val("load-step-node-addrs", java.util.Collections.emptyList());
-			cfg.val("item-data-input-compressibility", 0.0);
-			cfg.val("item-data-dedupable", false);
-			cfg.val("item-data-verify", false);
-			LinearLoadStepClient client = new LinearLoadStepClient(cfg, classpathExts, null, mockMetricsManager);
-			// This fixture configures no items, so it reaches its slice and fails there with the reason.
-			final var failure = assertThrows(RunTerminalException.class, client::start);
-			assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
-			// Stop/close regardless
-			assertDoesNotThrow(client::doStop);
-			assertDoesNotThrow(client::doShutdown);
-			assertDoesNotThrow(client::doClose);
-			// Restore default log levels for other tests
-			Configurator.setLevel("com.dell.spt.base.logging.Messages", Level.INFO);
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.ERROR);
+			try (var levels = LoggerLevels.set(Map.of(Loggers.MSG.getName(), Level.WARN, Loggers.ERR.getName(), Level.OFF))) {
+				// Use real extensions from classpath: LinearLoadStepExtension + DummyStorageDriverMockExtension
+				List<Extension> classpathExts = Extension.load(LoadStepClientBaseTest.class.getClassLoader());
+				Config cfg = TestConfigBuilder.config();
+				// Its artifacts stay under the test directory, so a rerun must not find them as stale.
+				cfg.val("load-step-id", "linear-client-test-" + java.util.UUID.randomUUID());
+				cfg.val("item-data-size", "10KiB");
+				cfg.val("item-output-file", ""); // avoid writing
+				// Ensure no remote nodes to avoid retries
+				cfg.val("load-step-node-addrs", java.util.Collections.emptyList());
+				cfg.val("item-data-input-compressibility", 0.0);
+				cfg.val("item-data-dedupable", false);
+				cfg.val("item-data-verify", false);
+				LinearLoadStepClient client = new LinearLoadStepClient(cfg, classpathExts, null, mockMetricsManager);
+				// This fixture configures no items, so it reaches its slice and fails there with the reason.
+				final var failure = assertThrows(RunTerminalException.class, client::start);
+				assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
+				// Stop/close regardless
+				assertDoesNotThrow(client::doStop);
+				assertDoesNotThrow(client::doShutdown);
+				assertDoesNotThrow(client::doClose);
+			}
 		}
 	}
 

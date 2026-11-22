@@ -7,6 +7,7 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.buildinfo.EngineBuildInfoRenderer;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
@@ -14,8 +15,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.core.LoggerContext;
-import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,17 +22,17 @@ import com.dell.spt.base.logging.Loggers;
 
 class MainTest {
 
-	private Level originalLevel;
+	/** The root and Messages loggers at INFO for each test, and their own levels back after it. */
+	private LoggerLevels levels;
 
 	@BeforeEach
-	void rememberOriginalLevel() {
-		originalLevel = LogManager.getRootLogger().getLevel();
-		setRootLevel(Level.INFO);
+	void setLevelsToInfo() {
+		levels = LoggerLevels.set(Map.of(LogManager.ROOT_LOGGER_NAME, Level.INFO, Loggers.MSG.getName(), Level.INFO));
 	}
 
 	@AfterEach
-	void restoreLevel() {
-		setRootLevel(originalLevel);
+	void restoreLevels() {
+		levels.close();
 	}
 
 	@Test
@@ -183,22 +182,6 @@ class MainTest {
 		final Method method = Main.class.getDeclaredMethod("applyLogLevel", com.github.akurilov.confuse.Config.class);
 		method.setAccessible(true);
 		method.invoke(null, config);
-	}
-
-	private static void setRootLevel(final Level level) {
-		final LoggerContext ctx = LoggerContext.getContext(false);
-		final var configuration = ctx.getConfiguration();
-		final LoggerConfig rootConfig = configuration.getLoggerConfig(LogManager.ROOT_LOGGER_NAME);
-		rootConfig.setLevel(level);
-		final LoggerConfig msgConfig = configuration.getLoggerConfig(Loggers.MSG.getName());
-		if (msgConfig != null) {
-			msgConfig.setLevel(level);
-		}
-		final org.apache.logging.log4j.core.Logger msgLogger = ctx.getLogger(Loggers.MSG.getName());
-		if (msgLogger != null) {
-			msgLogger.setLevel(level);
-		}
-		ctx.updateLoggers();
 	}
 
 }
