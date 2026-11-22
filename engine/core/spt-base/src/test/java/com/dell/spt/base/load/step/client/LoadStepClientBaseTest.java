@@ -3514,6 +3514,57 @@ class LoadStepClientBaseTest {
 	void closePublishesFailureBudgetOutcomeIntoRetainedFleetMetrics() throws Exception {
 		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient client = closeCleanStepWithRetainedFleetRow(metricsManager);
+
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleetFailureOutcome(metricsManager, client.loadStepId()),
+						"close must update the retained fleet row after the controller decision");
+	}
+
+	@Test
+	void aNeverStartedPrototypeClosedAfterARealStepKeepsThatStepsRetainedOutcome() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient step = closeCleanStepWithRetainedFleetRow(metricsManager);
+		// An engine prototype inherits the real step's id from the base configuration.
+		final TestLoadStepClient prototype = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
+
+		assertDoesNotThrow(prototype::close);
+
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleetFailureOutcome(metricsManager, step.loadStepId()));
+	}
+
+	@Test
+	void aNeverStartedDurationPrototypeStoppedAfterARealStepKeepsThatStepsRetainedOutcome() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient step = closeCleanStepWithRetainedFleetRow(metricsManager);
+		final Config config = durationConfig();
+		config.val("load-step-id", step.loadStepId());
+		try (var prototype = new TestLoadStepClient(config, extensions, ctxConfigs, metricsManager)) {
+			assertDoesNotThrow(prototype::doStop);
+
+			assertEquals(
+							MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+							retainedFleetFailureOutcome(metricsManager, step.loadStepId()));
+		}
+	}
+
+	private static String retainedFleetFailureOutcome(final MetricsManager metricsManager, final String stepId) {
+		return metricsManager.getTerminalSteps().stream()
+						.filter(entry -> entry.distributed && stepId.equals(entry.stepId))
+						.findFirst()
+						.orElseThrow().deleteMetrics
+						.failureOutcome();
+	}
+
+	/** A count-mode standalone DELETE that completes cleanly and leaves its retained fleet row. */
+	private TestLoadStepClient closeCleanStepWithRetainedFleetRow(final MetricsManagerImpl metricsManager)
+					throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(
 						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
 		final Map<String, Object> metadata = new HashMap<>();
@@ -3587,15 +3638,7 @@ class LoadStepClientBaseTest {
 			logger.removeAppender(appender);
 			appender.stop();
 		}
-
-		final var retainedFleet = metricsManager.getTerminalSteps().stream()
-						.filter(entry -> entry.distributed && client.loadStepId().equals(entry.stepId))
-						.findFirst()
-						.orElseThrow();
-		assertEquals(
-						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
-						retainedFleet.deleteMetrics.failureOutcome(),
-						"close must update the retained fleet row after the controller decision");
+		return client;
 	}
 
 	@Test
