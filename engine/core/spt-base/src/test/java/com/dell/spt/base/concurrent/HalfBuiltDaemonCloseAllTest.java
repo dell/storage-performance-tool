@@ -43,6 +43,7 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
@@ -233,6 +234,9 @@ class HalfBuiltDaemonCloseAllTest {
 		final var appender = new CloseFailureAppender(sentinel);
 		appender.start();
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+		// An earlier test in this JVM may have left the logger above WARN.
+		final var level = logger.getLevel();
+		Configurator.setLevel(Loggers.ERR.getName(), Level.WARN);
 		logger.addAppender(appender);
 		try {
 			DaemonBase.closeAll();
@@ -242,6 +246,7 @@ class HalfBuiltDaemonCloseAllTest {
 		} finally {
 			logger.removeAppender(appender);
 			appender.stop();
+			Configurator.setLevel(Loggers.ERR.getName(), level);
 		}
 		return appender.failures();
 	}
@@ -264,7 +269,7 @@ class HalfBuiltDaemonCloseAllTest {
 			}
 			final var message = event.getMessage().getFormattedMessage();
 			// Another test class may leave its own daemons registered for closeAll.
-			if (event.getLevel() == Level.WARN && message.startsWith("Failed to close the daemon instance")
+			if (Level.WARN.equals(event.getLevel()) && message.startsWith("Failed to close the daemon instance")
 							&& names(message)) {
 				failures.add(message + ": " + event.getThrown());
 			}
@@ -402,14 +407,16 @@ class HalfBuiltDaemonCloseAllTest {
 		return contexts;
 	}
 
-	@SuppressWarnings({"rawtypes", "unchecked"})
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
 	private static StorageDriver<Item, Operation<Item>> driver() {
 		final StorageDriver<Item, Operation<Item>> driver = mock(StorageDriver.class);
 		when(driver.operationLifecycle()).thenReturn((OperationLifecycleTracker) new OperationLifecycleTracker<>());
 		return driver;
 	}
 
-	@SuppressWarnings({"rawtypes", "unchecked"})
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
 	private static LoadStepContextImpl<Item, Operation<Item>> context(
 					final LoadGenerator generator, final Config config) {
 		return new LoadStepContextImpl<>(
