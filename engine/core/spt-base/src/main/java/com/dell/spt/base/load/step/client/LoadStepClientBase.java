@@ -243,6 +243,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	// artifact publishing and lost-slice gating), and whether the start ended as a stop.
 	private volatile int startedSliceCount;
 	private volatile boolean startStopped;
+	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
+	private volatile boolean startEntered;
 
 	static int activeFailureBudgetSnapshotFlightCount() {
 		return FAILURE_BUDGET_MAX_RETAINED_SNAPSHOT_FLIGHTS
@@ -365,6 +367,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throws IllegalArgumentException {
 		// Reset where a start really begins: a restart the base class refuses (at JVM exit) keeps the
 		// count of the start before it, so its close still publishes that start's slices.
+		startEntered = true;
 		startedSliceCount = 0;
 		startStopped = false;
 		stepSliceNodeAddrs.clear();
@@ -2509,7 +2512,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final List<LoadStep> activeSlices = stepSlices.stream()
 						.filter(slice -> slice != null)
 						.collect(Collectors.toList());
-		if (activeSlices.isEmpty()) {
+		if (activeSlices.isEmpty() || !hasStartedStandaloneDeleteWork()) {
 			durationAdmissionBarrierSatisfied = true;
 			return;
 		}
@@ -3125,12 +3128,30 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		collector.close();
 	}
 
+	/**
+	 * Whether this client has standalone DELETE work to judge: a slice started, or a failure is held.
+	 * A client that never started a slice, as an engine prototype built from a base configuration with
+	 * {@code load-op-delete-standalone} or a step refused, stopped or failed before its first slice
+	 * started, has none, and its stop and close give no failure-budget verdict. Slices held without a
+	 * start, as tests add them, are judged.
+	 */
+	private boolean hasStartedStandaloneDeleteWork() {
+		if (failureBudgetFailure != null || durationValidityFailure != null || startedSliceCount > 0) {
+			return true;
+		}
+		return !startEntered && !startStopped && !stepSlices.isEmpty();
+	}
+
 	private synchronized IntegrityTerminalException finalizeFailureBudget() {
 		if (failureBudgetController == null) {
 			return null;
 		}
 		if (failureBudgetFinalized) {
 			return failureBudgetTerminalFailure;
+		}
+		// After the finalized check, so a failure already given stays sticky at a later close.
+		if (!hasStartedStandaloneDeleteWork()) {
+			return null;
 		}
 		final ObjectFailureBudgetDecision terminalDecision;
 		try {
@@ -3737,7 +3758,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void publishFailedOutcomeBeforeIncompleteDurationMetricsOutput() {
-		if (failureBudgetController != null) {
+		if (failureBudgetController != null && hasStartedStandaloneDeleteWork()) {
 			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
 		}
 	}
@@ -3853,6 +3874,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				durationStopFailure = null;
 				durationAdmissionBarrierSatisfied = false;
 				standaloneDeleteStopCoordinated = false;
+			} else if (!hasStartedStandaloneDeleteWork()) {
+				// No slice started, so no operation admission is open to close.
+				durationAdmissionBarrierSatisfied = true;
 			} else if (durationStopFailure != null || !durationAdmissionBarrierSatisfied) {
 				durationCleanupRetryPending = true;
 				if (durationStopFailure == null) {
