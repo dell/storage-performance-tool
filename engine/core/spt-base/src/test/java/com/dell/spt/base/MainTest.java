@@ -32,7 +32,9 @@ class MainTest {
 
 	@AfterEach
 	void restoreLevels() {
-		levels.close();
+		if (levels != null) {
+			levels.close();
+		}
 	}
 
 	@Test
