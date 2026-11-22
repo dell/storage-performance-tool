@@ -12,6 +12,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
@@ -27,6 +28,7 @@ import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -48,6 +50,7 @@ import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -490,9 +493,53 @@ class StopBetweenSliceStartsTest {
 		assertTrue(closeFailure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
 						closeFailure.getMessage());
 		for (final Throwable suppressed : closeFailure.getSuppressed()) {
-			assertFalse(String.valueOf(suppressed.getMessage()).contains(Loggers.OPERATION_LIFECYCLE.getName()),
+			assertFalse(String.valueOf(suppressed.getMessage()).contains(OperationLifecycleArtifact.FILE_NAME),
 							suppressed::toString);
 		}
+	}
+
+	@Test
+	void aStartWhoseLastSliceFailsToStartStillCollectsEverySlicesLifecycleFile() throws Exception {
+		// The start reached the failing slice, so that slice may have written its file: it is collected too.
+		final LoadStep entry = mock(LoadStep.class);
+		final LoadStep worker = mock(LoadStep.class);
+		doAnswer(call -> {
+			throw new IllegalStateException("the start failed");
+		}).when(worker).start();
+		final TestLoadStepClient client = lifecycleClient(false, entry, worker);
+		servesItsLifecycleFile(0);
+
+		final Throwable failure = assertThrows(Throwable.class, client::start);
+		assertFalse(failure instanceof InterruptedException, failure::toString);
+		Thread.interrupted();
+
+		verify(worker).start();
+		assertDoesNotThrow(client::close);
+		assertTrue(Files.exists(lifecycleFile()), "no lifecycle file was published");
+		assertTrue(Files.exists(nodeLifecycleFile(0)), "the entry slice's lifecycle file was not collected");
+		assertTrue(Files.exists(nodeLifecycleFile(1)), "the failed slice's lifecycle file was not collected");
+	}
+
+	@Test
+	void aStartWhoseSecondSliceFailsItsArmStillCollectsTheStartedSlicesLifecycleFile() throws Exception {
+		// A failure, not a stop: the entry slice started and wrote its file; worker 1's never started.
+		final LoadStep entry = mock(LoadStep.class);
+		final LoadStep worker = mock(LoadStep.class);
+		doAnswer(call -> {
+			throw new IllegalStateException("the arm failed");
+		}).when(worker).startPreparation(anyLong(), anyLong());
+		final TestLoadStepClient client = lifecycleClient(true, entry, worker);
+
+		final Throwable failure = assertThrows(Throwable.class, client::start);
+		assertFalse(failure instanceof InterruptedException, failure::toString);
+		Thread.interrupted();
+
+		verify(entry).start();
+		verify(worker, never()).start();
+		assertDoesNotThrow(client::close);
+		assertTrue(Files.exists(lifecycleFile()), "no lifecycle file was published");
+		assertTrue(Files.exists(nodeLifecycleFile(0)), "the started entry slice's lifecycle file was not collected");
+		assertFalse(Files.exists(nodeLifecycleFile(1)), "the slice that never started has a lifecycle file");
 	}
 
 	/**
@@ -542,6 +589,47 @@ class StopBetweenSliceStartsTest {
 			});
 		});
 		return factory;
+	}
+
+	/**
+	 * A CREATE step, so with an operation lifecycle file, of {@code entry} and {@code workers}, with a
+	 * NIC set when {@code nicSet}. The entry slice's start writes its lifecycle file, with no row.
+	 */
+	private TestLoadStepClient lifecycleClient(final boolean nicSet, final LoadStep entry, final LoadStep... workers)
+					throws Exception {
+		final Config config = config();
+		config.val("load-op-type", "create");
+		if (nicSet) {
+			config.val("storage-net-interfaces", List.of("eth9"));
+		}
+		doAnswer(call -> {
+			Files.createDirectories(lifecycleFile().getParent());
+			Files.writeString(lifecycleFile(), OperationLifecycleArtifact.HEADER + "\n");
+			return null;
+		}).when(entry).start();
+		return client(config, entry, workers);
+	}
+
+	/**
+	 * Remote node {@code node} (from 0) holds its slice's lifecycle file, with no row, once the start
+	 * reached that slice, even when the start then failed.
+	 */
+	private void servesItsLifecycleFile(final int node) throws IOException {
+		final FileManagerService files = (FileManagerService) nodeFiles.values().stream().skip(node).findFirst().orElseThrow();
+		final String name = remoteFile(node, Loggers.OPERATION_LIFECYCLE.getName());
+		final byte[] header = (OperationLifecycleArtifact.HEADER + "\n").getBytes(StandardCharsets.UTF_8);
+		doAnswer(call -> {
+			if (!started(node)) {
+				throw new NoSuchFileException(name + " (" + token + ")");
+			}
+			final long offset = call.getArgument(1);
+			return offset == 0 ? header : new byte[0];
+		}).when(files).readFromFile(eq(name), anyLong());
+	}
+
+	/** The lifecycle file of slice {@code slice} (the entry's is 0) as the close collected it. */
+	private Path nodeLifecycleFile(final int slice) throws IOException {
+		return CsvLoggerArtifactAggregator.nodeSourcePath(lifecycleFile(), slice);
 	}
 
 	/** A slice that never started wrote neither its lifecycle file nor its event loops file. */
