@@ -22,6 +22,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.load.step.client.metrics.MetricsAggregator;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -65,6 +66,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
@@ -2856,6 +2858,78 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void aFailedStopStageWithALiveCounterProbeStillWritesTheMetricsOutput() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final Map<String, Object> metadata = new HashMap<>();
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(metadata);
+		client.addMetricsContextForTest(metricsContext);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSnapshot = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotEntered.countDown();
+			awaitIgnoringInterrupt(releaseSnapshot);
+			return cleanDeleteLifecycle();
+		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		addRawStepSlice(client, slice);
+		final Field aggregatorField = LoadStepClientBase.class.getDeclaredField("metricsAggregator");
+		aggregatorField.setAccessible(true);
+		try {
+			// The await's stop defers the output to the close while the live probe runs.
+			assertTrue(client.await(2, TimeUnit.SECONDS));
+			verify(mockMetricsManager, never()).unregister(metricsContext);
+			final IllegalStateException injected = new IllegalStateException("injected: metrics aggregator stop");
+			final MetricsAggregator aggregator = mock(MetricsAggregator.class);
+			doThrow(injected).when(aggregator).stop();
+			aggregatorField.set(client, aggregator);
+
+			// The close's stop fails with the probe still live, so the close is skipped: the output is written now.
+			assertSame(injected, assertThrows(IllegalStateException.class, client::close));
+
+			verify(mockMetricsManager, times(1)).unregister(metricsContext);
+			assertEquals(
+							MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED,
+							metadata.get(MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME));
+			assertFalse(client.isClosed());
+		} finally {
+			aggregatorField.set(client, null);
+			releaseSnapshot.countDown();
+			try {
+				client.close();
+			} catch (final IOException | RuntimeException ignored) {
+				// Only the release of the probe and the collector matters here.
+			}
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+	}
+
+	@Test
+	void aFailedStageOfAnIncompleteDurationStopStillWritesTheMetricsOutput() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						durationConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(new HashMap<>());
+		client.addMetricsContextForTest(metricsContext);
+		final IllegalStateException injected = new IllegalStateException("injected: outcome publish");
+		doThrow(injected).when(mockMetricsManager).updateTerminalDeleteFailureOutcome(anyString(), anyString());
+		addStepSlice(client, mock(LoadStep.class));
+
+		// No admission barrier was reached: the stop takes the incomplete duration branch.
+		assertSame(injected, assertThrows(IllegalStateException.class, client::doStop));
+
+		verify(mockMetricsManager, times(1)).unregister(metricsContext);
+	}
+
+	@Test
 	void terminalCollectionReprobesEverySliceAfterAPartialLiveFlight() throws Exception {
 		final Config config = countDeleteConfig();
 		config.val("load-op-wait-limit", 0);
@@ -3514,6 +3588,57 @@ class LoadStepClientBaseTest {
 	void closePublishesFailureBudgetOutcomeIntoRetainedFleetMetrics() throws Exception {
 		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient client = closeCleanStepWithRetainedFleetRow(metricsManager);
+
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleetFailureOutcome(metricsManager, client.loadStepId()),
+						"close must update the retained fleet row after the controller decision");
+	}
+
+	@Test
+	void aNeverStartedPrototypeClosedAfterARealStepKeepsThatStepsRetainedOutcome() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient step = closeCleanStepWithRetainedFleetRow(metricsManager);
+		// An engine prototype inherits the real step's id from the base configuration.
+		final TestLoadStepClient prototype = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
+
+		assertDoesNotThrow(prototype::close);
+
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleetFailureOutcome(metricsManager, step.loadStepId()));
+	}
+
+	@Test
+	void aNeverStartedDurationPrototypeStoppedAfterARealStepKeepsThatStepsRetainedOutcome() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient step = closeCleanStepWithRetainedFleetRow(metricsManager);
+		final Config config = durationConfig();
+		config.val("load-step-id", step.loadStepId());
+		try (var prototype = new TestLoadStepClient(config, extensions, ctxConfigs, metricsManager)) {
+			assertDoesNotThrow(prototype::doStop);
+
+			assertEquals(
+							MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+							retainedFleetFailureOutcome(metricsManager, step.loadStepId()));
+		}
+	}
+
+	private static String retainedFleetFailureOutcome(final MetricsManager metricsManager, final String stepId) {
+		return metricsManager.getTerminalSteps().stream()
+						.filter(entry -> entry.distributed && stepId.equals(entry.stepId))
+						.findFirst()
+						.orElseThrow().deleteMetrics
+						.failureOutcome();
+	}
+
+	/** A count-mode standalone DELETE that completes cleanly and leaves its retained fleet row. */
+	private TestLoadStepClient closeCleanStepWithRetainedFleetRow(final MetricsManagerImpl metricsManager)
+					throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(
 						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
 		final Map<String, Object> metadata = new HashMap<>();
@@ -3587,15 +3712,7 @@ class LoadStepClientBaseTest {
 			logger.removeAppender(appender);
 			appender.stop();
 		}
-
-		final var retainedFleet = metricsManager.getTerminalSteps().stream()
-						.filter(entry -> entry.distributed && client.loadStepId().equals(entry.stepId))
-						.findFirst()
-						.orElseThrow();
-		assertEquals(
-						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
-						retainedFleet.deleteMetrics.failureOutcome(),
-						"close must update the retained fleet row after the controller decision");
+		return client;
 	}
 
 	@Test
