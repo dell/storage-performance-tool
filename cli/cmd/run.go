@@ -2437,6 +2437,9 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			_ = os.Setenv(constants.EnvSptImage, strings.TrimSpace(sptImageFlag))
 		}
 
+		if params.S3Driver != scenario.S3DriverRdma {
+			_ = os.Unsetenv(constants.EnvRdmaEnabled)
+		}
 		switch params.S3Driver {
 		case scenario.S3DriverRdma:
 			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
