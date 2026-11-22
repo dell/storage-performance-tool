@@ -16,6 +16,7 @@ import com.github.akurilov.commons.io.Output;
 import java.io.EOFException;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Consumer;
 
@@ -35,6 +36,7 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 	private final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker;
 	private final LongSupplier clock;
 	private final Consumer<RangeReadOperation<I>> localResultOutput;
+	private final BiConsumer<RangeReadOperation<I>, RangeReadCirculation> settledResultOutput;
 	private final Object localAdmissionLock = new Object();
 	private volatile boolean open = true;
 	private boolean pacingStarted;
@@ -57,7 +59,19 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 	public RangeReadAdmission(final Output<RangeReadOperation<I>> driver,
 					final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker, final int capacity,
 					final LongSupplier clock, final Consumer<RangeReadOperation<I>> localResultOutput) {
+		this(driver, tracker, capacity, clock, localResultOutput, (ignoredOp, ignoredCirculation) -> {});
+	}
+
+	/**
+	 * The settled-result output publishes a result which its holder settled outside the driver,
+	 * such as a retry the generator held when admission closed. It must not throw.
+	 */
+	public RangeReadAdmission(final Output<RangeReadOperation<I>> driver,
+					final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker, final int capacity,
+					final LongSupplier clock, final Consumer<RangeReadOperation<I>> localResultOutput,
+					final BiConsumer<RangeReadOperation<I>, RangeReadCirculation> settledResultOutput) {
 		this.localResultOutput = Objects.requireNonNull(localResultOutput);
+		this.settledResultOutput = Objects.requireNonNull(settledResultOutput);
 		if (capacity <= 0) {
 			throw new IllegalArgumentException("Range admission capacity must be positive");
 		}
@@ -158,6 +172,15 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 			}
 		}
 		return accepted;
+	}
+
+	/**
+	 * Publishes a result settled by a holder of the operation other than the driver, once. Call
+	 * it outside the holder's locks, after the settlement which made the circulation terminal.
+	 */
+	@SuppressWarnings("unchecked")
+	public void publishSettled(final RangeReadOperation<?> op, final RangeReadCirculation circulation) {
+		settledResultOutput.accept((RangeReadOperation<I>) op, circulation);
 	}
 
 	/**
