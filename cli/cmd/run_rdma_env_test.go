@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -25,16 +24,23 @@ func applyRunEnvDefaultsForTest(t *testing.T) {
 	t.Helper()
 	type saved struct {
 		value   string
+		slice   []string
 		changed bool
 	}
 	flags := map[string]saved{}
-	runCmd.Flags().VisitAll(func(f *pflag.Flag) { flags[f.Name] = saved{f.Value.String(), f.Changed} })
+	runCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		prev := saved{value: f.Value.String(), changed: f.Changed}
+		if sv, ok := f.Value.(pflag.SliceValue); ok {
+			prev.slice = append([]string(nil), sv.GetSlice()...)
+		}
+		flags[f.Name] = prev
+	})
 	annotations := maps.Clone(runCmd.Annotations)
 	t.Cleanup(func() {
 		runCmd.Flags().VisitAll(func(f *pflag.Flag) {
 			if prev := flags[f.Name]; f.Value.String() != prev.value || f.Changed != prev.changed {
 				if sv, ok := f.Value.(pflag.SliceValue); ok {
-					_ = sv.Replace(strings.Split(strings.Trim(prev.value, "[]"), ","))
+					_ = sv.Replace(prev.slice)
 				} else {
 					_ = f.Value.Set(prev.value)
 				}
@@ -76,6 +82,11 @@ func TestRunCmdKeepsSptRdmaOnlyForTheRdmaDriverOnEveryRoute(t *testing.T) {
 			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
 				t.Chdir(t.TempDir())
 				clearEnvDefaultsTestEnv(t)
+				for _, key := range []string{constants.EnvChecksum, constants.EnvIntegrityMaxConsoleFails,
+					constants.EnvIntegrityRuntimeIdentity, constants.EnvObjectDataCompressibility,
+					constants.EnvObjectDataDedupable, constants.EnvRdmaPoolShortfall} {
+					t.Setenv(key, "")
+				}
 				t.Setenv(constants.EnvRdmaEnabled, tc.rdmaEnv)
 				t.Setenv(constants.EnvS3Driver, tc.driverEnv)
 				setDeleteRouteFlags(t, route.hosts, route.minHosts)
