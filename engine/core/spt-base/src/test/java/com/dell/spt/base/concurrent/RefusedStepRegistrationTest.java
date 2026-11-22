@@ -9,18 +9,24 @@ import static org.mockito.Mockito.mock;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
-import com.dell.spt.base.load.step.client.LoadStepClientBase;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
 import com.dell.spt.base.load.step.linear.LinearLoadStepLocal;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.github.akurilov.confuse.Config;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Handler;
-import java.util.logging.LogRecord;
-import java.util.logging.Logger;
+import java.util.Collections;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 /** A step whose constructor refuses its configuration leaves nothing for the exit hook to close. */
@@ -61,49 +67,77 @@ class RefusedStepRegistrationTest {
 		return config;
 	}
 
-	/** Runs closeAll and returns what it logged about a step, leaving other daemons' records out. */
-	private static List<LogRecord> stepCloseFailures() {
-		final List<LogRecord> records = new ArrayList<>();
-		final Handler handler = new Handler() {
-			@Override
-			public void publish(final LogRecord record) {
-				records.add(record);
+	/**
+	 * Runs closeAll and returns the failures it logged about this class's own steps, leaving out other daemons'
+	 * records, such as the close failures of steps another test class left registered. closeAll logs them as
+	 * warnings on the Errors logger, which lets them through meanwhile, whatever level an earlier test in this JVM
+	 * left it at.
+	 */
+	private static List<Throwable> stepCloseFailures() throws InterruptedException {
+		final var sentinel = new Throwable("closeAll test sentinel", null, false, false) {};
+		final var appender = new CloseFailureAppender(sentinel);
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+		// DEBUG lets the sentinel through too, which then stays out of the console, whose threshold is INFO.
+		try (var levels = LoggerLevels.atMost(Level.DEBUG, Loggers.ERR.getName())) {
+			logger.addAppender(appender);
+			try {
+				DaemonBase.closeAll();
+				// The engine's loggers are asynchronous but keep their order: what closeAll logged arrives first.
+				Loggers.ERR.debug("closeAll test sentinel, not a failure", sentinel);
+				assertTrue(appender.awaitSentinel(), "the sentinel record never arrived");
+			} finally {
+				logger.removeAppender(appender);
+				appender.stop();
 			}
-
-			@Override
-			public void flush() {}
-
-			@Override
-			public void close() {}
-		};
-		final Logger logger = Logger.getLogger(DaemonBase.class.getSimpleName());
-		logger.addHandler(handler);
-		try {
-			DaemonBase.closeAll();
-		} finally {
-			logger.removeHandler(handler);
 		}
-		return records.stream()
-						.filter(RefusedStepRegistrationTest::comesFromAStep)
-						.toList();
+		return appender.failures();
 	}
 
 	/**
-	 * Whether a record comes from closing a step, not another kind of daemon an earlier test class
-	 * left registered. A step another class left open, whose close throws, would still show here.
+	 * Whether a closeAll record names one of this class's steps: it logs the daemon's class name, then the failure
+	 * ({@code DaemonBase.closeAll}, through {@code LogUtil.trace}).
 	 */
-	private static boolean comesFromAStep(final LogRecord record) {
-		final var thrown = record.getThrown();
-		if (thrown == null) {
-			return false;
+	private static boolean namesThisClassesStep(final String message) {
+		return Stream.of(Client.class, Local.class)
+						.anyMatch(step -> message.startsWith("Failed to close the daemon instance " + step.getName() + ": "));
+	}
+
+	/** Collects the throwables of the Errors logger's warnings about this class's steps until the sentinel arrives. */
+	private static final class CloseFailureAppender extends AbstractAppender {
+		private final List<Throwable> failures = Collections.synchronizedList(new ArrayList<>());
+		private final CountDownLatch sentinelSeen = new CountDownLatch(1);
+		private final Throwable sentinel;
+
+		CloseFailureAppender(final Throwable sentinel) {
+			super("refused-step-close-capture", null, null, true, Property.EMPTY_ARRAY);
+			this.sentinel = sentinel;
 		}
-		final var stepPackage = LoadStepClientBase.class.getPackageName().replaceFirst("\\.client$", ".");
-		return Arrays.stream(thrown.getStackTrace())
-						.anyMatch(frame -> frame.getClassName().startsWith(stepPackage));
+
+		@Override
+		public void append(final LogEvent event) {
+			final var thrown = event.getThrown();
+			if (thrown == sentinel) {
+				sentinelSeen.countDown();
+			} else if (thrown != null
+							&& sentinelSeen.getCount() > 0
+							&& event.getLevel().isMoreSpecificThan(Level.WARN)
+							&& namesThisClassesStep(event.getMessage().getFormattedMessage())) {
+				failures.add(thrown);
+			}
+		}
+
+		boolean awaitSentinel() throws InterruptedException {
+			return sentinelSeen.await(10, TimeUnit.SECONDS);
+		}
+
+		List<Throwable> failures() {
+			return List.copyOf(failures);
+		}
 	}
 
 	@Test
-	void aClientRefusedForItsIntegrityConfigurationThrowsNothingInCloseAll() {
+	void aClientRefusedForItsIntegrityConfigurationThrowsNothingInCloseAll() throws InterruptedException {
 		assertThrows(IntegrityTerminalException.class, () -> new Client(exactCountWithoutMode(), null));
 
 		assertFalse(stepRegistered());
@@ -154,7 +188,7 @@ class RefusedStepRegistrationTest {
 	}
 
 	@Test
-	void aFullyBuiltUnclosedStepIsStillClosedByCloseAll() {
+	void aFullyBuiltUnclosedStepIsStillClosedByCloseAll() throws InterruptedException {
 		final var step = new Client(TestConfigBuilder.config(), null);
 		assertTrue(DaemonBase.isRegistered(daemon -> daemon == step));
 
