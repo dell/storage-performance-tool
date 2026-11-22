@@ -16,8 +16,10 @@ import com.dell.spt.base.logging.Loggers;
 import java.io.EOFException;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.rmi.RemoteException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -63,6 +65,31 @@ public class OpTraceLogFileAggregatorTest {
 
 		verify(worker, never()).deleteFile(anyString());
 		assertEquals(List.of(), warnings);
+	}
+
+	/**
+	 * A worker whose trace file name cannot be read is left out with one warning; the other workers'
+	 * traces are still collected, and the step is not refused for it.
+	 */
+	@Test
+	public void aWorkerWhoseTraceFileNameCannotBeReadIsLeftOutWithOneWarning() throws Exception {
+		final String stepId = "unnamed-trace-step-" + UUID.randomUUID();
+		final String file = "/w2/" + stepId + "/op.trace.csv";
+		final FileManagerService unnamed = mock(FileManagerService.class);
+		when(unnamed.logFileName(Loggers.OP_TRACES.getName(), stepId)).thenThrow(new RemoteException("the worker went away"));
+		final FileManagerService named = mock(FileManagerService.class);
+		when(named.logFileName(Loggers.OP_TRACES.getName(), stepId)).thenReturn(file);
+		when(named.readFromFile(file, 0L)).thenThrow(new EOFException());
+		final List<OpTraceLogFileAggregator> built = new ArrayList<>();
+
+		final List<String> warnings = warningsWhile(
+						stepId, () -> built.add(new OpTraceLogFileAggregator(stepId, List.of(FileManager.INSTANCE, unnamed, named))));
+		built.getFirst().close();
+
+		assertEquals(1, warnings.size(), warnings.toString());
+		assertTrue(warnings.getFirst().startsWith("WARN " + stepId + ": failed to get the remote log file name"), warnings.toString());
+		verify(unnamed, never()).readFromFile(anyString(), anyLong());
+		verify(named).readFromFile(file, 0L);
 	}
 
 	/**
