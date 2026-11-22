@@ -265,3 +265,13 @@ func TestYAMLEmptyInputIsNull(t *testing.T) {
 		}
 	}
 }
+
+func TestYAMLMalformedLaterDocumentStillMasksTheUID(t *testing.T) {
+	in := "---\nstorage:\n  auth:\n    uid: DOC1UID\n---\nstorage: [unclosed\n  auth:\n    uid: DOC2UID\n"
+	got := string(YAML([]byte(in)))
+	for _, leak := range []string{"DOC1UID", "DOC2UID"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("fallback left %s unmasked:\n%s", leak, got)
+		}
+	}
+}
