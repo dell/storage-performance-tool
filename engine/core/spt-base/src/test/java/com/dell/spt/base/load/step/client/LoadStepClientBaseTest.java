@@ -2921,6 +2921,7 @@ class LoadStepClientBaseTest {
 		client.addMetricsContextForTest(metricsContext);
 		final IllegalStateException injected = new IllegalStateException("injected: outcome publish");
 		doThrow(injected).when(mockMetricsManager).updateTerminalDeleteFailureOutcome(anyString(), anyString());
+		addStepSlice(client, mock(LoadStep.class));
 
 		// No admission barrier was reached: the stop takes the incomplete duration branch.
 		assertSame(injected, assertThrows(IllegalStateException.class, client::doStop));

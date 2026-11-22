@@ -3595,7 +3595,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private synchronized boolean failureBudgetFinalizedOrAbsent() {
-		return failureBudgetController == null || failureBudgetFinalized;
+		return failureBudgetController == null || failureBudgetFinalized || !hasStartedStandaloneDeleteWork();
 	}
 
 	/**
@@ -3603,7 +3603,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * counters, so that a later close reports that outcome and fails the run, not a clean one.
 	 */
 	private synchronized void finalizeFailedFailureBudgetAtStop(final Throwable cause) {
-		if (failureBudgetController == null || failureBudgetFinalized) {
+		if (failureBudgetController == null || failureBudgetFinalized || !hasStartedStandaloneDeleteWork()) {
 			return;
 		}
 		failureBudgetTerminalFailure = appendTerminalFailure(
