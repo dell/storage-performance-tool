@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.aws.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
@@ -52,16 +53,19 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * The driver's workers start an operation's request timing only on its first submission, so a
- * multipart upload's parent keeps its initiation's request times through its completion and
- * reports the whole upload; the timing reset that the Netty drivers need before a completion must
- * not reach it. A retried part is a new submission, timed from its own start.
+ * A multipart upload's parent makes two requests on one operation, its initiation and then its
+ * completion or abort. The driver's workers start an operation's request timing only on its first
+ * submission, so the driver times the completion or abort itself, from cleared timing: the
+ * parent's result is that request, including any retries the client makes for it, as on the Netty
+ * drivers, and not the whole upload. A retried part is a new submission, timed from its own start.
  */
 @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3AwsMultipartTimingTest {
 
 	private static final int PART_SIZE = 1024;
 	private static final int PARTS = 3;
+	private static final long PART_DELAY_MILLIS = 300;
+	private static final long COMPLETION_DELAY_MILLIS = 200;
 	private static final long RESULT_TIMEOUT_SECONDS = 20;
 	private static final String DRAINED = "s3-aws-multipart-timing-log-capture-drained";
 
@@ -90,34 +94,176 @@ final class S3AwsMultipartTimingTest {
 		}
 	}
 
+	/**
+	 * Parts take {@link #PART_DELAY_MILLIS} and the completion {@link #COMPLETION_DELAY_MILLIS}: the
+	 * parent's result is the completion, which starts once every part has ended, so its duration is
+	 * the completion's, whatever the number of parts. Before, it ran from the initiation, through the
+	 * parts.
+	 */
 	@Test
-	void anUploadsParentKeepsItsInitiationsRequestTimesThroughItsCompletion() throws Exception {
-		errors.drained();
-		final var start = System.nanoTime();
-		final var upload = upload("whole");
-		final var wallMicros = (System.nanoTime() - start) / 1_000;
+	void anUploadsParentIsTimedByItsCompletionWhateverItsPartCount() throws Exception {
+		stub.partDelayMillis = PART_DELAY_MILLIS;
+		stub.completionDelayMillis = COMPLETION_DELAY_MILLIS;
+		for (final var parts : List.of(2, 6)) {
+			errors.drained();
+			final var upload = upload("whole-" + parts, parts);
 
-		final var composites = upload.stream().filter(result -> result instanceof CompositeDataOperation<?>).toList();
-		assertEquals(2, composites.size(), "the initiation and the completion: " + upload);
+			final var composites = composites(upload);
+			assertEquals(2, composites.size(), "the initiation and the completion: " + upload);
+			final var initiation = composites.get(0);
+			final var parent = composites.get(1);
+			assertEquals(Operation.Status.SUCC, parent.status(), parent::toString);
+			assertEquals(parts, parts(upload).size(), upload::toString);
+			assertTimedInOrder(initiation);
+			assertTimedInOrder(parent);
+			assertTrue(parent.reqTimeStart() > initiation.respTimeDone(),
+							() -> "parent " + times(parent) + ", initiation " + times(initiation));
+			for (final var part : parts(upload)) {
+				assertTimedInOrder(part);
+				assertTrue(parent.reqTimeStart() > part.respTimeDone(), () -> "parent " + times(parent) + ", part " + times(part));
+			}
+			// The completion's own time: at least its delay, and less than a part's on top of it, which
+			// the whole upload takes at least.
+			assertTrue(parent.duration() >= COMPLETION_DELAY_MILLIS * 1_000
+							&& parent.duration() < (COMPLETION_DELAY_MILLIS + PART_DELAY_MILLIS) * 1_000,
+							() -> parts + " parts: parent " + parent.duration() + " µs, " + times(parent));
+			assertTrue(parent.latency() >= 0 && parent.latency() <= parent.duration(), () -> times(parent));
+			assertEquals(List.of(), errors.drained().stream().filter(line -> line.contains("IllegalStateException")).toList());
+		}
+		assertEquals(2, stub.completions.get());
+	}
+
+	/**
+	 * Every part is refused, so the part runs out of the driver's retries and the upload is aborted:
+	 * the parent's result is the abort, which starts once the part's last attempt has ended.
+	 */
+	@Test
+	void anAbortedUploadsParentIsTimedByItsAbortWhenAllPartsFail() throws Exception {
+		stub.failPart = n -> true;
+		errors.drained();
+		final var upload = upload("aborted", 1);
+
+		final var composites = composites(upload);
+		assertEquals(2, composites.size(), "the initiation and the abort: " + upload);
 		final var initiation = composites.get(0);
 		final var parent = composites.get(1);
-		assertEquals(Operation.Status.SUCC, parent.status(), parent::toString);
-		assertTrue(initiation.reqTimeStart() > 0);
-		assertEquals(initiation.reqTimeStart(), parent.reqTimeStart(), "the upload is timed from its initiation");
-		assertEquals(initiation.reqTimeDone(), parent.reqTimeDone());
-		for (final var part : parts(upload)) {
-			assertTrue(parent.respTimeStart() > part.respTimeDone(), () -> "parent " + times(parent) + ", part " + times(part));
+		// The aborted upload ends with its part's failure, not the abort's own outcome.
+		assertEquals(Operation.Status.RESP_FAIL_CLIENT, parent.status(), parent::toString);
+		assertEquals(1, stub.aborts.size(), stub.aborts::toString);
+		assertEquals(0, stub.completionRequests.get());
+		final var parts = parts(upload);
+		assertEquals(1 + 3, parts.size(), "the part and its three retries: " + upload);
+		assertTimedInOrder(parent);
+		assertTrue(parent.reqTimeStart() > initiation.respTimeDone(), () -> "abort " + times(parent) + ", initiation " + times(initiation));
+		for (final var part : parts) {
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, part.status(), part::toString);
+			assertTrue(parent.reqTimeStart() > part.respTimeDone(), () -> "abort " + times(parent) + ", part " + times(part));
 		}
-		assertTrue(parent.duration() > 0 && parent.duration() <= wallMicros,
-						() -> "duration " + parent.duration() + " µs against " + wallMicros + " µs of wall time");
 		assertEquals(List.of(), errors.drained().stream().filter(line -> line.contains("IllegalStateException")).toList());
+	}
+
+	/** A completion that is refused fails the upload once, and the upload is aborted. */
+	@Test
+	void aFailedCompletionFailsTheUploadOnceAndAbortsIt() throws Exception {
+		stub.failCompletion = true;
+		errors.drained();
+		final var upload = upload("refused", PARTS);
+
+		final var composites = composites(upload);
+		assertEquals(2, composites.size(), "the initiation and the completion: " + upload);
+		final var parent = composites.get(1);
+		assertEquals(Operation.Status.RESP_FAIL_CLIENT, parent.status(), parent::toString);
+		assertEquals(1, stub.completionRequests.get());
+		assertEquals(0, stub.completions.get());
+		assertEquals(1, stub.aborts.size(), stub.aborts::toString);
+		assertEquals(Set.of(), stub.openUploads);
+		// No duration from a cleared start: the parent's times are its completion's, or none.
+		assertTrue(parent.duration() >= 0 && parent.duration() < TimeUnit.SECONDS.toMicros(RESULT_TIMEOUT_SECONDS), () -> times(parent));
+		assertEquals(List.of(), errors.drained().stream().filter(line -> line.contains("IllegalStateException")).toList());
+		assertNull(results.poll(200, TimeUnit.MILLISECONDS), "no second result of the upload");
+	}
+
+	/**
+	 * The first completion request is answered 503, which the client retries itself: the upload
+	 * completes once, and the parent's one result covers both requests and the back-off between.
+	 */
+	@Test
+	void aCompletionTheClientRetriesIsOneUploadTimedWithItsRetry() throws Exception {
+		stub.failCompletionRequest = n -> n == 1;
+		stub.failureStatus = 503;
+		stub.completionDelayMillis = COMPLETION_DELAY_MILLIS;
+		errors.drained();
+		final var upload = upload("retried-completion", PARTS);
+
+		final var composites = composites(upload);
+		assertEquals(2, composites.size(), "the initiation and the completion: " + upload);
+		final var parent = composites.get(1);
+		assertEquals(Operation.Status.SUCC, parent.status(), parent::toString);
+		assertEquals(2, stub.completionRequests.get(), "the client sent the completion again");
+		assertEquals(1, stub.completions.get());
+		assertEquals(List.of(), stub.aborts);
+		assertTimedInOrder(parent);
+		for (final var part : parts(upload)) {
+			assertTrue(parent.reqTimeStart() > part.respTimeDone(), () -> "parent " + times(parent) + ", part " + times(part));
+		}
+		assertTrue(parent.duration() >= 2 * COMPLETION_DELAY_MILLIS * 1_000, () -> "both completion requests: " + times(parent));
+		assertEquals(List.of(), errors.drained().stream().filter(line -> line.contains("IllegalStateException")).toList());
+		assertNull(results.poll(200, TimeUnit.MILLISECONDS), "no second result of the upload");
+	}
+
+	/**
+	 * Admission closes while the upload's last part is in flight, so its completion is never sent. The
+	 * parent's timing is reset for a completion that does not happen, and whatever result of it is
+	 * published is not a success, with no duration from the cleared start.
+	 */
+	@Test
+	void aCompletionRefusedByTheClosedAdmissionGateIsNotTimed() throws Exception {
+		final var gate = new CountDownLatch(1);
+		stub.partGate = gate;
+		stub.partGateFrom = PARTS;
+		final var start = System.nanoTime();
+		final DataItem item = new DataItemImpl("refused-gate", 0, (long) PARTS * PART_SIZE);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
+		assertTrue(driver.put(new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", S3AwsDriverHarness.CREDENTIAL, null, 0, PART_SIZE)));
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (stub.partRequests.get() < PARTS && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertEquals(PARTS, stub.partRequests.get(), "the last part is in flight");
+		driver.closeAdmission();
+		gate.countDown();
+		// The last part ends as a success once admission is closed, so the completion is refused.
+		final List<Operation<?>> published = new ArrayList<>();
+		while (parts(published).stream().filter(part -> part.status() == Operation.Status.SUCC).count() < PARTS) {
+			final var result = results.poll(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+			assertNotNull(result, () -> "every part succeeded: " + published);
+			published.add(result);
+		}
+		Thread.sleep(200);
+		driver.close();
+		final var wallMicros = (System.nanoTime() - start) / 1_000;
+		driver = null;
+
+		assertEquals(0, stub.completionRequests.get(), "the completion is not sent");
+		results.drainTo(published);
+		final var composites = composites(published);
+		// The closed gate refuses the completion, so this route publishes the initiation only, and no
+		// parent result whose timing could be wrong.
+		assertEquals(1, composites.size(), () -> "the initiation alone: " + published);
+		for (final var parent : composites.subList(1, composites.size())) {
+			assertTrue(parent.status() != Operation.Status.SUCC, () -> "a parent not completed: " + times(parent));
+			assertTrue(parent.duration() >= 0 && parent.duration() <= wallMicros,
+							() -> "duration " + parent.duration() + " µs against " + wallMicros + " µs of wall time: " + times(parent));
+			assertTrue(parent.latency() >= 0 && parent.latency() <= wallMicros, () -> times(parent));
+		}
 	}
 
 	@Test
 	void aPartThatFailsOnceIsRetriedAndTheUploadCompletes() throws Exception {
 		stub.failPart = n -> n == 1;
 		errors.drained();
-		final var upload = upload("retried");
+		final var upload = upload("retried", PARTS);
 
 		final var parent = upload.get(upload.size() - 1);
 		assertEquals(Operation.Status.SUCC, parent.status(), upload::toString);
@@ -140,9 +286,9 @@ final class S3AwsMultipartTimingTest {
 		assertEquals(List.of(), errors.drained().stream().filter(line -> line.contains("IllegalStateException")).toList());
 	}
 
-	/** Every result of the upload of {@code name}, in order, up to the parent's last. */
-	private List<Operation<?>> upload(final String name) throws Exception {
-		final DataItem item = new DataItemImpl(name, 0, (long) PARTS * PART_SIZE);
+	/** Every result of the upload of {@code name} in {@code parts} parts, in order, up to the parent's last. */
+	private List<Operation<?>> upload(final String name, final int parts) throws Exception {
+		final DataItem item = new DataItemImpl(name, 0, (long) parts * PART_SIZE);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
 		assertTrue(driver.put(new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, item, null, "/bucket", S3AwsDriverHarness.CREDENTIAL, null, 0, PART_SIZE)));
@@ -157,6 +303,17 @@ final class S3AwsMultipartTimingTest {
 				return upload;
 			}
 		}
+	}
+
+	private static List<Operation<?>> composites(final List<Operation<?>> results) {
+		return results.stream().filter(result -> result instanceof CompositeDataOperation<?>).toList();
+	}
+
+	/** {@code result}'s four times are set and in order. */
+	private static void assertTimedInOrder(final Operation<?> result) {
+		assertTrue(result.reqTimeStart() > 0 && result.reqTimeStart() <= result.reqTimeDone()
+						&& result.reqTimeDone() <= result.respTimeStart() && result.respTimeStart() <= result.respTimeDone(),
+						() -> times(result));
 	}
 
 	private static List<PartialDataOperation<?>> parts(final List<Operation<?>> results) {
@@ -196,7 +353,19 @@ final class S3AwsMultipartTimingTest {
 		final Set<String> openUploads = ConcurrentHashMap.newKeySet();
 		volatile IntPredicate failPart = n -> false;
 		volatile Predicate<String> failUpload = uploadId -> false;
+		volatile boolean failCompletion;
 		volatile int failureStatus = 400;
+		/** Completion requests received, counted from 1, whether answered or failed. */
+		final AtomicInteger completionRequests = new AtomicInteger();
+		/** The completion requests answered with {@link #failureStatus}, by their number. */
+		volatile IntPredicate failCompletionRequest = n -> false;
+		/** How long each part request waits before it is answered. */
+		volatile long partDelayMillis;
+		/** How long each completion request waits before it is answered. */
+		volatile long completionDelayMillis;
+		/** Part requests numbered from {@link #partGateFrom} wait for this gate before they are answered. */
+		volatile CountDownLatch partGate = new CountDownLatch(0);
+		volatile int partGateFrom = 1;
 
 		MultipartStub() {
 			try {
@@ -221,6 +390,10 @@ final class S3AwsMultipartTimingTest {
 				exchange.getResponseHeaders().set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
 				if ("PUT".equals(method) && query.contains("partNumber=")) {
 					final var n = partRequests.incrementAndGet();
+					if (n >= partGateFrom) {
+						awaitGate(partGate);
+					}
+					pause(partDelayMillis);
 					if (failPart.test(n) || failUpload.test(uploadId(query))) {
 						final var status = failureStatus;
 						respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
@@ -233,6 +406,10 @@ final class S3AwsMultipartTimingTest {
 					openUploads.add(uploadId);
 					respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
 									+ "<UploadId>" + uploadId + "</UploadId></InitiateMultipartUploadResult>");
+				} else if ("POST".equals(method) && query.contains("uploadId=")
+								&& (failCompletionRequest.test(completionRequest()) || failCompletion)) {
+					final var status = failureStatus;
+					respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
 				} else if ("POST".equals(method) && query.contains("uploadId=")) {
 					completions.incrementAndGet();
 					openUploads.remove(uploadId(query));
@@ -242,9 +419,36 @@ final class S3AwsMultipartTimingTest {
 					aborts.add(exchange.getRequestURI().toString());
 					openUploads.remove(uploadId(query));
 					exchange.sendResponseHeaders(204, -1);
+				} else if ("PUT".equals(method) && exchange.getRequestHeaders().containsKey("x-amz-copy-source")) {
+					respond(exchange, 200, "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>");
 				} else {
 					empty(exchange, 200);
 				}
+			}
+		}
+
+		/** Counts a completion request and waits out {@link #completionDelayMillis}; returns its number. */
+		private int completionRequest() {
+			final var n = completionRequests.incrementAndGet();
+			pause(completionDelayMillis);
+			return n;
+		}
+
+		private static void pause(final long millis) {
+			if (millis > 0) {
+				try {
+					Thread.sleep(millis);
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			}
+		}
+
+		private static void awaitGate(final CountDownLatch gate) {
+			try {
+				gate.await(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
 		}
 

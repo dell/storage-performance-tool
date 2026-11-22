@@ -12,6 +12,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -91,7 +92,7 @@ func TestGenerateRunSummaryCreatesFileAndSnippet(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf, summary.RunEndCompleted); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestGenerateRunSummaryHandlesListWorkload(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf, summary.RunEndCompleted); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -264,7 +265,7 @@ func TestGenerateRunSummaryMixedWorkloadIncludesBreakdown(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf, summary.RunEndCompleted); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -364,7 +365,7 @@ func TestGenerateRunSummaryMixedWorkloadPropagatesDistributionWarning(t *testing
 	}
 
 	var buf strings.Builder
-	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf, summary.RunEndCompleted); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -391,7 +392,7 @@ func TestGenerateRunSummaryErrorOnMissingManifest(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	_, err := generateRunSummary(context.Background(), filepath.Join(dir, "empty"), &strings.Builder{})
+	_, err := generateRunSummary(context.Background(), filepath.Join(dir, "empty"), &strings.Builder{}, summary.RunEndCompleted)
 	if err == nil {
 		t.Fatalf("expected error when manifest missing")
 	}

@@ -161,7 +161,7 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 			return os.WriteFile(filepath.Join(root, constants.ResultsManifestFileName), data, 0o600)
 		}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 	metadata := &runMetadata{ResultsRoot: resultsRoot}
 	monitor := startAutoResultsMonitor(
@@ -288,7 +288,7 @@ func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
 		newResultsFetcherFunc = originalFetcher
 		generateRunSummaryFunc = originalSummary
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
@@ -369,7 +369,7 @@ func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
 				return os.WriteFile(filepath.Join(root, constants.ResultsManifestFileName), indexData, 0o600)
 			}}
 		}
-		generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+		generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 		capturedMetadata = metadata
 		return startAutoResultsMonitor(
 			parentCtx, baseURL, label, resultsDir, plannedStepIDs, runID, debug, hosts, port,

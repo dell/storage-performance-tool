@@ -93,7 +93,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
 	// Outside DELETE duration mode the stop runs once: the stop that close() repeats after a failed one
-	// does nothing, so the close still releases the slice and throws the stop's failure.
+	// does nothing, so the close still releases the slice and throws the stop's failure. A standalone
+	// DELETE shuts down once too, and a failed shutdown's failure is the stop's.
+	private boolean shutdownAttempted;
+	private RuntimeException shutdownFailure;
 	private boolean stopAttempted;
 	private RuntimeException stopFailure;
 	// Set once the slice has released its contexts, drivers and metrics; a later close releases nothing.
@@ -144,12 +147,46 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		return index < contexts.size() ? contexts.get(index).activeOpCount() : 0;
 	}
 
+	/**
+	 * Closes what a failed {@code init()} opened before the context it was building, and returns
+	 * {@code failure} to rethrow. That context's own driver and generator are closed by its
+	 * {@link ContextInitResources}. When the failure came before {@code init()} added that context
+	 * ({@code contextPending}), this closes every context added before it and empties
+	 * {@link #stepContexts}. Otherwise the step's close owns them all and nothing is closed here. Any
+	 * {@code Throwable} a close throws, an {@code Error} as well, is added to {@code failure} as
+	 * suppressed, and the remaining contexts are still closed. An earlier context's close logs an
+	 * {@code IOException} from its own driver's close itself and does not throw it, so that failure is
+	 * in the log only, not among the suppressed.
+	 */
+	protected final <T extends Throwable> T closeAfterInitFailure(
+					final T failure, final boolean contextPending) {
+		if (!contextPending) {
+			return failure;
+		}
+		final List<AutoCloseable> resources = new ArrayList<>(stepContexts);
+		stepContexts.clear();
+		for (final AutoCloseable resource : resources) {
+			try {
+				resource.close();
+			} catch (final Throwable closeFailure) {
+				// An Error from a close is kept as well, so the original failure and the later closes win.
+				if (closeFailure instanceof InterruptedException) {
+					Thread.currentThread().interrupt();
+				}
+				failure.addSuppressed(closeFailure);
+			}
+		}
+		return failure;
+	}
+
 	protected LoadStepLocalBase(
 					final Config baseConfig,
 					final List<Extension> extensions,
 					final List<Config> contextConfigs,
 					final MetricsManager metricsManager) {
-		super(baseConfig, extensions, contextConfigs, metricsManager);
+		super(baseConfig, extensions, contextConfigs, metricsManager, true);
+		// Only now, with this class's fields set, may the exit hook close this step.
+		registerForCloseAll();
 	}
 
 	@Override
@@ -214,6 +251,16 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						reconciled);
 	}
 
+	/**
+	 * A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at
+	 * close. Neither does one whose start never reached it, as when a stop cut the entry's start
+	 * after the slice was created.
+	 */
+	@Override
+	protected final void onStartRefusedAtJvmExit() {
+		startRefused = true;
+	}
+
 	@Override
 	protected void doStartWrapped() {
 		// A step that runs again reads its meters afresh.
@@ -225,6 +272,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
 		operationLifecyclePublished = false;
 		nicPathsPublished = false;
+		shutdownAttempted = false;
+		shutdownFailure = null;
 		stopAttempted = false;
 		stopFailure = null;
 		failedDurationCloses = 0;
@@ -812,7 +861,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		boolean countLimitConfigured = false;
 		boolean countLimitApplied = false;
 		try {
-			final long countLimit = this.config.longVal("load-op-limit-count");
+			// A mixed step counts against every sub-load over the base; other step types keep the base's
+			// count here, which the CLI's completion detection reads.
+			final Config countConfig = mixesOperations() ? effectiveConfig(originIndex) : this.config;
+			final long countLimit = countConfig.longVal("load-op-limit-count");
 			countLimitConfigured = true;
 			metricsCtx.metadata().put(MetricsConstants.METADATA_LIMIT_OP_COUNT, countLimit);
 			countLimitApplied = true;
@@ -871,6 +923,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			}
 			return;
 		}
+		// A standalone DELETE shuts every context down once; another workload as before.
+		final boolean once = standaloneDeleteEnabled();
+		if (once && shutdownAttempted) {
+			// The stop or close repeats a shutdown that failed: its failure was thrown then, and the stop
+			// and the close throw it again.
+			return;
+		}
+		RuntimeException failure = null;
 		final var iterator = stepContexts.iterator();
 		while (iterator.hasNext()) {
 			final var stepCtx = iterator.next();
@@ -880,7 +940,22 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			} catch (final RemoteException e) {
 				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the load step context", loadStepId());
 				iterator.remove();
+			} catch (final RuntimeException e) {
+				if (!once) {
+					throw e;
+				}
+				// The other contexts still shut down; the stop and the close release them all.
+				failure = withFailure(failure, e);
 			}
+		}
+		if (!once) {
+			return;
+		}
+		// Only now: a shutdown cut short by anything else, an interrupt for one, runs again when repeated.
+		shutdownAttempted = true;
+		if (failure != null) {
+			shutdownFailure = failure;
+			throw failure;
 		}
 	}
 
@@ -935,8 +1010,40 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 			}
 		}
+		if (timeIsOut) {
+			countDown -= settleDoneContexts(stepContextsCopy);
+		}
 
 		return 0 == countDown;
+	}
+
+	/**
+	 * Once the time is up, looks at each remaining context once more, without waiting, so a context's
+	 * terminal failure is reported even when the time ran out before the loop above came to it.
+	 * Contexts are completed in their order only: a context reaches {@link #contextDone} here when it
+	 * is done and every context before it is settled. A context after one still running only has its
+	 * terminal failure checked, because a pipeline stage still reads what the stage before it writes.
+	 * Returns how many contexts it settled.
+	 */
+	private int settleDoneContexts(final LoadStepContext[] stepContextsCopy) {
+		int settled = 0;
+		boolean earlierSettled = true;
+		for (int i = 0; i < stepContextsCopy.length; i++) {
+			final LoadStepContext stepCtx = stepContextsCopy[i];
+			if (stepCtx == null) {
+				continue;
+			}
+			if (earlierSettled && stepCtx.isDone()) {
+				contextDone(stepCtx);
+				stepContextsCopy[i] = null;
+				settled++;
+			} else if (earlierSettled) {
+				earlierSettled = false;
+			} else {
+				stepCtx.checkTerminalFailure();
+			}
+		}
+		return settled;
 	}
 
 	/**
@@ -1105,7 +1212,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			// The close repeats a stop that failed: its failure was thrown then, and the close throws it again.
 			return;
 		}
-		RuntimeException failure = null;
+		RuntimeException failure = shutdownFailure;
 		for (final var context : List.copyOf(stepContexts)) {
 			if (context == null) {
 				continue;
@@ -1170,7 +1277,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * warns; they are evidence, not a step outcome.
 	 */
 	private void publishNicPaths() {
-		if (nicPathsPublished || startRefused) {
+		if (nicPathsPublished || publishesNothing()) {
 			return;
 		}
 		nicPathsPublished = true;
@@ -1232,6 +1339,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
+	/** Refused, or no start reached it: neither the start nor its wrapped part, which sets the worker id. */
+	private boolean publishesNothing() {
+		return startRefused || (!startReached() && operationLifecycleWorkerId == null);
+	}
+
 	private boolean publishesOperationLifecycle() {
 		final String operation = config.stringVal("load-op-type");
 		return "create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation);
@@ -1264,7 +1376,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void publishOperationLifecycle() {
-		if (operationLifecyclePublished || startRefused || !publishesOperationLifecycle()) {
+		if (operationLifecyclePublished || publishesNothing() || !publishesOperationLifecycle()) {
 			return;
 		}
 		final var counters = new ArrayList<OperationLifecycleCounters>();
@@ -1745,11 +1857,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	/**
 	 * After the last close a standalone DELETE in duration mode is retried for, nothing closes the
-	 * slice again. As a standalone run does after its retries, cancel its lifecycle work and leave its
-	 * contexts as they are. Its stop has unregistered its metrics, and its step service then unexports it.
+	 * slice again. Close its contexts without retrying their stops, so their generators and drivers are
+	 * closed, then, as a standalone run does after its retries, cancel its lifecycle work. Its stop has
+	 * unregistered its metrics, and its step service then unexports it.
 	 */
 	private void releaseAfterLastFailedDurationClose(final RuntimeException failure) {
 		released = true;
+		try {
+			invokeDurationContextPhase("release", LoadStepContext::releaseAfterFailedStop);
+		} catch (final RuntimeException e) {
+			withFailure(failure, e);
+		}
 		try {
 			cancelDurationRunCleanupResourcesAfterExhaustion();
 		} catch (final RuntimeException e) {

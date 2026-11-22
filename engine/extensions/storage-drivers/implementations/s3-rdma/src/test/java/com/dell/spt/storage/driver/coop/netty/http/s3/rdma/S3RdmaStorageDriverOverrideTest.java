@@ -315,6 +315,18 @@ public class S3RdmaStorageDriverOverrideTest {
 		assertEquals(30_000L, config.getTimeoutMs());
 	}
 
+	/** The RDMA driver builds its requests through the S3 driver's, so a key with ? or a space is encoded. */
+	@Test
+	void requestsCarryTheEncodedKeyThroughTheS3Builder() throws Exception {
+		final var driver = newDriver(enabledConfig(), availableTransport());
+		for (final var type : List.of(OpType.CREATE, OpType.READ, OpType.DELETE)) {
+			final var item = new DataItemImpl("a?b c#d", 0, 16);
+			final var op = (Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, type, item, null, "/bucket", TEST_CRED, null, 0);
+			assertEquals("/bucket/a%3Fb%20c%23d", driver.httpRequest(op, "127.0.0.1:9020").uri(), type.name());
+		}
+	}
+
 	// ---------- P3.3: httpRequest() FullHttpRequest wrapping for PUT ----------
 	//
 	// httpRequest() calls super.httpRequest() which requires the full parent class

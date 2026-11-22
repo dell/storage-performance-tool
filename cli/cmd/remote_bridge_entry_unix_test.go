@@ -103,7 +103,7 @@ func TestRunCmdBridgeRemoteEntryPublishesTheRunsAPIPort(t *testing.T) {
 				resolvePortConflictFunc = previousPort
 				startLocalHeadlessRunFunc = previousLocal
 			})
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			var localCalls int
@@ -154,7 +154,7 @@ func TestReplayCommandBridgeRemoteEntryPublishesTheReplaysAPIPort(t *testing.T) 
 			// The connect and remote launch stay real; only the local port check, the launch
 			// confirmation and the headless choice are stubbed.
 			t.Cleanup(installReplayEngineInfoSeams(t))
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			confirmReplayLaunchCommand = func(io.Writer) error { return nil }

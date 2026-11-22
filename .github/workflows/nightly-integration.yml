@@ -1,0 +1,72 @@
+---
+# Runs the engine test sets that PR CI leaves out: every integrationTest task (through the
+# root testIntegration task) and the s3-aws timeout tests tagged slow. A scheduled run uses
+# the default branch; a manual run uses the ref chosen when it is started.
+name: Nightly Integration Tests
+
+'on':
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: a manual run started during the scheduled one waits instead of
+# running beside it.
+concurrency:
+  group: nightly-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  engine-integration:
+    name: Engine Integration & Slow Tests
+    runs-on: ubuntu-latest
+    # A trial run with a warm Gradle cache took about 2 minutes; this leaves room for a cold
+    # cache and a slow runner, and still stops a hung test well before GitHub's 6-hour limit.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Temurin JDK 21
+        uses: actions/setup-java@v6.3.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install RDMA build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libibverbs-dev \
+            librdmacm-dev
+
+      - name: Show version metadata
+        run: |
+          echo "VERSION=$(cat VERSION)"
+          echo "GIT_COMMIT=$(git rev-parse --short HEAD)"
+
+      # One Gradle call builds the engine once; --continue runs the slow tests even when an
+      # integration test fails, and the job still fails on any failure.
+      - name: Integration and slow tests
+        working-directory: engine
+        run: |
+          ./gradlew \
+            testIntegration \
+            :extensions:storage-drivers:implementations:s3-aws:slowTest \
+            --continue \
+            --no-daemon
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            engine/**/build/test-results/integrationTest/
+            engine/**/build/test-results/slowTest/
+            engine/**/build/reports/tests/integrationTest/
+            engine/**/build/reports/tests/slowTest/
+          if-no-files-found: warn

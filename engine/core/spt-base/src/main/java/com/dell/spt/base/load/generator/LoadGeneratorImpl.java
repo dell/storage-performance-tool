@@ -21,6 +21,7 @@ import com.dell.spt.base.item.op.OperationsBuilderAssembler;
 import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.DurationTime;
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
@@ -36,6 +37,7 @@ import java.util.Collections;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadCirculation;
+import com.dell.spt.base.load.generator.range.RangeReadAdmission;
 import java.util.ConcurrentModificationException;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -95,6 +97,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final OperationAssembler<I, O> opAssembler;
 	private final int originIndex;
 	private final Object[] throttles;
+	// The weight cycle this generator shares with others; null outside a weighted step.
+	private final RetiringWeightsThrottle weightCycle;
 	private final Output<O> opOutput;
 	private final Lock inputLock = new ReentrantLock();
 	private final int batchSize;
@@ -265,6 +269,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 		this.originIndex = opAssembler.originIndex();
 		this.throttles = throttles.toArray(new Object[]{});
+		this.weightCycle = weightCycle(this.throttles);
 		this.opOutput = opOutput;
 		this.batchSize = batchSize;
 		this.countLimit = countLimit > 0 ? countLimit : Long.MAX_VALUE;
@@ -282,6 +287,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		threadLocalOpBuff = ThreadLocal.withInitial(() -> new CircularArrayBuffer<>(batchSize));
 		threadLocalAssemblyBuff = ThreadLocal.withInitial(() -> new ArrayList<>(batchSize));
 		this.items = new ArrayList<>(batchSize); // prepare the items buffer
+	}
+
+	private static RetiringWeightsThrottle weightCycle(final Object[] throttles) {
+		for (final Object throttle : throttles) {
+			if (throttle instanceof RetiringWeightsThrottle cycle) {
+				return cycle;
+			}
+		}
+		return null;
 	}
 
 	@Override
@@ -334,9 +348,14 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							}
 						}
 						if (n > 0) {
-							recycleQueueSize.addAndGet(-n);
-							pendingOpCount += n;
+							// Order matters: raise the generated count before the queue size falls.
+							// Between the poll above and these lines this thread can hold every
+							// circulating operation while the queue is empty. The step context's
+							// dry check ("no load operations to recycle") requires a zero size, and
+							// the size only reaches zero once the held operations count as generated.
 							recycledOpCounter.add(n);
+							pendingOpCount += n;
+							recycleQueueSize.addAndGet(-n);
 						} else {
 							// Back off briefly so in-flight operations can complete and return
 							// through recycleQueue instead of spinning against an empty queue.
@@ -513,6 +532,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					// will pick this up and stop the generator on the very next check
 					// below, so a yield here would rarely even execute - only bothering
 					// for the retry case keeps the common path branch-free.
+					// A finite input whose end is read after the last handoff has no later
+					// handoff to report it, and isFinished() stays false here, so scheduling
+					// ends on this pass. The generator keeps running for retries.
+					if (!recycleFlag
+									&& itemInputFinishFlag
+									&& schedulingExhaustion.get() == null
+									&& finiteSchedulingExhausted()) {
+						recordSchedulingExhaustion();
+					}
 					yieldThread();
 				}
 			} else if (!retryFlag) { // operations count limit is reached
@@ -600,8 +628,18 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
-	/** Runs the listener once, at the first of exhausted input and a reached count limit. */
+	/**
+	 * Leaves the weight cycle, so that the share left unused no longer holds back the other
+	 * generators, and runs the listener once, at the first of exhausted input and a reached count
+	 * limit.
+	 *
+	 * <p>Call this only once the generator can ask for no new operation: the cycle grants a retired
+	 * origin every permit it requests, on the understanding that only retries still ask.
+	 */
 	private void notifySchedulingEnd() {
+		if (weightCycle != null) {
+			weightCycle.retire(originIndex);
+		}
 		final Runnable listener = schedulingExhaustionListener;
 		if (listener != null && schedulingEndNotified.compareAndSet(false, true)) {
 			try {
@@ -1015,6 +1053,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		if (!(op instanceof RangeReadOperation<?> range)) {
 			throw new IllegalArgumentException("Expected a range operation");
 		}
+		final RetryEntry<O> entry;
+		final boolean settled;
 		admissionLock.lock();
 		try {
 			final var circulation = range.circulation();
@@ -1022,32 +1062,70 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							|| !circulation.claimRetryQueue(attempt)) {
 				return false;
 			}
-			final var entry = new RetryEntry<>(op, circulation, attempt);
-			if (!admissionAllowedLocked()) {
-				settleRangeRetry(entry);
-				return false;
+			entry = new RetryEntry<>(op, circulation, attempt);
+			if (admissionAllowedLocked()) {
+				if (retainedRetries == null) {
+					retainedRetries = ConcurrentHashMap.newKeySet();
+				}
+				retainedRetries.add(entry);
+				retryQueue.add(entry);
+				return true;
 			}
-			if (retainedRetries == null) {
-				retainedRetries = ConcurrentHashMap.newKeySet();
-			}
-			retainedRetries.add(entry);
-			retryQueue.add(entry);
-			return true;
+			settled = settleRangeRetry(entry);
 		} finally {
 			admissionLock.unlock();
 		}
+		if (settled) {
+			publishSettledRangeRetry(entry);
+		}
+		return false;
 	}
 
+	/**
+	 * Settles a held range retry with its earlier attempt's failure. Returns whether this call made
+	 * the circulation terminal; the caller then publishes it, outside the generator's locks.
+	 */
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
-	private void settleRangeRetry(final RetryEntry<O> entry) {
+	private boolean settleRangeRetry(final RetryEntry<O> entry) {
 		final var range = (RangeReadOperation<?>) entry.operation;
 		synchronized (entry.circulation.lifecycle()) {
 			synchronized (entry.attempt) {
-				if (range.circulation() == entry.circulation
-								&& entry.circulation.isPendingAttempt(entry.attempt)) {
-					entry.circulation.settleAtDeadline(range, (OperationLifecycleTracker) operationLifecycle);
-				}
+				return range.circulation() == entry.circulation
+								&& entry.circulation.isPendingAttempt(entry.attempt)
+								&& entry.circulation.settleAtDeadline(range, (OperationLifecycleTracker) operationLifecycle)
+								&& entry.circulation.lifecycle().state() == OperationLifecycleState.TERMINAL;
+			}
+		}
+	}
+
+	/** A held retry settled terminal has no transport completion to publish it; publish it here. */
+	private void publishSettledRangeRetry(final RetryEntry<O> entry) {
+		if (opOutput instanceof RangeReadAdmission<?> admission) {
+			admission.publishSettled((RangeReadOperation<?>) entry.operation, entry.circulation);
+		}
+	}
+
+	private void publishSettledRangeRetries(final List<RetryEntry<O>> entries) {
+		if (entries != null) {
+			for (final var entry : entries) {
+				publishSettledRangeRetry(entry);
+			}
+		}
+	}
+
+	/**
+	 * Settles a held range retry into the caller's publication list. Terminal accounting can throw
+	 * after the circulation committed: the entry is then collected before the throw, so the caller's
+	 * {@code finally} still publishes it; publication skips a circulation that is not terminal.
+	 */
+	private void collectSettledRangeRetry(final RetryEntry<O> entry, final List<RetryEntry<O>> settled) {
+		boolean collect = true;
+		try {
+			collect = settleRangeRetry(entry);
+		} finally {
+			if (collect) {
+				settled.add(entry);
 			}
 		}
 	}
@@ -1131,6 +1209,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final List<O> recoverBufferedOperations() {
+		// Allocated up front: an entry collected just before a settlement throws must still reach output.
+		final List<RetryEntry<O>> settledRetries = new ArrayList<>();
+		final List<O> unattemptedOperations;
 		assemblyLock.lock();
 		try {
 			admissionLock.lock();
@@ -1150,7 +1231,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 				if (retainedRetries != null) {
 					for (var retained : retainedRetries) {
-						settleRangeRetry(retained);
+						collectSettledRangeRetry(retained, settledRetries);
 					}
 					retainedRetries.clear();
 				}
@@ -1165,13 +1246,16 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						unattempted.add(buffered);
 					}
 				}
-				return List.copyOf(unattempted);
+				unattemptedOperations = List.copyOf(unattempted);
 			} finally {
 				admissionLock.unlock();
 			}
 		} finally {
 			assemblyLock.unlock();
+			// After both locks; retries settled before a later step of this block threw still reach output.
+			publishSettledRangeRetries(settledRetries);
 		}
+		return unattemptedOperations;
 	}
 
 	private void recoverUnconsumedStandaloneDeleteItems() {
@@ -1264,8 +1348,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 				if (e instanceof EOFException) {
 					if (entry.circulation != null) {
-						settleRangeRetry(entry);
+						final boolean settled = settleRangeRetry(entry);
 						releaseRetryEntry(entry);
+						if (settled) {
+							publishSettledRangeRetry(entry);
+						}
 					}
 					// The output itself is done and will never accept anything again
 					// (including a re-enqueue) - matches how the normal dispatch path
@@ -1286,6 +1373,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	private void requeueRetry(final RetryEntry<O> entry) {
+		boolean settled = false;
 		admissionLock.lock();
 		try {
 			if (admissionAllowedLocked()) {
@@ -1294,18 +1382,25 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				if (entry.circulation == null) {
 					operationLifecycle.unattempted(entry.operation);
 				} else {
-					settleRangeRetry(entry);
+					settled = settleRangeRetry(entry);
 				}
 				releaseRetryEntry(entry);
 			}
 		} finally {
 			admissionLock.unlock();
 		}
+		if (settled) {
+			publishSettledRangeRetry(entry);
+		}
 	}
 
 	@Override
 	public final boolean isNothingToRecycle() {
-		return recycleQueue.isEmpty();
+		// The size stays above zero while the generator holds polled operations it has not yet
+		// counted as generated (see the recycle branch of doWork). recycle() adds to the queue just
+		// before it raises the size, so the size can briefly lag a non-empty queue; the queue test
+		// covers that moment.
+		return recycleQueue.isEmpty() && recycleQueueSize.get() == 0;
 	}
 
 	@Override
@@ -1326,6 +1421,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	@Override
 	public final List<O> drainPendingRetries() {
 		final List<O> drained = new ArrayList<>();
+		// Allocated up front: an entry collected just before a settlement throws must still reach output.
+		final List<RetryEntry<O>> settledRetries = new ArrayList<>();
 		admissionLock.lock();
 		try {
 			RetryEntry<O> entry;
@@ -1333,18 +1430,20 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				if (entry.circulation == null) {
 					drained.add(entry.operation);
 				} else {
-					settleRangeRetry(entry);
+					collectSettledRangeRetry(entry, settledRetries);
 					retainedRetries.remove(entry);
 				}
 			}
 			if (retainedRetries != null) {
 				for (var retained : retainedRetries) {
-					settleRangeRetry(retained);
+					collectSettledRangeRetry(retained, settledRetries);
 				}
 				retainedRetries.clear();
 			}
 		} finally {
 			admissionLock.unlock();
+			// After the lock; retries settled before a later settlement threw still reach output.
+			publishSettledRangeRetries(settledRetries);
 		}
 		return drained;
 	}

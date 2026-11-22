@@ -399,6 +399,9 @@ public interface FileIoHelper {
 									countBytesDone);
 				}
 				dstChannel.position(rangeOffset(currRangeIdx) + countBytesDone);
+				// A current-layer range slice is rebuilt at position 0 on each call, and a write stops at the
+				// end of the data ring, so go on from where the last call stopped in this range.
+				updatingRange.position(countBytesDone);
 				countBytesDone += updatingRange.writeToFileChannel(dstChannel, updatingRangeSize - countBytesDone);
 				if (Loggers.MSG.isTraceEnabled()) {
 					Loggers.MSG.trace("{}: {} bytes written totally", fileItem.name(), countBytesDone);
@@ -441,6 +444,8 @@ public interface FileIoHelper {
 					rangeBeg = byteRange.getBeg();
 					rangeEnd = byteRange.getEnd();
 					rangeSize = byteRange.getSize();
+					// an overwrite keeps the recorded size, even when it reaches past the item's end
+					long sizeWhenDone = baseItemSize;
 					if (rangeSize == -1) {
 						if (rangeBeg == -1) {
 							// last "rangeEnd" bytes
@@ -453,16 +458,18 @@ public interface FileIoHelper {
 							rangeSize = rangeEnd - rangeBeg + 1;
 						}
 					} else {
-						// append exactly rangeSize bytes to the end
+						// append exactly rangeSize bytes to the end; the size grows by this range once it is done, so a
+						// call that resumes a split write (a dedupable write stops at the data ring end) goes on from the
+						// same end
 						rangeBeg = baseItemSize;
-						// note down the new size
-						fileItem.size(baseItemSize + updatingRangesSize);
+						sizeWhenDone = baseItemSize + rangeSize;
 					}
 					updatingRange = fileItem.slice(rangeBeg, rangeSize);
 					updatingRange.position(countBytesDone);
 					dstChannel.position(rangeBeg + countBytesDone);
 					countBytesDone += updatingRange.writeToFileChannel(dstChannel, rangeSize - countBytesDone);
 					if (countBytesDone == rangeSize) {
+						fileItem.size(sizeWhenDone);
 						op.currRangeIdx(currRangeIdx + 1);
 						op.countBytesDone(0);
 					} else {

@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -101,6 +102,16 @@ type healthPayload struct {
 	Role      string `json:"role"`
 	NodeID    string `json:"node_id"`
 	ClusterID string `json:"cluster_id"`
+}
+
+// statusWireResponse is the engine's /status body: run_id is a number, as StatusServlet
+// writes it. A string runId, the shape this command read before, is still accepted.
+type statusWireResponse struct {
+	State       string   `json:"state"`
+	Message     string   `json:"message"`
+	Progress    *float64 `json:"progress"`
+	RunID       *int64   `json:"run_id"`
+	LegacyRunID string   `json:"runId"`
 }
 
 type runStatusPayload struct {
@@ -309,21 +320,19 @@ func fetchRunStatus(ctx context.Context, client *http.Client, baseURL string) (r
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		var body map[string]any
+		var body statusWireResponse
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			return payload, fmt.Errorf("decode /status response: %w", err)
 		}
-		if v, ok := body["runId"].(string); ok {
-			payload.RunID = v
+		if body.RunID != nil && *body.RunID != 0 {
+			payload.RunID = strconv.FormatInt(*body.RunID, 10)
+		} else if legacy := strings.TrimSpace(body.LegacyRunID); legacy != "" {
+			payload.RunID = legacy
 		}
-		if v, ok := body["state"].(string); ok {
-			payload.State = strings.ToUpper(strings.TrimSpace(v))
-		}
-		if v, ok := body["message"].(string); ok {
-			payload.Message = v
-		}
-		if v, ok := body["progress"].(float64); ok {
-			payload.Progress = v
+		payload.State = strings.ToUpper(strings.TrimSpace(body.State))
+		payload.Message = body.Message
+		if body.Progress != nil {
+			payload.Progress = *body.Progress
 		}
 	case http.StatusNotFound:
 		payload.State = constants.StateIdle

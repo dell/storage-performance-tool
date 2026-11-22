@@ -820,3 +820,30 @@ func TestRemoteDockerWorkerReadinessUsesLaunchContext(t *testing.T) {
 		t.Fatal("canceled readiness lost ownership of the started container")
 	}
 }
+
+func TestRemoteDocker_StartContainerInNodeMode_RdmaPassthrough(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rdma string
+		want bool
+	}{{"on", "true", true}, {"off", "", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(constants.EnvRdmaEnabled, tc.rdma)
+			mgr, mock, _ := newTestRemoteManager(t)
+			if _, err := mgr.StartContainerInNodeMode(constants.DefaultSptImage, "10080", constants.HostNetworkMode, nil); err != nil {
+				t.Fatalf("StartContainerInNodeMode error: %v", err)
+			}
+			executed := mock.GetExecutedCommandsMatching("docker run")
+			if len(executed) == 0 {
+				t.Fatalf("expected a docker run command to be executed")
+			}
+			cmd := strings.Join(executed[len(executed)-1].Command, " ")
+			for _, s := range []string{"--device " + constants.RdmaDevicePath, "--cap-add " + constants.RdmaCapIpcLock,
+				"--ulimit " + constants.RdmaUlimitMemlock} {
+				if strings.Contains(cmd, s) != tc.want {
+					t.Errorf("SPT_RDMA=%q: docker run contains %q = %v, want %v: %s", tc.rdma, s, !tc.want, tc.want, cmd)
+				}
+			}
+		})
+	}
+}

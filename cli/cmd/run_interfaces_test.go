@@ -298,7 +298,7 @@ func TestRunCmdInterfacesReachEveryRouteAndEveryNode(t *testing.T) {
 				startMultiHostHeadlessRunFunc = previousRemote
 				startAutoResultsFunc = previousAutoResults
 			})
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
@@ -429,7 +429,7 @@ func TestRunCmdNicNodesFollowTheWorkersThatStartedWhenAMiddleWorkerFails(t *test
 		startMultiHostHeadlessRunFunc = previousRemote
 		startAutoResultsFunc = previousAutoResults
 	})
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }

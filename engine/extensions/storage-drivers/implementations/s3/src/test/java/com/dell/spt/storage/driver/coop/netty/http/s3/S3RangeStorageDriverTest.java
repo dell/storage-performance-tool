@@ -38,6 +38,7 @@ class S3RangeStorageDriverTest {
 		final BlockingQueue<Request> requests = new LinkedBlockingQueue<>();
 		final BlockingQueue<Operation.Status> terminal = new LinkedBlockingQueue<>();
 		final BlockingQueue<RangeReadOperation<DataItem>> results = new LinkedBlockingQueue<>();
+		final BlockingQueue<Thread> resultThreads = new LinkedBlockingQueue<>();
 		final AtomicInteger requestCount = new AtomicInteger();
 		final S3RangeStorageDriver driver;
 		final RangeReadRuntime<DataItem> runtime;
@@ -102,7 +103,10 @@ class S3RangeStorageDriverTest {
 			});
 			driver.operationResultOutput(runtime.bind(generator, driver.operationLifecycle(), retry, 1,
 							(delay, task) -> retryThread.schedule(task, delay, TimeUnit.MILLISECONDS),
-							op -> terminal.add(op.status()), results::add));
+							op -> terminal.add(op.status()), op -> {
+								resultThreads.add(Thread.currentThread());
+								results.add(op);
+							}));
 			driver.start();
 		}
 
@@ -180,6 +184,17 @@ class S3RangeStorageDriverTest {
 			assertEquals(1, f.snapshot().logical().failed());
 			assertEquals(0, f.snapshot().logical().unresolved());
 			assertTrue(f.snapshot().reconciled());
+		}
+	}
+
+	/** A key with ?, # or a space reaches the target encoded, so the range read names that key. */
+	@Test
+	void aRangeReadOfAKeyWithQueryCharactersSendsTheEncodedPath() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false, n -> new Response(206, "echo/10", "abc"))) {
+			var op = f.read("a?b c#d", 10);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			assertEquals("/bucket/a%3Fb%20c%23d", f.requests.poll().path());
+			assertEquals("/bucket/a?b c#d", op.item().name(), "the item keeps the literal key");
 		}
 	}
 
@@ -437,8 +452,11 @@ class S3RangeStorageDriverTest {
 				assertTrue(f.driver.recoverQueuedOperations().isEmpty());
 
 				assertEquals(Operation.Status.RESP_FAIL_SVC, f.terminal.poll(5, TimeUnit.SECONDS));
-				var recovered = f.results.poll(5, TimeUnit.SECONDS);
+				// Published before recovery returns, so the drain's delivery check never races it.
+				assertFalse(f.runtime.hasPendingResults(), "recovery publishes the retained failure synchronously");
+				var recovered = f.results.poll();
 				assertNotNull(recovered, "recovery must publish the retained failure");
+				assertEquals(Thread.currentThread(), f.resultThreads.poll(), "published on the recovering thread");
 				assertEquals(Operation.Status.RESP_FAIL_SVC, recovered.status());
 				release.countDown();
 				assertEquals(Operation.Status.SUCC, f.outcome());

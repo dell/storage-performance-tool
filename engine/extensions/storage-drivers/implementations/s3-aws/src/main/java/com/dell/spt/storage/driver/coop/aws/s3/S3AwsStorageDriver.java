@@ -165,6 +165,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Object watchdogLock = new Object();
 	private volatile Thread requestWatchdog;
 	private volatile boolean closed;
+	/** Keeps the CRT serving this driver's clients at a JVM shutdown until {@link #doClose} has closed them. */
+	private final CrtShutdownRef crtShutdownRef;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -193,7 +195,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						exactVersionS3Client, null, null, null, null,
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
 	}
 
 	S3AwsStorageDriver(
@@ -209,7 +211,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null, null,
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
 	}
 
 	S3AwsStorageDriver(
@@ -230,7 +232,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						Objects.requireNonNull(standaloneDeleteS3Client),
 						Objects.requireNonNull(standaloneDeleteHttpClient),
 						null,
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
 	}
 
 	S3AwsStorageDriver(
@@ -246,10 +248,32 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
 		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
+						exactVersionS3ClientSupplier, standaloneDeleteResourcesSupplier,
+						smallObjectThresholdBytes, partSizeBytes, CrtShutdownRef.NONE);
+	}
+
+	/**
+	 * The driver the factory builds. It takes over the CRT shutdown reference taken for its
+	 * clients and releases it once they are closed; if construction fails, the factory releases it.
+	 */
+	S3AwsStorageDriver(
+					final String stepId,
+					final DataInput dataInput,
+					final Config config,
+					final boolean verifyFlag,
+					final int batchSize,
+					final S3AsyncClient s3AsyncClient,
+					final Supplier<S3AsyncClient> exactVersionS3ClientSupplier,
+					final Supplier<S3AwsStandaloneDeleteResources> standaloneDeleteResourcesSupplier,
+					final long smallObjectThresholdBytes,
+					final long partSizeBytes,
+					final CrtShutdownRef crtShutdownRef)
+					throws IllegalConfigurationException {
+		this(stepId, dataInput, config, verifyFlag, batchSize, s3AsyncClient,
 						null, Objects.requireNonNull(exactVersionS3ClientSupplier), null, null,
 						new S3AwsStandaloneDeleteResources.Lazy(
 										Objects.requireNonNull(standaloneDeleteResourcesSupplier)),
-						smallObjectThresholdBytes, partSizeBytes);
+						smallObjectThresholdBytes, partSizeBytes, Objects.requireNonNull(crtShutdownRef));
 	}
 
 	private S3AwsStorageDriver(
@@ -265,11 +289,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final SdkAsyncHttpClient standaloneDeleteHttpClient,
 					final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources,
 					final long smallObjectThresholdBytes,
-					final long partSizeBytes)
+					final long partSizeBytes,
+					final CrtShutdownRef crtShutdownRef)
 					throws IllegalConfigurationException {
 		// Every request blocks its worker, so a worker per permit keeps the configured number of
 		// requests in flight; see NioStorageDriverBase.
 		super(stepId, dataInput, config, verifyFlag, batchSize, true);
+		this.crtShutdownRef = crtShutdownRef;
 		this.timeouts = S3AwsClientTimeouts.forDriver(config);
 		this.requestTimeoutNanos = timeouts.requestTimeout().toNanos();
 		if (verifyFlag) {
@@ -458,6 +484,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return resolved;
 	}
 
+	/**
+	 * {@link #executeCompositeOperation} calls {@code startRequest()} for a multipart upload's
+	 * completion or abort, so the parent's result is that request, as on the Netty drivers, not
+	 * the whole upload from its initiation.
+	 */
+	@Override
+	protected boolean timesUploadFinalization() {
+		return true;
+	}
+
 	@Override
 	protected void invokeNio(final O op) {
 		final CompositeDataOperation mpuOp = op instanceof CompositeDataOperation
@@ -469,15 +505,17 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// Stopping the worker interrupts it, which cancels the request.
 			awaitRequest(execute(op));
 
-			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes).
-			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
+			// Only a request that writes the item's data counts its size: a READ counts what it reads,
+			// a DELETE or STAT moves no body, and a multipart upload's bytes are counted by its parts.
+			final OpType opType = op.type();
+			if ((opType == OpType.CREATE || opType == OpType.UPDATE) && mpuOp == null && op.item() instanceof DataItem) {
 				final DataItem dataItem = (DataItem) op.item();
 				if (op instanceof DataOperation) {
 					((DataOperation) op).countBytesDone(dataItem.size());
 				}
 			}
 
-			if (op.type() != OpType.READ) {
+			if (opType != OpType.READ) {
 				if (op instanceof DeleteRequestOperation) {
 					finishStandaloneDeleteOperation(op);
 				} else {
@@ -768,14 +806,25 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
-	 * An upload failed without its completion or abort being sent, because that could not be queued,
-	 * is recorded as orphaned: an abort not sent as attempted and failed, as a failed abort is.
+	 * An initiated upload is about to be failed without its completion or abort being sent, because
+	 * that could not be queued: its abort is sent here, outside the queue, as after a failed completion,
+	 * so the upload does not stay open on the target. The request blocks this thread up to its deadline,
+	 * as every request of this driver does. The upload is recorded {@code failed_aborted} when the abort
+	 * succeeds and {@code failed_orphaned} otherwise.
 	 */
 	@Override
 	protected void recordUploadLeftOpen(final O uploadOp, final boolean aborting, final String cause) {
 		final var mpuOp = (CompositeDataOperation) uploadOp;
-		emitMultipartLifecycle(mpuOp, "failed_orphaned", aborting, aborting ? Boolean.FALSE : null,
-						(aborting ? mpuFailure(mpuOp) + "; abort " : "") + "not sent: " + cause);
+		final String reason = aborting
+						? mpuFailure(mpuOp) + "; abort not queued: " + cause
+						: "completion not queued: " + cause;
+		try {
+			awaitRequest(abortMultipartUpload(mpuOp));
+			emitMultipartLifecycle(mpuOp, "failed_aborted", true, true, reason);
+		} catch (final Exception abortFailure) {
+			emitMultipartLifecycle(mpuOp, "failed_orphaned", true, false,
+							reason + "; abort failed: " + failureStatus(abortFailure).name());
+		}
 	}
 
 	@SuppressWarnings("unchecked")
@@ -993,6 +1042,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (slashPos > 0) {
 				final var bucket = rel.substring(0, slashPos);
 				final var prefix = rel.substring(slashPos + 1);
+				if (rel.charAt(rel.length() - 1) == '/') {
+					return new String[]{bucket, keyUnderSlashPrefix(prefix, key)
+					};
+				}
 				return new String[]{bucket, prefix + "/" + key
 				};
 			}
@@ -1002,6 +1055,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		// No dstPath — parse full path from item name
 		return parseBucketAndKey(itemName);
+	}
+
+	/**
+	 * Joins a key to a prefix that ends in a slash, or is empty because the path is "/bucket/". The
+	 * prefix already holds the separator, and the key stays whole: "/k" under "a" is the key "a//k".
+	 * An empty name is the other case: splitting a listed "/bucket/a//" leaves the path "/bucket/a/"
+	 * and no name, and only the separator join gives back the key "a//". Kept out of
+	 * {@code resolveBucketAndKey} so that a path without the slash runs the same
+	 * code as before.
+	 */
+	private static String keyUnderSlashPrefix(final String prefix, final String key) {
+		return key.isEmpty() ? prefix + "/" : prefix + key;
 	}
 
 	/**
@@ -1126,12 +1191,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private CompletableFuture<Void> executeCompositeOperation(final CompositeDataOperation op) {
 		if (op.type() == OpType.CREATE) {
 			// Check if this is an abort request
+			// The completion or abort is a request of its own: the parent's timing was reset before it
+			// was queued (see timesUploadFinalization()), and the worker stamps only a PENDING operation's
+			// request, so it is stamped here. The client sends it within this call, any retries included.
 			if (op.get(KEY_MPU_ABORT) != null) {
+				op.startRequest();
+				op.finishRequest();
 				return abortMultipartUpload(op);
 			}
 
 			// Check if all sub-operations are done (complete the upload)
 			if (op.allSubOperationsDone()) {
+				op.startRequest();
+				op.finishRequest();
 				return completeMultipartUpload(op);
 			}
 
@@ -2312,6 +2384,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	@Override
 	protected void doClose()
+					throws IOException {
+		try {
+			closeResources();
+		} finally {
+			// Only now, with the clients closed, may the CRT stop serving Java at a JVM shutdown. A
+			// close that throws or is interrupted releases it too, and a repeated close does nothing.
+			if (crtShutdownRef != null) {
+				crtShutdownRef.release();
+			}
+		}
+	}
+
+	private void closeResources()
 					throws IOException {
 		closed = true;
 		if (watchdogLock != null) {

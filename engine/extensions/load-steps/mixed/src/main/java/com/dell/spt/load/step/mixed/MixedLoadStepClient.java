@@ -7,6 +7,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.step.client.CompositeCheckedOperations;
 import com.dell.spt.base.load.step.client.ItemInputFileSlicer;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -19,14 +20,18 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -36,7 +41,14 @@ import java.util.stream.Stream;
  */
 @SuppressWarnings({"unchecked", "rawtypes"
 })
-public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepClient> {
+public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepClient>
+				implements CompositeCheckedOperations {
+
+	/**
+	 * The item output file {@link #init()} chose because none was given; {@code null} until then, and
+	 * for a file the step was given, in its base or in a context.
+	 */
+	private volatile String defaultItemOutputFile;
 
 	public MixedLoadStepClient(
 					final Config config,
@@ -56,6 +68,21 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return true;
 	}
 
+	/** Every metrics row is an operation type of the one context, which runs on every sub-load over the base. */
+	@Override
+	protected Config effectiveConfig(final int originIndex) {
+		return MixedLoadStepLocal.mergedConfig(config, ctxConfigs);
+	}
+
+	/**
+	 * Append merges a mixed context's map as before 5.17.1. The slice takes the step id from the base
+	 * and reads no context's flag, so marking a context would change nothing the step resolves.
+	 */
+	@Override
+	protected boolean marksSetContextStepIds() {
+		return false;
+	}
+
 	/** A mixed step writes new objects only through PUTs; its item input file is its GET/STAT pool. */
 	@Override
 	protected TargetBucketStep targetBucketStep() {
@@ -72,9 +99,40 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return contextIndex == (ctxConfigs == null || ctxConfigs.isEmpty() ? BASE_CONFIG : ctxConfigs.size() - 1);
 	}
 
+	/** A mixed step makes READ operations for a GET weight and CREATE operations for a PUT weight. */
+	@Override
+	public Set<OpType> compositeCheckedOpTypes(final Config config) {
+		final Set<OpType> opTypes = EnumSet.noneOf(OpType.class);
+		if (config.intVal("load-op-weights-get") > 0) {
+			opTypes.add(OpType.READ);
+		}
+		if (config.intVal("load-op-weights-put") > 0) {
+			opTypes.add(OpType.CREATE);
+		}
+		return opTypes;
+	}
+
 	@Override
 	protected MixedLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
-		return new MixedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+		return new MixedLoadStepClient(
+						withoutDefaultItemOutputFile(config),
+						extensions,
+						ctxConfigs == null ? null : ctxConfigs.stream().map(this::withoutDefaultItemOutputFile).collect(Collectors.toList()),
+						metricsMgr);
+	}
+
+	/**
+	 * The configuration without the item output file this step's {@link #init()} chose, so that a copy
+	 * chooses its own in its own folder. A file given by the user, or by the copy's arguments, stays.
+	 */
+	private Config withoutDefaultItemOutputFile(final Config config) {
+		final String chosen = defaultItemOutputFile;
+		if (chosen == null || !chosen.equals(config.stringVal("item-output-file"))) {
+			return config;
+		}
+		final Config copy = new BasicConfig(config);
+		copy.val("item-output-file", null);
+		return copy;
 	}
 
 	@Override
@@ -86,27 +144,37 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 			stepConfig.val("id", autoStepId);
 		}
 
-		final int getWeight = config.intVal("load-op-weights-get");
-		final int putWeight = config.intVal("load-op-weights-put");
-		final int deleteWeight = config.intVal("load-op-weights-delete");
-		final int statWeight = config.intVal("load-op-weights-stat");
+		// The slice runs the base merged with every context, so its operations, concurrency and item
+		// size come from the merge; the metrics rows must name the operations it runs.
+		final Config merged = MixedLoadStepLocal.mergedConfig(config, ctxConfigs);
+		final int getWeight = merged.intVal("load-op-weights-get");
+		final int putWeight = merged.intVal("load-op-weights-put");
+		final int deleteWeight = merged.intVal("load-op-weights-delete");
+		final int statWeight = merged.intVal("load-op-weights-stat");
 
 		// An item output file makes the base client give each remote slice its own file and append
-		// them all to this one once the slices close.
-		final String itemOutputFile = config.stringVal("item-output-file");
+		// them all to this one once the slices close. The slice writes the merged value, so the base
+		// takes it and the contexts drop theirs: one aggregator collects every slice's items into the
+		// file the slices write locally, and the check names it.
+		String itemOutputFile = merged.stringVal("item-output-file");
+		if (ctxConfigs != null) {
+			ctxConfigs.forEach(ctxConfig -> ctxConfig.val("item-output-file", null));
+		}
 		if (putWeight > 0 && (itemOutputFile == null || itemOutputFile.isEmpty())) {
-			config.val(
-							"item-output-file",
-							MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString());
+			itemOutputFile = MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString();
+			defaultItemOutputFile = itemOutputFile;
+		}
+		if (itemOutputFile != null && !itemOutputFile.isEmpty()) {
+			config.val("item-output-file", itemOutputFile);
 		}
 
-		final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");
+		final int concurrencyLimit = merged.intVal("storage-driver-limit-concurrency");
 		final Config outputConfig = config.configVal("output");
 		final Config metricsConfig = outputConfig.configVal("metrics");
 		final boolean colorFlag = outputConfig.boolVal("color");
 
 		final SizeInBytes itemDataSize;
-		final Object itemDataSizeRaw = config.val("item-data-size");
+		final Object itemDataSizeRaw = merged.val("item-data-size");
 		if (itemDataSizeRaw instanceof String) {
 			itemDataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 		} else {
@@ -181,7 +249,8 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	@Override
 	protected void itemOutputCollected(final String itemOutputFile, final Map<OpType, Long> successCounts)
 					throws IOException {
-		if (config.intVal("load-op-weights-put") <= 0) {
+		// The slices run PUTs by the merged weights.
+		if (MixedLoadStepLocal.mergedConfig(config, ctxConfigs).intVal("load-op-weights-put") <= 0) {
 			return;
 		}
 		final Long created = successCounts.get(OpType.CREATE);

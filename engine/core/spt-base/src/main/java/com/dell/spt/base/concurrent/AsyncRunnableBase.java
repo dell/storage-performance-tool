@@ -27,6 +27,8 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	private volatile State state = State.INITIAL;
 	private final Lock stateLock = new ReentrantLock();
 	private final Condition stateChanged = stateLock.newCondition();
+	// The thread inside doStart(), which holds stateLock for as long as the start takes.
+	private volatile Thread starter;
 
 	// ---- State accessors ----
 
@@ -67,7 +69,12 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 		stateLock.lock();
 		try {
 			if (State.INITIAL == state || State.STOPPED == state) {
-				doStart();
+				starter = Thread.currentThread();
+				try {
+					doStart();
+				} finally {
+					starter = null;
+				}
 				state = State.STARTED;
 				stateChanged.signalAll();
 			} else {
@@ -140,15 +147,28 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	@Override
 	public void close() throws IOException {
 		stop();
+		final boolean closedHere;
 		stateLock.lock();
 		try {
-			if (State.CLOSED != state) {
+			closedHere = State.CLOSED != state;
+			if (closedHere) {
 				doClose();
 				state = State.CLOSED;
 				stateChanged.signalAll();
 			}
 		} finally {
 			stateLock.unlock();
+		}
+		if (closedHere) {
+			afterCloseTransition();
+		}
+	}
+
+	/** Interrupts the thread running {@link #doStart()}, if another thread is. */
+	final void interruptStarter() {
+		final var thread = starter;
+		if (thread != null && thread != Thread.currentThread()) {
+			thread.interrupt();
 		}
 	}
 
@@ -161,4 +181,10 @@ public abstract class AsyncRunnableBase implements AsyncRunnable {
 	protected void doStop() {}
 
 	protected void doClose() throws IOException {}
+
+	/**
+	 * Called once, by the close that closed this, after the state became closed and outside the
+	 * state lock. What it throws is that close's failure; this stays closed.
+	 */
+	protected void afterCloseTransition() throws IOException {}
 }
