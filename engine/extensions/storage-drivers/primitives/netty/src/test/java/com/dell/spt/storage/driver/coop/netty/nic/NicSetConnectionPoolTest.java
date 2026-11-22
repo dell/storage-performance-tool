@@ -292,13 +292,11 @@ class NicSetConnectionPoolTest {
 	}
 
 	@Test
-	void aPoolServesAFailingNicOnlyWithAnIdleConnectionOrAConnectItWouldStart() throws Exception {
+	void withoutAFailureWithNoAnswerAnIdleConnectionServesDuringBackoff() throws Exception {
 		final var a = listener();
-		// No limit, so a connect never waits for a slot.
 		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
 						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
 		final var nicPool = pool.pools().get(0);
-		assertTrue(nicPool.servesNow(), "a healthy Path");
 		final var held = acquire(nicPool).get(5, TimeUnit.SECONDS);
 		a.stopListening(1);
 		failure(acquire(nicPool));
@@ -308,19 +306,75 @@ class NicSetConnectionPoolTest {
 		assertTrue(nicPool.servesNow(), "an idle connection serves during back-off");
 		assertSame(held, acquire(nicPool).get(5, TimeUnit.SECONDS));
 		assertFalse(nicPool.servesNow());
+		advanceMillis(100);
+		assertTrue(nicPool.servesNow(), "the next connect may start once the back-off ran");
+	}
+
+	@Test
+	void aPoolServesAFailingNicOnlyWithAConnectionOpenedSinceItsLastFailure() throws Exception {
+		final var a = listener();
+		// No limit, so a connect never waits for a slot.
+		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
+						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
+		final var nicPool = pool.pools().get(0);
+		assertTrue(nicPool.servesNow(), "a healthy Path");
+		final var held = acquire(nicPool).get(5, TimeUnit.SECONDS);
 
 		final var admission = pool.admission();
 		admission.failed(0);
+		nicPool.release(held);
+		assertEquals(0, nicPool.idleCount(), "a connection opened before the failure is not pooled");
+		held.closeFuture().await(5, TimeUnit.SECONDS);
 		assertEquals(1, admission.take(), "the admission asks the pool: NIC 0 is skipped");
 		advanceMillis(100);
-		assertTrue(nicPool.servesNow(), "the trial may start");
+		final var connectsBefore = nicPool.paths().get(0).connectsStarted();
+		assertFalse(nicPool.servesNow(), "no trial before a recovery connect lands");
+		assertFalse(nicPool.servesNow(), "one recovery connect at a time");
+		waitFor(() -> nicPool.idleCount() == 1);
+		assertEquals(connectsBefore + 1, nicPool.paths().get(0).connectsStarted());
+		assertEquals(0, nicPool.pendingCount(), "the recovery connect holds no acquisition");
+		assertTrue(nicPool.servesNow(), "the recovery connection serves the trial");
 		assertEquals(0, admission.take(), "and NIC 0 takes it");
-		assertFalse(failure(acquire(nicPool)) instanceof PathBackoffException, "the trial connects and is refused");
-		assertFalse(nicPool.servesNow(), "the failed trial doubles the interval");
+		final var trial = acquire(nicPool).get(5, TimeUnit.SECONDS);
+		assertEquals(connectsBefore + 1, nicPool.paths().get(0).connectsStarted(), "the trial takes it, no new connect");
+
+		admission.answered(0);
+		nicPool.release(trial);
+		assertEquals(1, nicPool.idleCount(), "after an answer connections are pooled as before");
 
 		pool.closeAdmission();
 		advanceMillis(10_000);
 		assertFalse(nicPool.servesNow(), "a closed pool serves nothing");
+	}
+
+	@Test
+	void aFailureWithNoAnswerClosesTheNicsIdleConnectionsAndARefusedRecoveryBacksOff() throws Exception {
+		final var a = listener();
+		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
+						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
+		final var nicPool = pool.pools().get(0);
+		final var first = acquire(nicPool).get(5, TimeUnit.SECONDS);
+		final var second = acquire(nicPool).get(5, TimeUnit.SECONDS);
+		nicPool.release(first);
+		nicPool.release(second);
+		assertEquals(2, nicPool.idleCount());
+
+		final var admission = pool.admission();
+		admission.failed(0);
+		assertEquals(0, nicPool.idleCount(), "idle connections are dropped at the failure");
+		first.closeFuture().await(5, TimeUnit.SECONDS);
+		second.closeFuture().await(5, TimeUnit.SECONDS);
+		assertFalse(first.isOpen());
+		assertFalse(second.isOpen());
+
+		a.stopListening(1);
+		advanceMillis(100);
+		assertFalse(nicPool.servesNow(), "starts a recovery connect, which is refused");
+		waitFor(() -> nicPool.paths().get(0).inBackoff());
+		assertEquals(0, nicPool.idleCount());
+		assertEquals(0, nicPool.openCount(), "the refused recovery connect gave back its slot");
+		assertFalse(nicPool.servesNow(), "no recovery connect while the Path backs off");
+		assertEquals(0, nicPool.openCount());
 	}
 
 	@Test
