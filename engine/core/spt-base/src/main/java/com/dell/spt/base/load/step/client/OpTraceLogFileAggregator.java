@@ -202,8 +202,10 @@ public class OpTraceLogFileAggregator implements Closeable {
 							"started slices " + startedSlices + " not in 0.." + sliceCount);
 		}
 		try (final Instance logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			if (startedSlices > 1) {
-				collectToLocal(remoteSlicesByIndex.subList(0, startedSlices - 1));
+			// A close repeated after the first emptied the list collects nothing again.
+			final int remoteStarted = Math.min(startedSlices - 1, remoteSlicesByIndex.size());
+			if (remoteStarted > 0) {
+				collectToLocal(remoteSlicesByIndex.subList(0, remoteStarted));
 			}
 		} finally {
 			remoteSlicesByIndex.clear();

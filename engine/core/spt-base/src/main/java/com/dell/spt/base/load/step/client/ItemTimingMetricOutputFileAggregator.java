@@ -213,8 +213,10 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 							"started slices " + startedSlices + " not in 0.." + sliceCount);
 		}
 		try {
-			if (startedSlices > 1) {
-				collectToLocal(remoteSlicesByIndex.subList(0, startedSlices - 1));
+			// A close repeated after the first emptied the list collects nothing again.
+			final int remoteStarted = Math.min(startedSlices - 1, remoteSlicesByIndex.size());
+			if (remoteStarted > 0) {
+				collectToLocal(remoteSlicesByIndex.subList(0, remoteStarted));
 			}
 		} finally {
 			remoteSlicesByIndex.clear();
