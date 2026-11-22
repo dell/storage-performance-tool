@@ -80,6 +80,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
 	// Set when a start reaches this step: one stopped or closed before it never ran.
 	private volatile boolean startReached;
+	// Set when a start reaches init(): a start that fails from there on made the step's resources.
+	private volatile boolean startStepEntered;
 
 	protected LoadStepBase(
 					final Config config,
@@ -435,6 +437,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	}
 
 	/**
+	 * Whether a start got past its configuration checks and bucket provisioning to {@link #init()}.
+	 * It stays false for a step never started, or whose start ended before init().
+	 */
+	protected final boolean startStepEntered() {
+		return startStepEntered;
+	}
+
+	/**
 	 * The shutdown hook ends the running step without stopping the scenario, which reaches its next
 	 * step here. Ending as a stop, this step touches neither the target nor a result directory.
 	 */
@@ -493,6 +503,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			refuseStepIdInUseHere(false);
 		}
 		provisionTargetBuckets();
+		startStepEntered = true;
 		init();
 		// Before anything the step writes: a refused step leaves the earlier step's files, its build
 		// record among them, as they were. The other nodes are reached only after the target checks.

@@ -4842,14 +4842,14 @@ class LoadStepClientBaseTest {
 			// This fixture's extension builds no local step, so its start fails, with the reason.
 			assertTrue(assertThrows(RunTerminalException.class, client::start).getCause().getMessage().contains("createLocal"));
 			assertDoesNotThrow(() -> client.doShutdown());
-			// It also has no real worker, so terminal evidence fails closed at collection.
-			assertThrows(IntegrityTerminalException.class, client::doClose);
+			// No slice started, so the close collects and publishes nothing, and does not fail.
+			assertDoesNotThrow(client::doClose);
 			assertDoesNotThrow(() -> client.doStop());
 
 			LinearLoadStepClient linearClient = new LinearLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
 			assertEquals("step failed to start; see the engine log", assertThrows(RunTerminalException.class, linearClient::start).getMessage());
 			assertDoesNotThrow(() -> linearClient.doShutdown());
-			assertThrows(IntegrityTerminalException.class, linearClient::doClose);
+			assertDoesNotThrow(linearClient::doClose);
 			assertDoesNotThrow(() -> linearClient.doStop());
 		}
 	}

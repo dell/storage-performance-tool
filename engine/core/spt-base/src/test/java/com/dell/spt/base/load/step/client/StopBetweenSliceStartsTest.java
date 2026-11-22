@@ -480,7 +480,7 @@ class StopBetweenSliceStartsTest {
 	}
 
 	@Test
-	void aMetadataStartWhoseRunIdCheckFailsFailsClosedWithoutALifecycleFailure() throws Exception {
+	void aMetadataStartWhoseRunIdCheckFailsClosesWithNothingPublished() throws Exception {
 		final LoadStepFactory<LoadStep, ?> factory = realSliceFactory(new CopyOnWriteArrayList<>(), () -> {},
 						"runId", () -> 8L);
 		final TestLoadStepClient client = metadataClient(factory);
@@ -489,13 +489,10 @@ class StopBetweenSliceStartsTest {
 		assertTrue(failure.getMessage().contains("run.id mismatch"), failure.getMessage());
 		Thread.interrupted();
 
-		final var closeFailure = assertThrows(IntegrityTerminalException.class, client::close);
-		assertTrue(closeFailure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
-						closeFailure.getMessage());
-		for (final Throwable suppressed : closeFailure.getSuppressed()) {
-			assertFalse(String.valueOf(suppressed.getMessage()).contains(OperationLifecycleArtifact.FILE_NAME),
-							suppressed::toString);
-		}
+		// No slice started, so the close captures no terminal counts and publishes nothing.
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+		assertNoSliceFiles();
 	}
 
 	@Test

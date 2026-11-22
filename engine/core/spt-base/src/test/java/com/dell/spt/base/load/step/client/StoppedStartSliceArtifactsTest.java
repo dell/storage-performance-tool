@@ -55,7 +55,8 @@ import org.mockito.MockedStatic;
 /**
  * A start that ends as a stop publishes the slice files of the slices whose start returned, and
  * nothing when none did: a slice refused at JVM exit, never reached, or cut partway through its
- * start is left out. A start that fails still needs every slice's files.
+ * start is left out. A start that fails after a slice started still needs every started slice's
+ * files; one that fails before any slice's start returned publishes nothing, as a stopped one.
  */
 class StoppedStartSliceArtifactsTest {
 
@@ -242,7 +243,8 @@ class StoppedStartSliceArtifactsTest {
 	}
 
 	@Test
-	void aStartThatFailsStillNeedsTheEntrySlicesFile() throws Exception {
+	void aStartThatFailsInItsFirstSlicePublishesNothing() throws Exception {
+		// A slice whose own start threw did not start: the step closes as one stopped before its first slice.
 		final LoadStep entry = mock(LoadStep.class);
 		doAnswer(call -> {
 			throw new IllegalStateException("the slice failed to start");
@@ -253,9 +255,10 @@ class StoppedStartSliceArtifactsTest {
 		assertFalse(startFailure instanceof InterruptedException, startFailure.toString());
 		assertFalse(Thread.currentThread().isInterrupted());
 
-		final var closeFailure = assertThrows(IntegrityTerminalException.class, client::close);
-		assertTrue(closeFailure.getMessage().contains("entry-node logger artifact is missing"),
-						closeFailure.getMessage());
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+		assertFalse(Files.exists(canonical), "a lifecycle file was published for a step that started no slice");
+		assertEquals(List.of(), nodeSources());
 	}
 
 	/**
