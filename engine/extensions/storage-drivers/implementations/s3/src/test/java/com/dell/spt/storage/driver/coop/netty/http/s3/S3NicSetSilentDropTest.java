@@ -1,5 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.CREDENTIAL;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.ITEM_SIZE;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.dataOp;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.nics;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.port;
@@ -7,8 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -17,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -70,9 +77,36 @@ final class S3NicSetSilentDropTest {
 		assertTrue(!run.failingAtEnd(), "and is not failing at the end");
 	}
 
+	/**
+	 * The 4-upload multipart shape of the SC26 dead-NIC round (ticket 06, criterion 6): 4 uploads of 5
+	 * parts stay active over both NICs. On the base the failing NIC's trial took a part on a pooled
+	 * connection left from before the fault, and that upload held its slot for 2t.
+	 */
+	@Test
+	void aSilentNicHoldsNoUploadPartAfterItsFirstFailures() throws Exception {
+		assumeTrue(Epoll.isAvailable());
+		assumeTrue(NicSetLoopback.dropsSynsOnAFullAcceptQueue(), "this host answers a SYN to a full accept queue");
+		final var run = runUploadsThroughAFault();
+		// With no part on the silent NIC at the fault, nothing may fail there before the revive.
+		final var firstDeadFailure = Math.min(run.firstFailureOnDeadNic(), run.reviveAt);
+		assertEquals(List.of(), run.startedOnDeadNic(firstDeadFailure, run.reviveAt),
+						"no part starts on the silent NIC between its first failures and the revive");
+		// The uploads whose parts were in flight at the fault fail together; on the base the trial's part
+		// failed another upload a timeout or more later.
+		final long settled = firstDeadFailure + TimeUnit.SECONDS.toNanos(1);
+		assertEquals(List.of(), run.uploadFailures().stream().filter(t -> t > settled && t < run.reviveAt).toList(),
+						"no upload fails on the silent NIC after the fault-time ones");
+		assertTrue(run.liveSuccesses(run.deadAt + 2 * TIMEOUT_NANOS + DEAD_AFTER_NANOS, run.reviveAt) > 0,
+						"the uploads keep going on the live NIC");
+		assertTrue(run.firstSuccessOnDeadNicAfterRevive() - run.reviveAt < BACK_WITHIN_NANOS,
+						"the NIC takes parts again soon after it comes back");
+		assertTrue(!run.failingAtEnd(), "and is not failing at the end");
+	}
+
 	private record Result(long endNanos, long durationNanos, String node, Operation.Status status) {}
 
-	private record Run(List<Result> results, String deadNode, long deadAt, long reviveAt, boolean failingAtEnd) {
+	private record Run(List<Result> results, List<Long> uploadFailures, String deadNode, long deadAt, long reviveAt,
+					boolean failingAtEnd) {
 
 		long firstFailureOnDeadNic() {
 			return results.stream()
@@ -143,10 +177,63 @@ final class S3NicSetSilentDropTest {
 						final var result = run.results().await();
 						results.add(result(System.nanoTime() - t0, result));
 					}
-					return new Run(results, deadNode, deadAt, reviveAt, run.pool().admission().isFailing(1));
+					return new Run(results, List.of(), deadNode, deadAt, reviveAt, run.pool().admission().isFailing(1));
 				}
 			}
 		}
+	}
+
+	/** Keeps 4 uploads active through the fault; the results are the uploads' requests, not the uploads. */
+	private static Run runUploadsThroughAFault() throws Exception {
+		try (var stub = new NicSetLoopback()) {
+			final var endpoints = stub.listeners(2);
+			try (var proxy = new SilentProxy(port(endpoints.get(1)))) {
+				final var deadNode = "127.0.0.1:" + proxy.port();
+				final var root = NicSetLoopback.root(List.of(endpoints.get(0), deadNode), nics(2), 8);
+				try (var driver = NicSetLoopback.driver(root.configVal("storage"), false)) {
+					final var run = NicSetLoopback.started(driver);
+					final List<Result> results = new ArrayList<>();
+					final var finished = new HashSet<String>();
+					final List<Long> uploadFailures = new ArrayList<>();
+					final long t0 = System.nanoTime();
+					var started = 0;
+					for (; started < 4; started++) {
+						assertTrue(run.driver().put(upload("u" + started)));
+					}
+					long deadAt = 0;
+					long reviveAt = 0;
+					while (finished.size() < started) {
+						final var result = run.results().await();
+						final long now = System.nanoTime() - t0;
+						if (!(result instanceof CompositeDataOperation<?> upload)) {
+							results.add(result(now, result));
+						} else if ((upload.allSubOperationsDone() || upload.status() != Operation.Status.SUCC)
+										&& finished.add(upload.item().name())) {
+							if (upload.status() != Operation.Status.SUCC) {
+								uploadFailures.add(now);
+							}
+							if (now < END_AFTER_NANOS) {
+								assertTrue(run.driver().put(upload("u" + started++)));
+							}
+						}
+						if (deadAt == 0 && now > DEAD_AFTER_NANOS) {
+							proxy.die(false);
+							deadAt = System.nanoTime() - t0;
+						}
+						if (reviveAt == 0 && now > REVIVE_AFTER_NANOS) {
+							proxy.revive();
+							reviveAt = System.nanoTime() - t0;
+						}
+					}
+					return new Run(results, uploadFailures, deadNode, deadAt, reviveAt, run.pool().admission().isFailing(1));
+				}
+			}
+		}
+	}
+
+	private static CompositeDataOperation<DataItem> upload(final String name) {
+		return new CompositeDataOperationImpl<>(0, OpType.CREATE, new DataItemImpl(name, 7, 5L * ITEM_SIZE), null, "/bucket",
+						CREDENTIAL, null, 0, ITEM_SIZE);
 	}
 
 	private static Result result(final long endNanos, final Operation result) {
