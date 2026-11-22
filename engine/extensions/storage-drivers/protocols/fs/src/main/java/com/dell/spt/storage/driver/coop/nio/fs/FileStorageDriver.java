@@ -355,10 +355,11 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 			op.status(writeFailStatusOf(op, e));
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (!isClosed()) { // shared content source may be already closed from the load generator
+			if (!isClosed() && !isStopped()) { // shared content source may be already closed from the load generator
 				LogUtil.trace(Loggers.ERR, Level.ERROR, e, "File I/O invocation failure");
 				op.status(Operation.Status.FAIL_UNKNOWN);
 			} else {
+				op.status(Operation.Status.INTERRUPTED);
 				Loggers.ERR.debug("Load operation caused a failure while being interrupted: {}", op);
 			}
 		}
@@ -407,8 +408,8 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		// Close the open channels but do not clear the maps: an I/O worker that outlived the stop
 		// (for example one blocked in a file open inside computeIfAbsent) holds its map slot, and
 		// clear() would wait on that slot for good. Iterating the values does not wait; the maps go
-		// with the driver. A late READ or UPDATE open closes its own channel when its operation ends;
-		// a late CREATE open keeps its channel open until the driver is collected.
+		// with the driver. A late READ, UPDATE or CREATE open closes its own channel when its
+		// operation ends.
 		srcOpenFiles
 						.values()
 						.stream()
