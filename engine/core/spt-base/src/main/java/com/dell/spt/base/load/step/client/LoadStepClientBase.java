@@ -1451,6 +1451,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (barrier != null) {
 				barrier.arm(i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1), stepSlice);
 			}
+			if (validateRunId || barrier != null) {
+				// A stop during those node calls: the slice is closed unstarted, and an armed one fenced.
+				checkStartStopped("stopped while preparing step slice " + i);
+			}
 			try {
 				stepSlice.start();
 				startedSliceCount = i + 1;

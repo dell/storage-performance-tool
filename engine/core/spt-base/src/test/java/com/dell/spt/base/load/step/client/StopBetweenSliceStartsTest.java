@@ -29,12 +29,14 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.load.step.linear.LinearLoadStepLocal;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.svc.ServiceUtil;
@@ -308,6 +310,130 @@ class StopBetweenSliceStartsTest {
 		final var failure = assertThrows(IntegrityTerminalException.class, client::close);
 		assertTrue(failure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
 						failure.getMessage());
+	}
+
+	@Test
+	void aSignalWhileTheEntryCreatesItsSliceLeavesNoFileOfThatSlice() throws Exception {
+		final Config config = config();
+		config.val("load-op-type", "create");
+		final List<LoadStep> created = new CopyOnWriteArrayList<>();
+		final LoadStepFactory<LoadStep, ?> entryFactory = realSliceFactory(created, () -> {
+			JvmExit.markBegun();
+			starter.interrupt();
+		});
+		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(entryFactory), null, metricsMgr);
+		stepDir = lifecycleFile().getParent();
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		assertEquals(1, created.size());
+		assertDoesNotThrow(client::close);
+		assertNoSliceFiles();
+	}
+
+	@Test
+	void aMetadataStepStoppedWhileTheEntryCreatesItsSliceClosesWithNothingPublished() throws Exception {
+		final List<LoadStep> created = new CopyOnWriteArrayList<>();
+		final TestLoadStepClient client = metadataClient(realSliceFactory(created, starter::interrupt));
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		assertEquals(1, created.size());
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+		assertNoSliceFiles();
+	}
+
+	@Test
+	void aStopWhileAWorkerCreatesItsSliceLeavesNoFileOfThatSliceOnTheWorker() throws Exception {
+		// The entry's slice is a mock that writes nothing; the worker's is real and would write both files.
+		final Config config = config();
+		final LoadStep entry = mock(LoadStep.class);
+		final Config workerConfig = config();
+		workerConfig.val("load-op-type", "create");
+		final LinearLoadStepLocal worker = new LinearLoadStepLocal(workerConfig, List.of(), List.of(), metricsMgr);
+		final TestLoadStepClient client = client(config, entry, worker);
+		// The stop lands while the worker's step manager creates the slice it then exports.
+		when(nodeFactories.get(0).createLocal(any(), anyList(), anyList(), any())).thenAnswer(call -> {
+			starter.interrupt();
+			return worker;
+		});
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		verify(entry).start();
+		assertDoesNotThrow(client::close);
+		assertTrue(worker.isClosed(), "the slice resolved but never started was left open on its worker");
+		// Neither file is left on the worker to refuse a later step with this id there.
+		assertNoSliceFiles();
+	}
+
+	@Test
+	void aStopJustBeforeTheSlicesCreatesNoSlice() throws Exception {
+		final LoadStepFactory<LoadStep, ?> entryFactory = entryFactory(mock(LoadStep.class));
+		final TestLoadStepClient client = new TestLoadStepClient(config(), List.of(entryFactory), null, metricsMgr) {
+			@Override
+			public String getTypeName() throws java.rmi.RemoteException {
+				// Read once, by the start, just before it creates the first slice.
+				starter.interrupt();
+				return super.getTypeName();
+			}
+		};
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		verify(entryFactory, never()).createLocal(any(), anyList(), anyList(), any());
+		assertDoesNotThrow(client::close);
+	}
+
+	@Test
+	void aStopDuringTheRunIdCheckNeverStartsThatSlice() throws Exception {
+		final LoadStep entry = mock(LoadStep.class);
+		// The stop lands while the start asks the slice for its run id; the call then returns it.
+		when(entry.runId()).thenAnswer(call -> {
+			starter.interrupt();
+			return 7L;
+		});
+		final TestLoadStepClient client = metadataClient(entryFactory(entry));
+
+		assertStartStopped(client);
+		Thread.interrupted();
+
+		verify(entry).runId();
+		verify(entry, never()).start();
+		assertDoesNotThrow(client::close);
+		verify(entry).close();
+	}
+
+	/**
+	 * A factory that creates a real slice of the configuration it is given, after {@code stop}, as a
+	 * stop that lands while the slice is created.
+	 */
+	@SuppressWarnings("unchecked")
+	private static LoadStepFactory<LoadStep, ?> realSliceFactory(final List<LoadStep> created, final Runnable stop)
+					throws Exception {
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn("test-load-step");
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenAnswer(call -> {
+			stop.run();
+			final LoadStep slice = new LinearLoadStepLocal(
+							call.getArgument(0), call.getArgument(1), call.getArgument(2), call.getArgument(3));
+			created.add(slice);
+			return slice;
+		});
+		return factory;
+	}
+
+	/** A slice that never started wrote neither its lifecycle file nor its event loops file. */
+	private void assertNoSliceFiles() throws IOException {
+		final Path lifecycle = lifecycleFile();
+		assertFalse(Files.exists(lifecycle), "a slice that never started wrote " + lifecycle);
+		final Path eventLoops = lifecycle.resolveSibling(EventLoopsArtifact.FILE_NAME);
+		assertFalse(Files.exists(eventLoops), "a slice that never started wrote " + eventLoops);
 	}
 
 	/** The client's start ends as a stop, not as a failure. */

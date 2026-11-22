@@ -78,6 +78,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private volatile long startTimeSec = -1;
 	private volatile Throwable runFailure;
 	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
+	// Set when a start reaches this step: one stopped or closed before it never ran.
+	private volatile boolean startReached;
 
 	protected LoadStepBase(
 					final Config config,
@@ -406,6 +408,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void onStartRefusedAtJvmExit() {}
 
 	/**
+	 * Whether a start reached this step. An entry that a stop cut between creating a slice and
+	 * starting it stops and closes that slice without it.
+	 */
+	protected final boolean startReached() {
+		return startReached;
+	}
+
+	/**
 	 * The shutdown hook ends the running step without stopping the scenario, which reaches its next
 	 * step here. Ending as a stop, this step touches neither the target nor a result directory.
 	 */
@@ -419,6 +429,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStart() throws IllegalStateException {
 
+		startReached = true;
 		refuseStartAtJvmExit();
 		try {
 			startStep();
