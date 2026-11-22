@@ -331,8 +331,10 @@ class NicSetConnectionPoolTest {
 		advanceMillis(100);
 		final var connectsBefore = nicPool.paths().get(0).connectsStarted();
 		assertFalse(nicPool.servesNow(), "no trial before a recovery connect lands");
-		assertFalse(nicPool.servesNow(), "one recovery connect at a time");
+		final var unusedServes = nicPool.servesNow();
 		waitFor(() -> nicPool.idleCount() == 1);
+		waitFor(() -> a.accepted.size() >= 2);
+		assertEquals(2, a.accepted.size(), "the held connection and one recovery connect");
 		waitFor(() -> rechecks.get() == 1);
 		assertEquals(connectsBefore, nicPool.paths().get(0).connectsStarted(), "a recovery connect is not counted");
 		assertEquals(0, nicPool.pendingCount(), "the recovery connect holds no acquisition");
