@@ -9,6 +9,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
@@ -27,6 +28,7 @@ import java.rmi.RemoteException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -514,24 +516,30 @@ public class LoadStepServiceImplTest {
 		private final String originalHost = System.getProperty("java.rmi.server.hostname");
 		private final WarningCapture warnings = new WarningCapture();
 		private final org.apache.logging.log4j.core.Logger errors = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
-		private final Level errorsLevel = errors.getLevel();
+		private final LoggerLevels levels;
 
 		WatchedSlice(final LoadStep local, final long checkPeriodNanos) throws Exception {
-			System.setProperty("java.rmi.server.hostname", "127.0.0.1");
-			warnings.start();
-			errors.addAppender(warnings);
-			errors.setLevel(Level.WARN);
 			stepId = local.loadStepId();
 			threadName = "spt-entry-watchdog-" + stepId;
-			final Config config = TestConfigBuilder.config();
-			config.val("load-step-id", stepId);
-			@SuppressWarnings("unchecked")
-			final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
-			when(factory.id()).thenReturn(STEP_TYPE);
-			when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(local);
-			service = new LoadStepServiceImpl(
-							freePort(), List.of(factory), STEP_TYPE, config, Collections.emptyList(), mock(MetricsManager.class),
-							releases::add, ENTRY_SILENCE_NANOS, checkPeriodNanos, clock::get);
+			try {
+				System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+				levels = LoggerLevels.set(Map.of(Loggers.ERR.getName(), Level.WARN));
+				warnings.start();
+				errors.addAppender(warnings);
+				final Config config = TestConfigBuilder.config();
+				config.val("load-step-id", stepId);
+				@SuppressWarnings("unchecked")
+				final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+				when(factory.id()).thenReturn(STEP_TYPE);
+				when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(local);
+				service = new LoadStepServiceImpl(
+								freePort(), List.of(factory), STEP_TYPE, config, Collections.emptyList(), mock(MetricsManager.class),
+								releases::add, ENTRY_SILENCE_NANOS, checkPeriodNanos, clock::get);
+			} catch (final Throwable failure) {
+				// No try-with-resources closes a slice that failed to open: put back what it changed.
+				restore(failure);
+				throw failure;
+			}
 		}
 
 		void pass(final long nanos) {
@@ -558,12 +566,46 @@ public class LoadStepServiceImplTest {
 		public void close() throws Exception {
 			try {
 				service.close();
-			} finally {
-				errors.removeAppender(warnings);
-				errors.setLevel(errorsLevel);
-				warnings.stop();
-				ServiceUtil.shutdown();
-				restoreHost(originalHost);
+			} catch (final Throwable failure) {
+				restore(failure);
+				throw failure;
+			}
+			restore(null);
+		}
+
+		/**
+		 * Puts back what the slice changed, each step even when an earlier one fails. Under a failure
+		 * already thrown, the steps' failures are suppressed under it; otherwise the first is thrown.
+		 */
+		private void restore(final Throwable failure) {
+			final List<Runnable> steps = List.of(
+							() -> errors.removeAppender(warnings),
+							warnings::stop,
+							() -> {
+								// Null when the failure came before the window opened.
+								if (levels != null) {
+									levels.close();
+								}
+							},
+							ServiceUtil::shutdown,
+							() -> restoreHost(originalHost));
+			Throwable first = failure;
+			for (final Runnable step : steps) {
+				try {
+					step.run();
+				} catch (final RuntimeException | Error e) {
+					if (first == null) {
+						first = e;
+					} else {
+						first.addSuppressed(e);
+					}
+				}
+			}
+			if (failure == null && first instanceof Error error) {
+				throw error;
+			}
+			if (failure == null && first instanceof RuntimeException e) {
+				throw e;
 			}
 		}
 	}
