@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntSupplier;
@@ -61,6 +62,10 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	private final ReentrantLock refreshLock = new ReentrantLock();
 	/** Whether the terminal snapshot is taken; guarded by {@link #refreshLock}. */
 	private boolean terminalTaken = false;
+	// The slices' snapshots the terminal snapshot was built from, and the DELETE failure-policy outcome
+	// it carries; guarded by refreshLock.
+	private List<AllMetricsSnapshot> terminalSuppliedSnapshots;
+	private Object terminalFailureOutcome;
 	private final List<Double> quantileValues;
 
 	public DistributedMetricsContextImpl(
@@ -242,15 +247,23 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	/**
 	 * Takes the terminal snapshot with one forced read of every slice. The presence and partial
 	 * state of that read stay with it: no later refresh replaces either until the context starts
-	 * again or closes.
+	 * again or closes. A DELETE failure-policy outcome set in the metadata after it was taken, as
+	 * when the step's close fails after its slices were read, is applied to the same read, without
+	 * reading the slices again.
 	 */
 	@Override
 	public S terminalSnapshot() {
 		refreshLock.lock();
 		try {
 			if (!terminalTaken) {
-				publishLastSnapshot(true);
+				terminalSuppliedSnapshots = snapshotsSupplier.get();
+				terminalFailureOutcome = metadata.get(METADATA_DELETE_FAILURE_OUTCOME);
+				publishLastSnapshot(true, terminalSuppliedSnapshots);
 				terminalTaken = true;
+			} else if (terminalSuppliedSnapshots != null
+							&& !Objects.equals(terminalFailureOutcome, metadata.get(METADATA_DELETE_FAILURE_OUTCOME))) {
+				terminalFailureOutcome = metadata.get(METADATA_DELETE_FAILURE_OUTCOME);
+				publishLastSnapshot(true, terminalSuppliedSnapshots);
 			}
 			return lastSnapshot;
 		} finally {
@@ -269,15 +282,19 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 		refreshLock.lock();
 		try {
 			terminalTaken = false;
+			terminalSuppliedSnapshots = null;
+			terminalFailureOutcome = null;
 		} finally {
 			refreshLock.unlock();
 		}
 	}
 
-	@SuppressWarnings("unchecked")
 	private void publishLastSnapshot(final boolean force) {
+		publishLastSnapshot(force, snapshotsSupplier.get());
+	}
 
-		final var suppliedSnapshots = snapshotsSupplier.get();
+	@SuppressWarnings("unchecked")
+	private void publishLastSnapshot(final boolean force, final List<AllMetricsSnapshot> suppliedSnapshots) {
 		if (suppliedSnapshots == null) {
 			nodesPresent = List.of();
 			contributorsPresent = List.of();

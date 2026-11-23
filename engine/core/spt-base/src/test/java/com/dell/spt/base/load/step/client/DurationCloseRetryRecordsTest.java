@@ -78,6 +78,8 @@ class DurationCloseRetryRecordsTest {
 	private final Capture resultXml = new Capture("durationRecordsResultXml");
 	private final List<Runnable> detach = new ArrayList<>();
 	private final AtomicBoolean drained = new AtomicBoolean();
+	// Set once a slice close succeeds: the worker then releases the slice, and its metrics can no longer be read.
+	private final AtomicBoolean released = new AtomicBoolean();
 	private MetricsContextImpl<?> worker;
 	private DistributedMetricsContextImpl<?> fleet;
 	private TestLoadStepClient client;
@@ -104,6 +106,16 @@ class DurationCloseRetryRecordsTest {
 			worker.close();
 		}
 		metricsManager.close();
+	}
+
+	@Test
+	void aRunWithoutAFaultWritesCleanRecordsWithTheDrainedCounts() throws Exception {
+		build(slice());
+
+		assertDoesNotThrow(client::run);
+
+		assertRecords(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY, "completed cleanly", 10, true);
+		assertTrue(client.isClosed());
 	}
 
 	@Test
@@ -160,7 +172,7 @@ class DurationCloseRetryRecordsTest {
 	@Test
 	void aSliceCloseThatFailsOnEveryAttemptWritesFailedRecordsAndTheRunFails() throws Exception {
 		final LoadStep slice = slice();
-		failFirstCalls(Integer.MAX_VALUE).when(slice).close();
+		failFirstCloses(slice, Integer.MAX_VALUE);
 		build(slice);
 
 		final IntegrityTerminalException failure = assertThrows(IntegrityTerminalException.class, client::run);
@@ -175,7 +187,7 @@ class DurationCloseRetryRecordsTest {
 					throws Exception {
 		final LoadStep slice = slice();
 		failFirstCalls(1).when(slice).closeOperationAdmissionForStepStop();
-		failFirstCalls(Integer.MAX_VALUE).when(slice).close();
+		failFirstCloses(slice, Integer.MAX_VALUE);
 		build(slice);
 
 		assertThrows(IntegrityTerminalException.class, client::run);
@@ -186,7 +198,7 @@ class DurationCloseRetryRecordsTest {
 	@Test
 	void aSliceCloseRetryThatSucceedsWritesCleanRecordsAndTheRunSucceeds() throws Exception {
 		final LoadStep slice = slice();
-		failFirstCalls(1).when(slice).close();
+		failFirstCloses(slice, 1);
 		build(slice);
 
 		assertDoesNotThrow(client::run);
@@ -204,6 +216,7 @@ class DurationCloseRetryRecordsTest {
 				JvmExit.markBegun();
 				throw new RemoteException("slice close fails as the engine exits");
 			}
+			released.set(true);
 			return null;
 		}).when(slice).close();
 		build(slice);
@@ -347,7 +360,7 @@ class DurationCloseRetryRecordsTest {
 						.avgPersistFlag(false)
 						.sumPersistFlag(true)
 						.timingPersistFlag(false)
-						.snapshotsSupplier(() -> List.of(drained.get() ? afterDrain : beforeDrain))
+						.snapshotsSupplier(() -> released.get() ? null : List.of(drained.get() ? afterDrain : beforeDrain))
 						.quantileValues(List.of(0.5))
 						.nodeAddrs(List.of("local"))
 						.deleteDetailsExpected(true)
@@ -396,7 +409,20 @@ class DurationCloseRetryRecordsTest {
 			drained.set(true);
 			return null;
 		}).when(slice).startDispatchedOperationsDrainForStepStop(anyLong());
+		failFirstCloses(slice, 0);
 		return slice;
+	}
+
+	/** The slice's first closes fail; a close that succeeds releases it. */
+	private void failFirstCloses(final LoadStep slice, final int failures) throws Exception {
+		final AtomicInteger calls = new AtomicInteger();
+		doAnswer(invocation -> {
+			if (calls.incrementAndGet() <= failures) {
+				throw new RemoteException("transient failure " + calls.get());
+			}
+			released.set(true);
+			return null;
+		}).when(slice).close();
 	}
 
 	private static Stubber failFirstCalls(final int failures) {
