@@ -51,6 +51,7 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdFiles;
@@ -72,6 +73,7 @@ import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.svc.ServiceUtil;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketProvisioning;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
@@ -135,7 +137,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/** Proposed in the spec, until the payload's measurement says otherwise. */
 	private static final long BUCKET_METRICS_FETCH_SECONDS = 30;
-	/** The step ids each run started on this Entry Node, which tell a worker's earlier-run file from this run's. */
+	/**
+	 * The ids of the steps with {@link StepIdFiles} each run started on this Entry Node, which tell a
+	 * worker's earlier-run file from this run's.
+	 */
 	private static final RunStepIds RUN_STEP_IDS = new RunStepIds();
 
 	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
@@ -251,6 +256,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private volatile boolean startStopped;
 	// Whether this start created a slice and never called its start(): it ended between the two.
 	private volatile boolean createdSliceUnreached;
+	// Whether a slice's start() threw: the close then merges the slices whose start returned only.
+	private volatile boolean sliceStartFailed;
 	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
 	private volatile boolean startEntered;
 
@@ -380,6 +387,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		startedSliceCount = 0;
 		startStopped = false;
 		createdSliceUnreached = false;
+		sliceStartFailed = false;
 		stepSliceNodeAddrs.clear();
 		slicesClosing = false;
 		resetDurationLifecycleForStart();
@@ -525,8 +533,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * bucket is provisioned when the id is configured; with {@code nodes}, after the target checks and
 	 * before any item is distributed or any slice started, it resolves the nodes' file managers for the
 	 * step and tests theirs too. Another node's file is refused only when an earlier step of this run
-	 * had the id; for the first, it can only be an earlier run's, which that worker moves aside when its
-	 * slice starts. Each slice tests its own files again when it starts. A metadata-mode step's manifest is refused the
+	 * had the id; for the first, it can only be an earlier run's, which that worker is asked to move
+	 * aside there and then, before any slice of the step exists, and a worker that cannot refuses the
+	 * step. Each slice tests its own files again when it starts. A metadata-mode step's manifest is refused the
 	 * same way when it was already published. A step that publishes none of these files runs as
 	 * before.
 	 */
@@ -587,21 +596,40 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		fileMgrs.clear();
 		initFileManagers(nodeAddrs, fileMgrs);
-		final boolean firstInRun = !nodeAddrs.isEmpty() && RUN_STEP_IDS.firstInRun(runId(), loadStepId());
-		refuseNodeFiles(loadStepId(), fileMgrs, nodeAddrs, merged, nicSetExpected, firstInRun);
+		// A step that publishes none of the files claims no id: a later one of the run may be the first.
+		final boolean firstInRun = !nodeAddrs.isEmpty() && !paths.isEmpty()
+						&& RUN_STEP_IDS.firstInRun(runId(), loadStepId());
+		refuseNodeFiles(
+						loadStepId(), fileMgrs, nodeAddrs, merged, nicSetExpected, runId(),
+						firstInRun ? this::resolveStepManager : null);
+	}
+
+	/** Resolves a node's step manager service, which prepares its files for a step. */
+	@FunctionalInterface
+	interface StepManagers {
+		LoadStepManagerService resolve(String nodeAddr) throws Exception;
+	}
+
+	LoadStepManagerService resolveStepManager(final String nodeAddr) throws Exception {
+		return ServiceUtil.resolve(nodeAddr, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class);
 	}
 
 	/**
 	 * Refuses step {@code stepId} when an earlier step with its id left, on another node of the step,
 	 * a file that node's slice would publish, or when the node cannot tell whether one is there: a
-	 * slice must not start over a file nobody could test. When the step is the first with its id in
-	 * its run, as {@code firstInRun} says, only an earlier run can have left such a file: the node, a
-	 * worker engine, moves it aside when its slice starts, so it is logged and not refused here.
+	 * slice must not start over a file nobody could test. With {@code managers}, the step is the first
+	 * with its id in its run on this Entry Node, so only an earlier run can have left such a file:
+	 * once every node is tested, each node whose slice publishes such files is asked to prepare them
+	 * (see {@link LoadStepManagerService#prepareStepIdFiles}), which moves an earlier run's aside. The
+	 * step is refused when a node cannot, when a node had the id in this run already and holds such a
+	 * file, or when an older node, which does not know the call, holds one. All of it comes before any
+	 * slice of the step is created on any node.
 	 *
 	 * @param fileMgrs one per slice, the Entry Node's first
 	 * @param nodeAddrs one per other node, in slice order
 	 * @param nicSetExpected one per slice: whether that slice requested a NIC set
-	 * @param firstInRun whether no earlier step of this run on this Entry Node had the id
+	 * @param managers the nodes' step managers when the step is the first of its id in its run; else
+	 *     {@code null}, and every such file is refused
 	 */
 	static void refuseNodeFiles(
 					final String stepId,
@@ -609,9 +637,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					final List<String> nodeAddrs,
 					final List<StepIdFiles.LoggerArtifact> merged,
 					final List<Boolean> nicSetExpected,
-					final boolean firstInRun) {
-		for (var i = 1; i < fileMgrs.size(); i++) {
+					final long runId,
+					final StepManagers managers) {
+		final int sliceCount = fileMgrs.size();
+		// The first file found on each node, or null.
+		final var found = new ArrayList<String>(sliceCount);
+		found.add(null);
+		for (var i = 1; i < sliceCount; i++) {
 			final var fileMgr = fileMgrs.get(i);
+			String first = null;
 			for (final var loggerName : StepIdFiles.sliceLoggerNames(merged, nicSetExpected.get(i))) {
 				String file = "the " + loggerName + " file";
 				final boolean exists;
@@ -620,17 +654,74 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					exists = StepIdFiles.exists(fileMgr, file);
 				} catch (final IOException | RuntimeException unknown) {
 					throwUncheckedIfInterrupted(unknown);
-					throw StepIdCheckException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file, unknown);
+					throw StepIdCheckException.onNode(stepId, i, sliceCount, nodeAddrs.get(i - 1), file, unknown);
 				}
-				if (exists && firstInRun) {
-					Loggers.MSG.info(
-									"{}: an earlier run left {} on node {}; that worker moves it aside when its slice starts",
-									stepId, file, nodeAddrs.get(i - 1));
-				} else if (exists) {
-					throw StepIdInUseException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file);
+				if (exists && managers == null) {
+					throw StepIdInUseException.onNode(stepId, i, sliceCount, nodeAddrs.get(i - 1), file);
+				}
+				if (exists && first == null) {
+					first = file;
 				}
 			}
+			found.add(first);
 		}
+		if (managers == null) {
+			return;
+		}
+		for (var i = 1; i < sliceCount; i++) {
+			final var loggerNames = StepIdFiles.sliceLoggerNames(merged, nicSetExpected.get(i));
+			if (loggerNames.isEmpty()) {
+				continue;
+			}
+			final var node = nodeAddrs.get(i - 1);
+			final var earlier = found.get(i);
+			final boolean firstHere;
+			try {
+				final var manager = managers.resolve(node);
+				if (manager == null) {
+					throw new IllegalStateException("no step manager service @ " + node);
+				}
+				firstHere = manager.prepareStepIdFiles(runId, stepId, loggerNames);
+			} catch (final Exception failure) {
+				throwUncheckedIfInterrupted(failure);
+				if (lacksStepIdFilesPreparation(failure)) {
+					// An older node: its files are refused, as by an Entry Node that never asks.
+					if (earlier != null) {
+						throw StepIdInUseException.onNode(stepId, i, sliceCount, node, earlier);
+					}
+					Loggers.MSG.debug("{}: node {} does not prepare a step's files, and holds none of this step's", stepId, node);
+					continue;
+				}
+				if (RunTerminalException.find(failure) instanceof StepIdCheckException) {
+					throw StepIdCheckException.notMovedAsideOnNode(stepId, i, sliceCount, node, failure);
+				}
+				throw StepIdCheckException.onNode(stepId, i, sliceCount, node, "the step's files", failure);
+			}
+			if (!firstHere && earlier != null) {
+				// That node had the id in this run already: a repeated run id, for example.
+				throw StepIdInUseException.onNode(stepId, i, sliceCount, node, earlier);
+			}
+			if (earlier != null) {
+				Loggers.MSG.info("{}: an earlier run left {} on node {}, which moved it aside", stepId, earlier, node);
+			}
+		}
+	}
+
+	/**
+	 * Whether a node failed {@link LoadStepManagerService#prepareStepIdFiles} for not knowing it: its
+	 * server wraps an unknown method as a {@code ServerException} around an {@code UnmarshalException}.
+	 */
+	static boolean lacksStepIdFilesPreparation(final Throwable failure) {
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			final String message = cause.getMessage();
+			if (message != null && message.contains(LoadStepManagerService.NO_STEP_ID_FILES_PREPARATION)) {
+				return true;
+			}
+			if (cause instanceof UnmarshalException && message != null && message.contains("unrecognized method hash")) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private AdmissionBarrier newAdmissionBarrier() {
@@ -1407,9 +1498,31 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							engine + " did not start; see the engine log",
 							cause);
 		}
+		final var nodeRefusal = nodeStepIdRefusal(typed, cause, slice, sliceCount);
+		if (nodeRefusal != null) {
+			return nodeRefusal;
+		}
 		return sliceCount == 1
 						? typed.withStepId(loadStepId())
 						: new RunTerminalException(typed.category(), loadStepId(), engine + ": " + typed.getMessage(), cause);
+	}
+
+	/**
+	 * Another node's refusal of its slice at the start for its step-id files, as the Entry Node words
+	 * it for another node, the engine counted: the node's own message names its file, so it goes to
+	 * the log. Otherwise {@code null}.
+	 */
+	private RunTerminalException nodeStepIdRefusal(
+					final RunTerminalException typed, final Exception cause, final int slice, final int sliceCount) {
+		if (slice < 1 || !(typed instanceof StepIdInUseException || typed instanceof StepIdCheckException)) {
+			return null;
+		}
+		final String node = slice < stepSliceNodeAddrs.size() && stepSliceNodeAddrs.get(slice) != null
+						? stepSliceNodeAddrs.get(slice)
+						: "of engine " + (slice + 1);
+		return typed instanceof StepIdInUseException
+						? StepIdInUseException.fromNode(loadStepId(), slice, sliceCount, node, typed)
+						: StepIdCheckException.fromNode(loadStepId(), slice, sliceCount, node, cause);
 	}
 
 	/**
@@ -1425,9 +1538,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						IntegrityTerminalException.Category.EXECUTION, "failed to start metadata-mode step slice " + slice, cause);
 	}
 
-	/** A slice that didn't start under the admission barrier: its engine named, and the category of a cause that has one, such as a bad items line. */
-	RunTerminalException barrierStartFailure(final Exception cause, final String engine) {
+	/**
+	 * A slice that didn't start under the admission barrier: its engine named, and the category of a
+	 * cause that has one, such as a bad items line. Another node's refusal for its step-id files reads
+	 * as {@link #sliceStartFailure} words it.
+	 */
+	RunTerminalException barrierStartFailure(
+					final Exception cause, final String engine, final int slice, final int sliceCount) {
 		final var typed = RunTerminalException.find(cause);
+		final var nodeRefusal = nodeStepIdRefusal(typed, cause, slice, sliceCount);
+		if (nodeRefusal != null) {
+			return nodeRefusal;
+		}
 		final var refusal = typed == null ? CompositeOperationSupport.find(cause) : null;
 		if (refusal != null) {
 			return new RunTerminalException(
@@ -1490,6 +1612,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				stepSlice.start();
 				startedSliceCount = i + 1;
 			} catch (final Exception e) {
+				sliceStartFailed = true;
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
 				}
@@ -1503,7 +1626,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 				if (barrier != null) {
-					throw barrierStartFailure(e, i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1));
+					throw barrierStartFailure(e, i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1), i, sliceCount);
 				}
 				// One engine missing would leave a lower load reported as the one asked for.
 				throw sliceStartFailure(e, i, sliceCount);
@@ -4379,12 +4502,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/**
 	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
-	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
-	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
-	 * started, as after a start that failed before any slice started, nothing is published.
+	 * stop or at a slice whose start failed, from the slices whose start returned only. A slice refused
+	 * at JVM exit or never reached wrote nothing, and a slice cut partway through its start, or refused
+	 * at it, is left out with them: its folder may hold another step's file. With no slice started, as
+	 * after a start that failed before any slice started, nothing is published.
 	 */
 	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
-		if (closesAsStoppedStart(slicesStarted) && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+		if ((closesAsStoppedStart(slicesStarted) || sliceStartFailed)
+						&& aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
 			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
 			aggregator.close();

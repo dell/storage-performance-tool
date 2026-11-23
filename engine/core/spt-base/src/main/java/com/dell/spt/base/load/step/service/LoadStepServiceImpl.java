@@ -10,7 +10,6 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.PreparationStatus;
-import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.logging.LogUtil;
@@ -94,25 +93,8 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 					final List<Config> ctxConfigs,
 					final MetricsManager metricsManager,
 					final Consumer<LoadStepServiceImpl> onRelease) {
-		this(port, extensions, stepType, baseConfig, ctxConfigs, metricsManager, onRelease, null);
-	}
-
-	/**
-	 * @param onRelease told once, after this service has released its slice and left the registry
-	 * @param runStepIds the worker's record of the step ids each run started there, with which the slice
-	 *     moves aside the files an earlier run left under its id; without it, it refuses them
-	 */
-	LoadStepServiceImpl(
-					final int port,
-					final List<Extension> extensions,
-					final String stepType,
-					final Config baseConfig,
-					final List<Config> ctxConfigs,
-					final MetricsManager metricsManager,
-					final Consumer<LoadStepServiceImpl> onRelease,
-					final RunStepIds runStepIds) {
 		this(
-						port, extensions, stepType, baseConfig, ctxConfigs, metricsManager, onRelease, runStepIds,
+						port, extensions, stepType, baseConfig, ctxConfigs, metricsManager, onRelease,
 						TimeUnit.MILLISECONDS.toNanos(entrySilenceTimeoutMillis()), ENTRY_CHECK_PERIOD_NANOS, System::nanoTime);
 	}
 
@@ -127,23 +109,6 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 					final long entrySilenceTimeoutNanos,
 					final long entryCheckPeriodNanos,
 					final LongSupplier nanoClock) {
-		this(
-						port, extensions, stepType, baseConfig, ctxConfigs, metricsManager, onRelease, null,
-						entrySilenceTimeoutNanos, entryCheckPeriodNanos, nanoClock);
-	}
-
-	LoadStepServiceImpl(
-					final int port,
-					final List<Extension> extensions,
-					final String stepType,
-					final Config baseConfig,
-					final List<Config> ctxConfigs,
-					final MetricsManager metricsManager,
-					final Consumer<LoadStepServiceImpl> onRelease,
-					final RunStepIds runStepIds,
-					final long entrySilenceTimeoutNanos,
-					final long entryCheckPeriodNanos,
-					final LongSupplier nanoClock) {
 		super(port);
 		this.onRelease = onRelease;
 		this.entrySilenceTimeoutNanos = entrySilenceTimeoutNanos;
@@ -154,9 +119,6 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 						false); // don't override the step-id value on the remote node again
 		localLoadStep = LoadStepFactory.createLocalLoadStep(
 						baseConfig, extensions, ctxConfigs, metricsManager, stepType);
-		if (runStepIds != null && localLoadStep instanceof LoadStepLocalBase workerSlice) {
-			workerSlice.startOnWorker(runStepIds);
-		}
 		final String stepId = baseConfig.stringVal("load-step-id");
 		try (final Instance logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			Loggers.MSG.info("New step service for type \"{}\"", stepType);

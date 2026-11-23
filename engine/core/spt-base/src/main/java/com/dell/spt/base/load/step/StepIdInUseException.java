@@ -34,8 +34,22 @@ public final class StepIdInUseException extends RunTerminalException {
 	public static StepIdInUseException onNode(
 					final String stepId, final int slice, final int sliceCount, final String node, final String existing) {
 		Loggers.ERR.error("{}: an earlier step with this id left {} on node {}", stepId, existing, node);
-		return new StepIdInUseException(stepId, "engine " + (slice + 1) + " of " + sliceCount + ": step id \"" + stepId
-						+ "\" is already used in that node's log directory; see the entry's log");
+		return new StepIdInUseException(stepId, nodeMessage(stepId, slice, sliceCount));
+	}
+
+	/**
+	 * The node {@code node}, the engine {@code slice + 1} of {@code sliceCount}, refused its slice at
+	 * its start for a file an earlier step left there, as {@code refusal}, its own message, says.
+	 */
+	public static StepIdInUseException fromNode(
+					final String stepId, final int slice, final int sliceCount, final String node, final Throwable refusal) {
+		Loggers.ERR.error("{}: node {} refused the step's slice at its start: {}", stepId, node, refusal.getMessage());
+		return new StepIdInUseException(stepId, nodeMessage(stepId, slice, sliceCount));
+	}
+
+	private static String nodeMessage(final String stepId, final int slice, final int sliceCount) {
+		return "engine " + (slice + 1) + " of " + sliceCount + ": step id \"" + stepId
+						+ "\" is already used in that node's log directory; see the entry's log";
 	}
 
 	static String message(final String stepId, final Path existing) {

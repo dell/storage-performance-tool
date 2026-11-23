@@ -25,7 +25,6 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.load.step.EarlierRunFiles;
-import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdInUseException;
@@ -56,7 +55,6 @@ import com.github.akurilov.confuse.Config;
 import java.util.UUID;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
 import java.util.ArrayList;
@@ -107,10 +105,6 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private int failedDurationCloses;
 	// Refused at start: an earlier step with the same id left its files here, and this one publishes none.
 	private volatile boolean startRefused;
-	// On a worker engine: the step ids each run started there, so an earlier run's files are moved aside.
-	private volatile RunStepIds workerRunStepIds;
-	// Whether this slice is the first of its step id in its run on this worker, decided once per slice.
-	private Boolean firstOfItsIdInRun;
 	private volatile StepPreparation preparation;
 	private volatile Thread preparationDeadlineGuard;
 	private volatile PoolPreparation.Report poolReport;
@@ -1322,60 +1316,33 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * Refuses this slice, before it seeds or writes any of them, when an earlier step with the same id
 	 * left one of the {@link StepIdFiles} this slice would publish: the same files the Entry Node
 	 * tests before it starts any slice. A refused slice publishes nothing at close, so the earlier
-	 * step's files, its event-loop report among them, stay as they were. On a worker engine (see
-	 * {@link #startOnWorker}), the first slice of its id in its run moves such files aside instead,
-	 * since only an earlier run can have left them, and runs; one that cannot move them is refused.
+	 * step's files, its event-loop report among them, stay as they were. On a worker engine, an earlier
+	 * run's files were moved aside before the Entry Node created this slice (see {@link
+	 * EarlierRunFiles}); this check refuses any it finds, as on every engine.
 	 */
 	@Override
 	protected final void refuseStepIdInUse(final boolean nodes) {
 		startRefused = false;
-		final var runStepIds = workerRunStepIds;
-		if (runStepIds != null && firstOfItsIdInRun == null) {
-			firstOfItsIdInRun = runStepIds.firstInRun(runId(), loadStepId());
-		}
-		try {
-			refuseOrMoveAsideStepIdFiles();
-		} catch (final StepIdInUseException | StepIdCheckException refused) {
-			startRefused = true;
-			throw refused;
-		} finally {
-			if (runStepIds != null && (nodes || startRefused)) {
-				// The start's last check, or a refusal: a later start of this slice finds files of this run.
-				firstOfItsIdInRun = Boolean.FALSE;
-			}
-		}
-	}
-
-	private void refuseOrMoveAsideStepIdFiles() {
 		final var paths = new ArrayList<Path>();
-		for (final var loggerName : StepIdFiles.sliceLoggerNames(
-						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs))) {
+		final var loggerNames = StepIdFiles.sliceLoggerNames(
+						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs));
+		for (final var loggerName : loggerNames) {
 			try {
 				paths.add(Path.of(FileManager.INSTANCE.logFileName(loggerName, loadStepId())));
 			} catch (final IOException | RuntimeException unknown) {
 				throwUncheckedIfInterrupted(unknown);
+				startRefused = true;
 				throw StepIdCheckException.here(loadStepId(), "the " + loggerName + " file", unknown);
 			}
 		}
-		if (Boolean.TRUE.equals(firstOfItsIdInRun)) {
-			final var earlier = StepIdInUseException.existing(loadStepId(), paths);
-			if (!earlier.isEmpty()) {
-				EarlierRunFiles.moveAside(loadStepId(), earlier, Instant.now());
-			}
+		try {
+			StepIdInUseException.refuseExisting(loadStepId(), paths);
+		} catch (final StepIdInUseException | StepIdCheckException refused) {
+			startRefused = true;
+			throw refused;
 		}
-		StepIdInUseException.refuseExisting(loadStepId(), paths);
-	}
-
-	/**
-	 * Makes this slice a worker engine's (one that {@code --run-node} serves to an Entry Node), which
-	 * moves aside, instead of refusing, the files an earlier run left under its step id: those found
-	 * when it is the first slice of its id in its run, by {@code runStepIds}. A later slice of the id in
-	 * the same run is refused as on any engine. It is called before the slice starts.
-	 *
-	 * @param runStepIds the worker's record of the step ids each run started there
-	 */
-	public final void startOnWorker(final RunStepIds runStepIds) {
-		workerRunStepIds = runStepIds;
+		// Where no list of open files tells, a later run's move aside of these files asks this.
+		EarlierRunFiles.noteSliceStart(loadStepId(), loggerNames);
 	}
 
 	/** Refused, or no start reached it: neither the start nor its wrapped part, which sets the worker id. */

@@ -25,6 +25,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
@@ -35,6 +36,8 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import java.rmi.ServerException;
+import java.rmi.UnmarshalException;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
@@ -243,7 +246,7 @@ public class StepIdReuseAtStartTest {
 		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), "/w/operation.lifecycle.csv", 120);
 
 		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
-						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false), false));
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false), 0L, null));
 
 		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
 						+ "see the entry's log", failure.getMessage());
@@ -251,14 +254,18 @@ public class StepIdReuseAtStartTest {
 	}
 
 	@Test
-	void theEntryNodeLeavesAWorkersEarlierRunFileToThatWorkerForTheFirstStepOfItsIdInTheRun() throws Exception {
+	void theEntryNodeAsksAWorkerToMoveAsideItsEarlierRunFileForTheFirstStepOfItsIdInTheRun() throws Exception {
 		final var merged = StepIdFiles.merged(config("create"), List.of());
 		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenReturn(true);
 
 		LoadStepClientBase.refuseNodeFiles(
-						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false), true);
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false),
+						77L, node -> manager);
 
 		verify(worker).fileSize(NODE_FILE);
+		verify(manager).prepareStepIdFiles(77L, stepId, List.of(Loggers.OPERATION_LIFECYCLE.getName()));
 	}
 
 	@ParameterizedTest(name = "{0}")
@@ -268,23 +275,28 @@ public class StepIdReuseAtStartTest {
 		final var merged = StepIdFiles.merged(config("create"), List.of());
 		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 0);
 		fault.apply(worker, stepId);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
 
 		final var failure = assertThrows(StepIdCheckException.class, () -> LoadStepClientBase.refuseNodeFiles(
-						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false), true));
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false),
+						77L, node -> manager));
 
 		assertEquals("engine 2 of 2: step id \"" + stepId + "\" could not be checked in that node's log directory; "
 						+ "see the entry's log", failure.getMessage());
+		verify(manager, never()).prepareStepIdFiles(anyLong(), anyString(), anyList());
 	}
 
 	@Test
 	void aWorkersEarlierRunFileIsRefusedForTheSecondStepOfItsIdInTheSameRunBeforeAnySlice() throws Exception {
 		final long runId = runId();
 		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenReturn(true);
 		final Config firstConfig = config("create");
 		firstConfig.val("run-id", runId);
 		firstConfig.val("load-step-node-addrs", List.of(NODE));
 		final TestLoadStepClient first = client(firstConfig);
-		first.withNodeFileManagers(Map.of(NODE, worker));
+		first.withNodeFileManagers(Map.of(NODE, worker)).withNodeStepManagers(Map.of(NODE, manager));
 		try {
 			// The node 127.0.0.1:1 serves no step, so the first step fails later, at its slice there.
 			final var thrown = assertThrows(RuntimeException.class, first::start);
@@ -293,6 +305,7 @@ public class StepIdReuseAtStartTest {
 		} finally {
 			closeQuietly(first);
 		}
+		verify(manager).prepareStepIdFiles(runId, stepId, List.of(Loggers.OPERATION_LIFECYCLE.getName()));
 
 		final Config second = config("create");
 		second.val("run-id", runId);
@@ -301,6 +314,130 @@ public class StepIdReuseAtStartTest {
 		assertInstanceOf(StepIdInUseException.class, failure, failure.toString());
 		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
 						+ "see the entry's log", failure.getMessage());
+		verify(manager, org.mockito.Mockito.times(1)).prepareStepIdFiles(anyLong(), anyString(), anyList());
+	}
+
+	@Test
+	void aWorkerThatCannotMoveAsideItsEarlierRunFileRefusesTheStepBeforeAnySliceExists() throws Exception {
+		// A read-only step folder on the worker: its step manager throws as the real one does.
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenThrow(StepIdCheckException.notMovedAside(
+						stepId, NODE_FILE, new AccessDeniedException(NODE_FILE + " -> /w.earlier-20261123T101530Z")));
+		final Config config = config("create");
+		config.val("run-id", runId());
+
+		final var failure = refusedAtStart(config, worker, manager);
+
+		assertInstanceOf(StepIdCheckException.class, failure, failure.toString());
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" was used by an earlier run in that node's log directory, "
+						+ "and its files could not be moved aside; see the entry's log", failure.getMessage());
+		assertFalse(failure.getMessage().contains("/w"), failure.getMessage());
+	}
+
+	@Test
+	void aWorkerThatHadTheIdInThisRunAlreadyRefusesTheStepBeforeAnySliceExists() throws Exception {
+		// A repeated run id on a worker that outlived its run: the worker, not this Entry Node, had the id.
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenReturn(false);
+		final Config config = config("create");
+		config.val("run-id", runId());
+
+		final var failure = refusedAtStart(config, worker, manager);
+
+		assertInstanceOf(StepIdInUseException.class, failure, failure.toString());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+	}
+
+	@Test
+	void anOlderWorkerHoldingAnEarlierRunFileIsRefusedAsBefore() throws Exception {
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenThrow(new ServerException(
+						"RemoteException occurred in server thread",
+						new UnmarshalException("unrecognized method hash: method not supported by remote object")));
+		final Config config = config("create");
+		config.val("run-id", runId());
+
+		final var failure = refusedAtStart(config, worker, manager);
+
+		assertInstanceOf(StepIdInUseException.class, failure, failure.toString());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+	}
+
+	@Test
+	void aNodeWhoseStepManagerCannotBeReachedIsRefusedAsOneThatCannotTell() throws Exception {
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList()))
+						.thenThrow(new java.rmi.ConnectException("Connection refused to host: 10.0.0.2"));
+		final Config config = config("create");
+		config.val("run-id", runId());
+
+		final var failure = refusedAtStart(config, worker, manager);
+
+		assertInstanceOf(StepIdCheckException.class, failure, failure.toString());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" could not be checked in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+	}
+
+	@Test
+	void aStepWithNoneOfTheFilesLeavesItsIdToALaterStepOfTheRun() throws Exception {
+		// NOOP X, then CREATE X, in one run, on a worker that holds an earlier run's file for X.
+		final long runId = runId();
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenReturn(true);
+		for (final String opType : List.of("noop", "create")) {
+			final Config config = config(opType);
+			config.val("run-id", runId);
+			config.val("load-step-node-addrs", List.of(NODE));
+			final TestLoadStepClient client = client(config);
+			client.withNodeFileManagers(Map.of(NODE, worker)).withNodeStepManagers(Map.of(NODE, manager));
+			try {
+				// The node 127.0.0.1:1 serves no step, so each step fails later, at its slice there.
+				final var thrown = assertThrows(RuntimeException.class, client::start);
+				final var cause = RunTerminalException.find(thrown);
+				assertFalse(cause instanceof StepIdInUseException || cause instanceof StepIdCheckException,
+								opType + ": " + thrown);
+			} finally {
+				closeQuietly(client);
+			}
+		}
+		verify(manager, org.mockito.Mockito.times(1))
+						.prepareStepIdFiles(runId, stepId, List.of(Loggers.OPERATION_LIFECYCLE.getName()));
+	}
+
+	@Test
+	void aWorkersRefusalAtItsSliceStartReadsAsTheEntryNodesNodeMessage() throws Exception {
+		final TestLoadStepClient client = client(config("create"));
+		final String workerFile = "/srv/worker/log/" + stepId + "/operation.lifecycle.csv";
+		final var inUse = new StepIdInUseException(stepId, Path.of(workerFile));
+		final var unchecked = StepIdCheckException.here(stepId, workerFile, new AccessDeniedException(workerFile));
+		final String inUseMessage = "engine 2 of 3: step id \"" + stepId + "\" is already used in that node's log "
+						+ "directory; see the entry's log";
+		final String uncheckedMessage = "engine 2 of 3: step id \"" + stepId + "\" could not be checked in that node's log "
+						+ "directory; see the entry's log";
+
+		final List<RunTerminalException> failures = List.of(
+						client.sliceStartFailure(new ServerException("RemoteException occurred in server thread", inUse), 1, 3),
+						client.metadataSliceStartFailure(new RuntimeException(inUse), 1, 3),
+						client.barrierStartFailure(new ServerException("RemoteException occurred in server thread", inUse),
+										"10.0.0.2:1100", 1, 3),
+						client.sliceStartFailure(unchecked, 1, 3),
+						client.barrierStartFailure(new ServerException("RemoteException occurred in server thread", unchecked),
+										"10.0.0.2:1100", 1, 3));
+
+		assertEquals(List.of(inUseMessage, inUseMessage, inUseMessage, uncheckedMessage, uncheckedMessage),
+						failures.stream().map(RunTerminalException::getMessage).toList());
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failures.get(0).category());
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failures.get(3).category());
+		// The Entry Node's own slice keeps its own file in the message, as #320 has it.
+		assertEquals("engine 1 of 3: " + inUse.getMessage(), client.sliceStartFailure(inUse, 0, 3).getMessage());
 	}
 
 	@Test
@@ -344,7 +481,7 @@ public class StepIdReuseAtStartTest {
 		final FileManager worker = node(Loggers.INTEGRITY_PERFORMANCE.getName(), "/w/integrity.performance.csv", 0);
 
 		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
-						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false), false));
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false), 0L, null));
 
 		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
 						+ "see the entry's log", failure.getMessage());
@@ -357,9 +494,9 @@ public class StepIdReuseAtStartTest {
 		final FileManager worker = node(Loggers.NIC_SET.getName(), "/w/nic.set.json", 10);
 		final List<FileManager> fileMgrs = List.of(FileManager.INSTANCE, worker);
 
-		LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(true, false), false);
+		LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(true, false), 0L, null);
 		final var failure = assertThrows(StepIdInUseException.class,
-						() -> LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(false, true), false));
+						() -> LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(false, true), 0L, null));
 
 		assertTrue(failure.getMessage().startsWith("engine 2 of 2: "), failure.getMessage());
 		verify(worker, org.mockito.Mockito.atLeastOnce()).fileSize("/w/nic.set.json");
@@ -497,6 +634,12 @@ public class StepIdReuseAtStartTest {
 	 * returns why it was refused: before any slice started and before its build record was written.
 	 */
 	private RunTerminalException refusedAtStart(final Config config, final FileManager worker) throws Exception {
+		return refusedAtStart(config, worker, null);
+	}
+
+	/** As {@link #refusedAtStart(Config, FileManager)}, the other node's step manager {@code manager} when given. */
+	private RunTerminalException refusedAtStart(
+					final Config config, final FileManager worker, final LoadStepManagerService manager) throws Exception {
 		final Path buildRecord = canonical(Loggers.OPERATION_LIFECYCLE.getName()).resolveSibling(EngineBuildInfoPublisher.FILE_NAME);
 		if (worker != null) {
 			config.val("load-step-node-addrs", List.of(NODE));
@@ -504,6 +647,9 @@ public class StepIdReuseAtStartTest {
 		final TestLoadStepClient client = client(config);
 		if (worker != null) {
 			client.withNodeFileManagers(Map.of(NODE, worker));
+		}
+		if (manager != null) {
+			client.withNodeStepManagers(Map.of(NODE, manager));
 		}
 		final List<String> before = resultFiles();
 		final RuntimeException thrown;
@@ -535,7 +681,9 @@ public class StepIdReuseAtStartTest {
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, single.category());
 		assertEquals(refusal.getMessage(), single.getMessage());
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, distributed.category());
-		assertEquals("engine 2 of 2: " + refusal.getMessage(), distributed.getMessage());
+		// Another node's refusal reads as the Entry Node's node message: its file goes to the log.
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", distributed.getMessage());
 		assertInstanceOf(IntegrityTerminalException.class, other);
 		assertEquals(IntegrityTerminalException.Category.EXECUTION, other.category());
 		assertEquals("failed to start metadata-mode step slice 1", other.getMessage());

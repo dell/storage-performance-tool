@@ -42,9 +42,10 @@ import org.junit.jupiter.api.Timeout;
 /**
  * A worker engine (its step manager over RMI on the loopback interface, the real linear step and the
  * dummy mock driver) whose log directory holds a step's lifecycle file from an earlier run, as the
- * legacy harnesses leave it: the first CREATE step of that id in the next run moves the file aside,
- * warns once and runs, and the step's lifecycle evidence is this run's alone. A second step of the id
- * in the same run is refused at its start.
+ * legacy harnesses leave it: asked by the Entry Node to prepare the first CREATE step of that id in
+ * the next run, it moves the file aside and warns once, the step runs, and its lifecycle evidence is
+ * this run's alone. For a second step of the id in the same run it moves nothing, and the slice is
+ * refused at its start.
  */
 @Timeout(120)
 class WorkerEarlierRunStepTest {
@@ -101,7 +102,8 @@ class WorkerEarlierRunStepTest {
 		final String earlier = EARLIER.formatted(stepId);
 		Files.writeString(lifecycle, earlier);
 
-		final List<String> warnings = warnings(() -> runSlice());
+		final List<String> warnings = warnings(() -> assertTrue(prepare(RUN_ID)));
+		runSlice();
 
 		final Path moved = movedFolder();
 		assertEquals(1, warnings.size(), warnings.toString());
@@ -123,8 +125,11 @@ class WorkerEarlierRunStepTest {
 
 	@Test
 	void aSecondStepOfTheIdInTheSameRunIsRefusedAtItsStartOnTheWorker() throws Exception {
+		assertTrue(prepare(RUN_ID));
 		runSlice();
 		final String published = Files.readString(lifecycle());
+
+		assertFalse(prepare(RUN_ID), "the worker took the second step for the first of its id in the run");
 
 		final LoadStepService second = newSlice();
 		final var thrown = assertThrows(Exception.class, second::start);
@@ -137,9 +142,11 @@ class WorkerEarlierRunStepTest {
 
 	@Test
 	void theWorkerStillServesTheIdInItsNextRun() throws Exception {
+		assertTrue(prepare(RUN_ID));
 		runSlice();
 		final String published = Files.readString(lifecycle());
 
+		assertTrue(prepare(RUN_ID + 1));
 		runSlice(newSlice(RUN_ID + 1));
 
 		assertEquals(published, Files.readString(movedFolder().resolve(OperationLifecycleArtifact.FILE_NAME)));
@@ -148,6 +155,12 @@ class WorkerEarlierRunStepTest {
 
 	private void runSlice() throws Exception {
 		runSlice(newSlice());
+	}
+
+	/** As the Entry Node asks the worker over RMI before it creates any slice of the step. */
+	private boolean prepare(final long runId) throws Exception {
+		final var manager = ServiceUtil.resolve("127.0.0.1", port, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class);
+		return manager.prepareStepIdFiles(runId, stepId, List.of(Loggers.OPERATION_LIFECYCLE.getName()));
 	}
 
 	/** Runs {@code slice} as the Entry Node does: start, wait for its count's operations, stop and close. */

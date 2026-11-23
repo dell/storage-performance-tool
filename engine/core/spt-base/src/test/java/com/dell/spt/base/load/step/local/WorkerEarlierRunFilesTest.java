@@ -2,7 +2,6 @@ package com.dell.spt.base.load.step.local;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -16,8 +15,10 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.load.step.EarlierRunFiles;
 import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.load.step.StepIdCheckException;
+import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.client.StepIdReuseAtStartTest;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -29,6 +30,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -45,14 +47,16 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * A worker engine's slice, the first of its step id in its run, moves aside the files an earlier run
- * left under that id, warns once and runs. A later slice of the id in the same run, a slice of a step
- * without a run id, and an Entry Node's or local run's slice are refused as before; so is a worker
- * slice that cannot move the files.
+ * A worker engine, asked by the Entry Node to prepare its files for the first step of an id in a run
+ * (before any slice of the step exists), moves aside the files an earlier run left under that id and
+ * warns once; the slice then starts as on a clean folder. A later step of the id in the same run, a
+ * step without a run id, and a slice the Entry Node did not prepare for are refused as before; so
+ * is a worker that cannot move the files, before any slice is created.
  */
 class WorkerEarlierRunFilesTest {
 
 	private static final long RUN_ID = 1_763_892_000_000L;
+	private static final Instant NOW = Instant.parse("2026-11-23T10:15:30Z");
 
 	private final String stepId = "worker-earlier-run-" + UUID.randomUUID();
 	private final List<WorkerSlice> slices = new ArrayList<>();
@@ -76,14 +80,14 @@ class WorkerEarlierRunFilesTest {
 	}
 
 	@Test
-	void aCreateSliceMovesAnEarlierRunsLifecycleFileAsideWarnsOnceAndRuns() throws Exception {
+	void aPreparedCreateStepMovesAnEarlierRunsLifecycleFileAsideWarnsOnceAndItsSliceRuns() throws Exception {
 		final Path lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE));
-		final LoadStepContext context = mockContext();
-		final WorkerSlice slice = slice(config("create", RUN_ID), context, new RunStepIds());
+		final Config config = config("create", RUN_ID);
 
-		final List<String> warnings = warnings(slice::start);
+		final var firstInRun = new boolean[1];
+		final List<String> warnings = warnings(() -> firstInRun[0] = prepare(new RunStepIds(), config));
 
-		verify(context).start();
+		assertTrue(firstInRun[0]);
 		final Path moved = onlyMovedFolder();
 		assertEquals(List.of(
 						stepId + ": this worker's folder for the step holds operation.lifecycle.csv from an earlier run; "
@@ -92,6 +96,10 @@ class WorkerEarlierRunFilesTest {
 		assertEquals("earlier", Files.readString(moved.resolve(lifecycle.getFileName())));
 		assertFalse(Files.exists(lifecycle), "the earlier run's file is still in the step's folder");
 
+		final LoadStepContext context = mockContext();
+		final WorkerSlice slice = slice(config, context);
+		slice.start();
+		verify(context).start();
 		slice.stop();
 
 		final List<String> rows = Files.readAllLines(lifecycle);
@@ -101,54 +109,56 @@ class WorkerEarlierRunFilesTest {
 	}
 
 	@Test
-	void aPartialReadSliceMovesAnEarlierRunsRangeReadFileAside() throws Exception {
+	void aPartialReadStepMovesAnEarlierRunsRangeReadFileAside() throws Exception {
 		final Path ranges = earlierFile(logFile(Loggers.RANGE_READ));
 		final Config config = config("read", RUN_ID);
 		config.val("load-op-read-range-size", "1KiB");
 		config.val("storage-driver-type", "s3");
-		final LoadStepContext context = mockContext();
-		final WorkerSlice slice = slice(config, context, new RunStepIds());
 
-		assertEquals(1, warnings(slice::start).size());
+		assertEquals(1, warnings(() -> prepare(new RunStepIds(), config)).size());
 
-		verify(context).start();
 		assertEquals("earlier", Files.readString(onlyMovedFolder().resolve(ranges.getFileName())));
 		assertFalse(Files.exists(ranges));
+		final LoadStepContext context = mockContext();
+		slice(config, context).start();
+		verify(context).start();
 	}
 
 	@Test
-	void aNicSetSliceMovesAnEarlierRunsNicFilesAside() throws Exception {
+	void aNicSetStepMovesAnEarlierRunsNicFilesAside() throws Exception {
 		final Path nicPaths = earlierFile(logFile(Loggers.NIC_PATHS));
 		final Path nicSet = earlierFile(logFile(Loggers.NIC_SET));
 		final Config config = config("update", RUN_ID);
 		config.val(NicSetConfig.SLICE_INTERFACES_PATH, List.of("lo"));
-		final LoadStepContext context = mockContext();
-		final WorkerSlice slice = slice(config, context, new RunStepIds());
 
-		final List<String> warnings = warnings(slice::start);
+		final List<String> warnings = warnings(() -> prepare(new RunStepIds(), config));
 
-		verify(context).start();
 		final Path moved = onlyMovedFolder();
 		assertEquals(1, warnings.size(), warnings.toString());
 		assertTrue(warnings.get(0).contains("holds nic.paths.csv, nic.set.json from an earlier run; moved them aside"), warnings.toString());
 		assertEquals("earlier", Files.readString(moved.resolve(nicPaths.getFileName())));
 		assertEquals("earlier", Files.readString(moved.resolve(nicSet.getFileName())));
+		final LoadStepContext context = mockContext();
+		slice(config, context).start();
+		verify(context).start();
 	}
 
 	@Test
-	void aSecondSliceOfTheIdInTheSameRunIsRefusedBeforeItsContextsStart() throws Exception {
+	void aSecondStepOfTheIdInTheSameRunMovesNothingAndItsSliceIsRefusedBeforeItsContextsStart() throws Exception {
 		final var runStepIds = new RunStepIds();
-		final WorkerSlice first = slice(config("create", RUN_ID), mockContext(), runStepIds);
+		final Config config = config("create", RUN_ID);
+		assertTrue(prepare(runStepIds, config));
+		final WorkerSlice first = slice(config, mockContext());
 		first.start();
 		first.stop();
 		final Path lifecycle = logFile(Loggers.OPERATION_LIFECYCLE);
 		assertTrue(Files.exists(lifecycle), "the first slice published its lifecycle file");
 		final String published = Files.readString(lifecycle);
 
-		final LoadStepContext context = mockContext();
-		final WorkerSlice second = slice(config("create", RUN_ID), context, runStepIds);
-		final var failure = refused(second);
+		assertFalse(prepare(runStepIds, config("create", RUN_ID)));
 
+		final LoadStepContext context = mockContext();
+		final var failure = refused(slice(config("create", RUN_ID), context));
 		assertEquals(StepIdInUseException.class, failure.getClass());
 		assertTrue(failure.getMessage().contains("(" + lifecycle + " exists)"), failure.getMessage());
 		verify(context, never()).start();
@@ -157,26 +167,46 @@ class WorkerEarlierRunFilesTest {
 	}
 
 	@Test
-	void theNextRunsSliceOfTheIdMovesThePreviousRunsFileAside() throws Exception {
+	void aSameRunFileThatAppearsAfterThePreparationIsRefusedAtTheSliceStart() throws Exception {
+		final Config config = config("create", RUN_ID);
+		assertTrue(prepare(new RunStepIds(), config));
+		// A concurrent step of the id in this run publishes its file between the two.
+		final Path lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE));
+
+		final LoadStepContext context = mockContext();
+		final var failure = refused(slice(config, context));
+
+		assertEquals(StepIdInUseException.class, failure.getClass());
+		verify(context, never()).start();
+		assertEquals("earlier", Files.readString(lifecycle));
+		assertNoMovedFolder();
+	}
+
+	@Test
+	void theNextRunsStepOfTheIdMovesThePreviousRunsFileAside() throws Exception {
 		final var runStepIds = new RunStepIds();
-		final WorkerSlice first = slice(config("create", RUN_ID), mockContext(), runStepIds);
+		final Config config = config("create", RUN_ID);
+		assertTrue(prepare(runStepIds, config));
+		final WorkerSlice first = slice(config, mockContext());
 		first.start();
 		first.stop();
 		final String published = Files.readString(logFile(Loggers.OPERATION_LIFECYCLE));
 
+		final Config next = config("create", RUN_ID + 1);
+		assertTrue(prepare(runStepIds, next));
 		final LoadStepContext context = mockContext();
-		slice(config("create", RUN_ID + 1), context, runStepIds).start();
+		slice(next, context).start();
 
 		verify(context).start();
 		assertEquals(published, Files.readString(onlyMovedFolder().resolve("operation.lifecycle.csv")));
 	}
 
 	@Test
-	void aSliceThatIsNotAWorkersIsRefusedAsBefore() throws Exception {
+	void aSliceTheEntryNodeDidNotPrepareForIsRefusedAsBefore() throws Exception {
 		final Path lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE));
 		final LoadStepContext context = mockContext();
 
-		final var failure = refused(slice(config("create", RUN_ID), context, null));
+		final var failure = refused(slice(config("create", RUN_ID), context));
 
 		assertEquals("step id \"" + stepId + "\" is already used in this log directory (" + lifecycle
 						+ " exists); give each step its own load.step.id", failure.getMessage());
@@ -186,41 +216,51 @@ class WorkerEarlierRunFilesTest {
 	}
 
 	@Test
-	void aWorkerSliceWithoutARunIdIsRefusedAsBefore() throws Exception {
+	void aStepWithoutARunIdMovesNothing() throws Exception {
 		final Path lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE));
-		final LoadStepContext context = mockContext();
 
-		final var failure = refused(slice(config("create", 0L), context, new RunStepIds()));
+		assertFalse(prepare(new RunStepIds(), config("create", 0L)));
 
-		assertEquals(StepIdInUseException.class, failure.getClass());
-		verify(context, never()).start();
 		assertEquals("earlier", Files.readString(lifecycle));
 		assertNoMovedFolder();
 	}
 
 	@Test
-	void aWorkerSliceThatCannotMoveTheFilesIsRefusedAndRunsNothing() throws Exception {
+	void aFileOfAnotherKindIsNeverMoved() throws Exception {
+		final Path messages = earlierFile(logFile(Loggers.MSG));
+
+		final var failure = assertThrows(StepIdCheckException.class, () -> EarlierRunFiles.prepare(
+						new RunStepIds(), RUN_ID, stepId, List.of(Loggers.MSG.getName()), NOW));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("earlier", Files.readString(messages));
+		assertNoMovedFolder();
+	}
+
+	@Test
+	void aWorkerThatCannotMoveTheFilesRefusesTheStepAndKeepsThemInPlace() throws Exception {
 		assumeFalse("root".equals(System.getProperty("user.name")), "root writes a read-only folder");
 		final Path lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE));
 		final Path stepDir = lifecycle.toAbsolutePath().getParent();
 		Files.setPosixFilePermissions(stepDir, PosixFilePermissions.fromString("r-xr-xr-x"));
-		final LoadStepContext context = mockContext();
-		final WorkerSlice slice = slice(config("create", RUN_ID), context, new RunStepIds());
 		try {
-			final var failure = refused(slice);
+			final var failure = assertThrows(StepIdCheckException.class, () -> prepare(new RunStepIds(), config("create", RUN_ID)));
 
-			assertInstanceOf(StepIdCheckException.class, failure);
 			assertEquals("step id \"" + stepId + "\" was used by an earlier run in this worker's log directory, and its "
 							+ "files could not be moved aside; see the engine log", failure.getMessage());
 			assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
-			verify(context, never()).start();
-			slice.stop();
-			slice.close();
 		} finally {
 			Files.setPosixFilePermissions(stepDir, PosixFilePermissions.fromString("rwxr-xr-x"));
 		}
-		assertEquals("earlier", Files.readString(lifecycle), "the refused slice published over the earlier file");
+		assertEquals("earlier", Files.readString(lifecycle));
 		assertNoMovedFolder();
+	}
+
+	/** As the Entry Node asks the worker: the loggers of the files the slice of {@code config} publishes. */
+	private boolean prepare(final RunStepIds runStepIds, final Config config) {
+		final var loggerNames = StepIdFiles.sliceLoggerNames(
+						StepIdFiles.merged(config, List.of()), StepIdFiles.nicSet(config, List.of()));
+		return EarlierRunFiles.prepare(runStepIds, config.longVal("run-id"), stepId, loggerNames, Instant.now());
 	}
 
 	private RunTerminalException refused(final WorkerSlice slice) {
@@ -294,11 +334,8 @@ class WorkerEarlierRunFilesTest {
 		return config;
 	}
 
-	private WorkerSlice slice(final Config config, final LoadStepContext context, final RunStepIds runStepIds) {
+	private WorkerSlice slice(final Config config, final LoadStepContext context) {
 		final var slice = new WorkerSlice(config, mock(MetricsManager.class), context);
-		if (runStepIds != null) {
-			slice.startOnWorker(runStepIds);
-		}
 		slices.add(slice);
 		return slice;
 	}
