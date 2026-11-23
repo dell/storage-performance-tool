@@ -4375,6 +4375,34 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
+	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
+	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
+	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
+	 * started, nothing is published.
+	 */
+	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
+		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+			sliceArtifact.closeAfterStoppedStart(slicesStarted);
+		} else {
+			aggregator.close();
+		}
+	}
+
+	/**
+	 * Publishes the operation lifecycle file as {@link #closeSliceLoggerArtifact} does. A slice that no
+	 * start reached writes none, so after a start that failed between creating a slice and starting
+	 * it, the file is collected from the slices started before it, as after a stopped start.
+	 */
+	private void closeOperationLifecycleArtifact(final AutoCloseable aggregator, final int slicesStarted)
+					throws Exception {
+		if (!startStopped && createdSliceUnreached && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+			sliceArtifact.closeAfterStoppedStart(slicesStarted);
+		} else {
+			closeSliceLoggerArtifact(aggregator, slicesStarted);
+		}
+	}
+
+	/**
 	 * Writes the output a duration stop left to this close, after the close's last stage, so the
 	 * outcome agrees with the close: the finalized one when the close completes, failed when it fails
 	 * and no close of the run follows. With a close of the run still to come, the output waits for it
@@ -4425,34 +4453,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			metricsAggregator = null;
 		}
 		return terminalCause;
-	}
-
-	/**
-	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
-	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
-	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
-	 * started, nothing is published.
-	 */
-	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
-		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
-			sliceArtifact.closeAfterStoppedStart(slicesStarted);
-		} else {
-			aggregator.close();
-		}
-	}
-
-	/**
-	 * Publishes the operation lifecycle file as {@link #closeSliceLoggerArtifact} does. A slice that no
-	 * start reached writes none, so after a start that failed between creating a slice and starting
-	 * it, the file is collected from the slices started before it, as after a stopped start.
-	 */
-	private void closeOperationLifecycleArtifact(final AutoCloseable aggregator, final int slicesStarted)
-					throws Exception {
-		if (!startStopped && createdSliceUnreached && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
-			sliceArtifact.closeAfterStoppedStart(slicesStarted);
-		} else {
-			closeSliceLoggerArtifact(aggregator, slicesStarted);
-		}
 	}
 
 	private void emitDeferredFailureBudgetMetricsOutput() {
