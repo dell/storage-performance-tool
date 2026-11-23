@@ -5,6 +5,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStepManagerService;
+import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -23,6 +24,8 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 
 	private final List<Extension> extensions;
 	private final MetricsManager metricsMgr;
+	/** The step ids each run started on this worker: a slice moves aside only an earlier run's files. */
+	private final RunStepIds runStepIds = new RunStepIds();
 	/** Created and not released, oldest first. Several are normal: a scenario can run steps concurrently. */
 	private final List<LoadStepServiceImpl> openStepSvcs = new CopyOnWriteArrayList<>();
 	private volatile LoadStepService stepSvc = null;
@@ -133,7 +136,7 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 			throw new RemoteException("Load step manager is closing");
 		}
 		final var newStepSvc = new LoadStepServiceImpl(
-						port, extensions, stepType, config, ctxConfigs, metricsMgr, openStepSvcs::remove);
+						port, extensions, stepType, config, ctxConfigs, metricsMgr, openStepSvcs::remove, runStepIds);
 		openStepSvcs.add(newStepSvc);
 		stepSvc = newStepSvc;
 		Loggers.MSG.info("New step service started @ port #{}: {}", port, newStepSvc.name());

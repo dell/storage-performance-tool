@@ -5,6 +5,8 @@ import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Refuses a step at its start, before any load, when an earlier step with the same id left a
@@ -60,5 +62,25 @@ public final class StepIdInUseException extends RunTerminalException {
 				throw new StepIdInUseException(stepId, path);
 			}
 		}
+	}
+
+	/**
+	 * Those of {@code paths}, the files step {@code stepId} would refuse to replace, that an earlier
+	 * step left, in order.
+	 *
+	 * @throws StepIdCheckException for the first of {@code paths} that cannot be tested
+	 */
+	public static List<Path> existing(final String stepId, final Iterable<Path> paths) {
+		final var existing = new ArrayList<Path>();
+		for (final Path path : paths) {
+			try {
+				if (StepIdFiles.exists(path)) {
+					existing.add(path);
+				}
+			} catch (final IOException unknown) {
+				throw StepIdCheckException.here(stepId, path.toString(), unknown);
+			}
+		}
+		return existing;
 	}
 }

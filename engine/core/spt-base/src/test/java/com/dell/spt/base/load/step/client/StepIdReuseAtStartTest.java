@@ -243,11 +243,95 @@ public class StepIdReuseAtStartTest {
 		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), "/w/operation.lifecycle.csv", 120);
 
 		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
-						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false)));
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false), false));
 
 		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
 						+ "see the entry's log", failure.getMessage());
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+	}
+
+	@Test
+	void theEntryNodeLeavesAWorkersEarlierRunFileToThatWorkerForTheFirstStepOfItsIdInTheRun() throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+
+		LoadStepClientBase.refuseNodeFiles(
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false), true);
+
+		verify(worker).fileSize(NODE_FILE);
+	}
+
+	@ParameterizedTest(name = "{0}")
+	@MethodSource("uncheckableNodes")
+	void aNodeThatCannotTellIsRefusedForTheFirstStepOfItsIdInTheRunToo(final String name, final Fault fault)
+					throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 0);
+		fault.apply(worker, stepId);
+
+		final var failure = assertThrows(StepIdCheckException.class, () -> LoadStepClientBase.refuseNodeFiles(
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false), true));
+
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" could not be checked in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+	}
+
+	@Test
+	void aWorkersEarlierRunFileIsRefusedForTheSecondStepOfItsIdInTheSameRunBeforeAnySlice() throws Exception {
+		final long runId = runId();
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final Config firstConfig = config("create");
+		firstConfig.val("run-id", runId);
+		firstConfig.val("load-step-node-addrs", List.of(NODE));
+		final TestLoadStepClient first = client(firstConfig);
+		first.withNodeFileManagers(Map.of(NODE, worker));
+		try {
+			// The node 127.0.0.1:1 serves no step, so the first step fails later, at its slice there.
+			final var thrown = assertThrows(RuntimeException.class, first::start);
+			final var cause = RunTerminalException.find(thrown);
+			assertFalse(cause instanceof StepIdInUseException || cause instanceof StepIdCheckException, thrown.toString());
+		} finally {
+			closeQuietly(first);
+		}
+
+		final Config second = config("create");
+		second.val("run-id", runId);
+		final var failure = refusedAtStart(second, worker);
+
+		assertInstanceOf(StepIdInUseException.class, failure, failure.toString());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+	}
+
+	@Test
+	void theEntryNodesOwnEarlierFileIsRefusedForTheFirstStepOfItsIdInARun() throws Exception {
+		final Path canonical = earlierFile(canonical(Loggers.OPERATION_LIFECYCLE.getName()));
+		final Config config = config("create");
+		config.val("run-id", runId());
+
+		final var failure = refusedAtStart(config, node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 0));
+
+		assertEquals(StepIdInUseException.class, failure.getClass());
+		assertEquals("step id \"" + stepId + "\" is already used in this log directory (" + canonical
+						+ " exists); give each step its own load.step.id", failure.getMessage());
+		assertEquals("earlier", Files.readString(canonical));
+	}
+
+	@Test
+	void aLocalRunsEarlierFileIsRefusedForTheFirstStepOfItsIdInARun() throws Exception {
+		final Path canonical = earlierFile(canonical(Loggers.OPERATION_LIFECYCLE.getName()));
+		final Config config = config("create");
+		config.val("run-id", runId());
+
+		final var failure = refused(client(config));
+
+		assertTrue(failure.getMessage().contains("(" + canonical + " exists)"), failure.getMessage());
+		assertEquals("earlier", Files.readString(canonical));
+	}
+
+	/** A run id of its own, so that no other test's step was in its run. */
+	private static long runId() {
+		return (UUID.randomUUID().getMostSignificantBits() >>> 1) | 1L;
 	}
 
 	@Test
@@ -260,7 +344,7 @@ public class StepIdReuseAtStartTest {
 		final FileManager worker = node(Loggers.INTEGRITY_PERFORMANCE.getName(), "/w/integrity.performance.csv", 0);
 
 		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
-						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false)));
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false), false));
 
 		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
 						+ "see the entry's log", failure.getMessage());
@@ -273,9 +357,9 @@ public class StepIdReuseAtStartTest {
 		final FileManager worker = node(Loggers.NIC_SET.getName(), "/w/nic.set.json", 10);
 		final List<FileManager> fileMgrs = List.of(FileManager.INSTANCE, worker);
 
-		LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(true, false));
+		LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(true, false), false);
 		final var failure = assertThrows(StepIdInUseException.class,
-						() -> LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(false, true)));
+						() -> LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(false, true), false));
 
 		assertTrue(failure.getMessage().startsWith("engine 2 of 2: "), failure.getMessage());
 		verify(worker, org.mockito.Mockito.atLeastOnce()).fileSize("/w/nic.set.json");

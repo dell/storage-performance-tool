@@ -51,6 +51,7 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
@@ -134,6 +135,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/** Proposed in the spec, until the payload's measurement says otherwise. */
 	private static final long BUCKET_METRICS_FETCH_SECONDS = 30;
+	/** The step ids each run started on this Entry Node, which tell a worker's earlier-run file from this run's. */
+	private static final RunStepIds RUN_STEP_IDS = new RunStepIds();
 
 	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 	private static final long DURATION_REMOTE_AWAIT_POLL_NANOS = TimeUnit.SECONDS.toNanos(1);
@@ -521,7 +524,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * aggregate, and the Entry Node's copies of them. The Entry Node's own files are tested before any
 	 * bucket is provisioned when the id is configured; with {@code nodes}, after the target checks and
 	 * before any item is distributed or any slice started, it resolves the nodes' file managers for the
-	 * step and tests theirs too. Each slice tests its own files again when it starts. A metadata-mode step's manifest is refused the
+	 * step and tests theirs too. Another node's file is refused only when an earlier step of this run
+	 * had the id; for the first, it can only be an earlier run's, which that worker moves aside when its
+	 * slice starts. Each slice tests its own files again when it starts. A metadata-mode step's manifest is refused the
 	 * same way when it was already published. A step that publishes none of these files runs as
 	 * before.
 	 */
@@ -582,24 +587,29 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		fileMgrs.clear();
 		initFileManagers(nodeAddrs, fileMgrs);
-		refuseNodeFiles(loadStepId(), fileMgrs, nodeAddrs, merged, nicSetExpected);
+		final boolean firstInRun = !nodeAddrs.isEmpty() && RUN_STEP_IDS.firstInRun(runId(), loadStepId());
+		refuseNodeFiles(loadStepId(), fileMgrs, nodeAddrs, merged, nicSetExpected, firstInRun);
 	}
 
 	/**
 	 * Refuses step {@code stepId} when an earlier step with its id left, on another node of the step,
 	 * a file that node's slice would publish, or when the node cannot tell whether one is there: a
-	 * slice must not start over a file nobody could test.
+	 * slice must not start over a file nobody could test. When the step is the first with its id in
+	 * its run, as {@code firstInRun} says, only an earlier run can have left such a file: the node, a
+	 * worker engine, moves it aside when its slice starts, so it is logged and not refused here.
 	 *
 	 * @param fileMgrs one per slice, the Entry Node's first
 	 * @param nodeAddrs one per other node, in slice order
 	 * @param nicSetExpected one per slice: whether that slice requested a NIC set
+	 * @param firstInRun whether no earlier step of this run on this Entry Node had the id
 	 */
 	static void refuseNodeFiles(
 					final String stepId,
 					final List<FileManager> fileMgrs,
 					final List<String> nodeAddrs,
 					final List<StepIdFiles.LoggerArtifact> merged,
-					final List<Boolean> nicSetExpected) {
+					final List<Boolean> nicSetExpected,
+					final boolean firstInRun) {
 		for (var i = 1; i < fileMgrs.size(); i++) {
 			final var fileMgr = fileMgrs.get(i);
 			for (final var loggerName : StepIdFiles.sliceLoggerNames(merged, nicSetExpected.get(i))) {
@@ -612,7 +622,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throwUncheckedIfInterrupted(unknown);
 					throw StepIdCheckException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file, unknown);
 				}
-				if (exists) {
+				if (exists && firstInRun) {
+					Loggers.MSG.info(
+									"{}: an earlier run left {} on node {}; that worker moves it aside when its slice starts",
+									stepId, file, nodeAddrs.get(i - 1));
+				} else if (exists) {
 					throw StepIdInUseException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file);
 				}
 			}
