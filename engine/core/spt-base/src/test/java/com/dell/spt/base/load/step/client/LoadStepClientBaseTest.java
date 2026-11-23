@@ -4037,7 +4037,7 @@ class LoadStepClientBaseTest {
 			assertNotNull(client, "Client should not be null");
 
 			// Assert - Configuration access works
-			assertEquals("test-step-001", client.loadStepId(), "Step ID should match config");
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId(), "Step ID should match config");
 			assertEquals("test-load-step", client.getTypeName(), "Type name should match implementation");
 
 			// Assert - Initial state
@@ -4061,7 +4061,7 @@ class LoadStepClientBaseTest {
 
 			// Assert
 			assertNotNull(client);
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 
 		@Test
@@ -4072,7 +4072,7 @@ class LoadStepClientBaseTest {
 
 			// Assert
 			assertNotNull(client);
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 
 		@Test
@@ -4083,7 +4083,7 @@ class LoadStepClientBaseTest {
 
 			// Assert
 			assertNotNull(client);
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 	}
 
@@ -4101,7 +4101,7 @@ class LoadStepClientBaseTest {
 		@Test
 		@DisplayName("loadStepId() should return configured step ID")
 		void testLoadStepId() throws RemoteException {
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 
 		@Test
@@ -4132,7 +4132,7 @@ class LoadStepClientBaseTest {
 							config2, extensions, ctxConfigs, mockMetricsManager);
 
 			// Assert independence
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 			assertEquals("second-step", client2.loadStepId());
 			assertNotSame(client, client2);
 		}
@@ -4298,7 +4298,7 @@ class LoadStepClientBaseTest {
 
 			// Verify the copy has the new configuration
 			assertEquals("copied-step", copy.loadStepId());
-			assertEquals("test-step-001", originalClient.loadStepId(), "Original should be unchanged");
+			assertEquals(testConfig.stringVal("load-step-id"), originalClient.loadStepId(), "Original should be unchanged");
 		}
 
 		@Test
@@ -4517,7 +4517,7 @@ class LoadStepClientBaseTest {
 
 			// Basic functionality should work
 			assertDoesNotThrow(() -> {
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				assertEquals("test-load-step", client.getTypeName());
 			});
 		}
@@ -4535,7 +4535,7 @@ class LoadStepClientBaseTest {
 				// Results should be consistent
 				assertEquals(stepId1, stepId2);
 				assertEquals(typeName1, typeName2);
-				assertEquals("test-step-001", stepId1);
+				assertEquals(testConfig.stringVal("load-step-id"), stepId1);
 				assertEquals("test-load-step", typeName1);
 			});
 		}
@@ -4549,7 +4549,7 @@ class LoadStepClientBaseTest {
 				assertTrue(client.wasInitCalled());
 
 				// Then call other methods
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				assertEquals("test-load-step", client.getTypeName());
 			});
 		}
@@ -4574,7 +4574,7 @@ class LoadStepClientBaseTest {
 			assertNotSame(client, copy);
 			assertDoesNotThrow(() -> {
 				assertEquals("copied-after-init", copy.loadStepId());
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 			});
 		}
 
@@ -4708,11 +4708,11 @@ class LoadStepClientBaseTest {
 		void testMixedMethodCalls() {
 			assertDoesNotThrow(() -> {
 				client.init();
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				client.init();
 				assertEquals("test-load-step", client.getTypeName());
 				client.copyInstance(testConfig, ctxConfigs);
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				client.init();
 				assertEquals("test-load-step", client.getTypeName());
 			});
@@ -4732,7 +4732,7 @@ class LoadStepClientBaseTest {
 				}
 
 				// Client should still be functional
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				assertEquals("test-load-step", client.getTypeName());
 			});
 		}
@@ -4745,7 +4745,7 @@ class LoadStepClientBaseTest {
 					String stepId = client.loadStepId();
 					String typeName = client.getTypeName();
 
-					assertEquals("test-step-001", stepId);
+					assertEquals(testConfig.stringVal("load-step-id"), stepId);
 					assertEquals("test-load-step", typeName);
 
 					if (i % 10 == 0) {
@@ -4795,7 +4795,7 @@ class LoadStepClientBaseTest {
 			Config config = TestConfigBuilder.config();
 
 			// Verify specific values match what we configured
-			assertEquals("test-step-001", config.stringVal("load-step-id"));
+			assertTrue(config.stringVal("load-step-id").startsWith("test-step-"));
 			assertEquals(false, config.boolVal("load-step-idAutoGenerated"));
 			assertEquals(100, config.intVal("load-batch-size"));
 			assertEquals("create", config.stringVal("load-op-type"));

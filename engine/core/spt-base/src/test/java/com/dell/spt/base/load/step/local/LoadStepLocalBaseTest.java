@@ -39,15 +39,18 @@ import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.rmi.RemoteException;
 import java.lang.reflect.Field;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -60,6 +63,48 @@ import org.mockito.InOrder;
  */
 class LoadStepLocalBaseTest {
 	private static final int BLOCKING_PHASE_WIDTH = 8;
+	private final List<TestLoadStepLocalBase> trackedSteps = new ArrayList<>();
+
+	@AfterEach
+	void closeTrackedSteps() throws Exception {
+		Exception first = null;
+		try {
+			for (final TestLoadStepLocalBase step : trackedSteps) {
+				if (!step.isClosed()) {
+					try {
+						step.close();
+					} catch (final Exception e) {
+						if (first == null) {
+							first = e;
+						} else {
+							first.addSuppressed(e);
+						}
+					}
+				}
+			}
+		} finally {
+			for (final TestLoadStepLocalBase step : trackedSteps) {
+				try {
+					removeStepFolder(logFile(Loggers.OPERATION_LIFECYCLE, step.loadStepId()));
+				} catch (final Exception e) {
+					if (first == null) {
+						first = e;
+					} else {
+						first.addSuppressed(e);
+					}
+				}
+			}
+			trackedSteps.clear();
+		}
+		if (first != null) {
+			throw first;
+		}
+	}
+
+	private TestLoadStepLocalBase track(final TestLoadStepLocalBase step) {
+		trackedSteps.add(step);
+		return step;
+	}
 
 	@Test
 	void initMetricsStoresValidCountLimitWithoutWarnings() {
@@ -241,8 +286,8 @@ class LoadStepLocalBaseTest {
 		config.val("load-step-limit-time", "0s");
 		final LoadStepContext first = mockContext();
 		final LoadStepContext second = mockContext();
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
-						config, mockMetricsManager(), first, second);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(
+						config, mockMetricsManager(), first, second));
 
 		loadStep.startContextsForTest();
 		final InOrder preparationOrder = inOrder(first, second);
@@ -264,8 +309,8 @@ class LoadStepLocalBaseTest {
 		when(failing.start()).thenThrow(new RemoteException("boom"));
 		when(failing.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
 		when(healthy.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
-						config, mockMetricsManager(), failing, healthy);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(
+						config, mockMetricsManager(), failing, healthy));
 
 		final var failure = assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
 
@@ -281,8 +326,8 @@ class LoadStepLocalBaseTest {
 		doThrow(new RemoteException("boom")).when(failing).shutdown();
 		when(failing.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
 		when(healthy.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
-						config, mockMetricsManager(), failing, healthy);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(
+						config, mockMetricsManager(), failing, healthy));
 		loadStep.startContextsForTest();
 
 		loadStep.shutdownContextsForTest();
@@ -296,8 +341,8 @@ class LoadStepLocalBaseTest {
 		final LoadStepContext modern = mockContext();
 		final LoadStepContext compatibility = compatibilityContext();
 		when(modern.deleteObjectLifecycle()).thenReturn(cleanDeleteLifecycle());
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
-						config, mockMetricsManager(), modern, compatibility);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(
+						config, mockMetricsManager(), modern, compatibility));
 
 		assertNull(loadStep.deleteObjectLifecycle());
 	}
@@ -307,8 +352,8 @@ class LoadStepLocalBaseTest {
 		final Config config = countDeleteConfig("count-compatibility-admission");
 		final LoadStepContext modern = mockContext();
 		final LoadStepContext compatibility = compatibilityContext();
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
-						config, mockMetricsManager(), modern, compatibility);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(
+						config, mockMetricsManager(), modern, compatibility));
 
 		assertThrows(UnsupportedOperationException.class, loadStep::startContextsForTest);
 
@@ -556,10 +601,10 @@ class LoadStepLocalBaseTest {
 		return ctx;
 	}
 
-	private static TestLoadStepLocalBase barrierStep(final LoadStepContext... contexts) {
+	private TestLoadStepLocalBase barrierStep(final LoadStepContext... contexts) {
 		final Config config = baseConfig();
-		config.val("load-step-id", "barrier-step");
-		return new TestLoadStepLocalBase(config, mockMetricsManager(), contexts);
+		config.val("load-step-id", "barrier-step-" + UUID.randomUUID());
+		return track(new TestLoadStepLocalBase(config, mockMetricsManager(), contexts));
 	}
 
 	private static void awaitState(final TestLoadStepLocalBase step, final PreparationStatus.State state)
@@ -666,14 +711,14 @@ class LoadStepLocalBaseTest {
 		final LoadStepContext context = mockContext();
 		final var step = barrierStep(context);
 		step.startPreparation(7, TimeUnit.MINUTES.toNanos(10));
-		assertTrue(deadlineGuardAlive("barrier-step"), "the guard runs from the arming");
+		assertTrue(deadlineGuardAlive(step.loadStepId()), "the guard runs from the arming");
 		step.startContextsForTest();
 		awaitState(step, PreparationStatus.State.READY);
 
 		assertTrue(step.releasePreparedAdmission(7));
 
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-		while (deadlineGuardAlive("barrier-step")) {
+		while (deadlineGuardAlive(step.loadStepId())) {
 			assertTrue(System.nanoTime() < deadline, "a released step keeps no sleeping thread");
 			TimeUnit.MILLISECONDS.sleep(5);
 		}
@@ -770,7 +815,7 @@ class LoadStepLocalBaseTest {
 		final LoadStepContext failing = mock(LoadStepContext.class);
 		when(failing.start()).thenThrow(new RemoteException("boom"));
 
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), healthy, failing);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(config, mockMetricsManager(), healthy, failing));
 
 		final var failure = assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
 		assertEquals("step-start", failure.stepId());
@@ -787,7 +832,7 @@ class LoadStepLocalBaseTest {
 		final LoadStepContext failing = mock(LoadStepContext.class);
 		when(failing.start()).thenThrow(new RemoteException("boom"));
 
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing);
+		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(config, mockMetricsManager(), failing));
 
 		assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
 		verify(failing).start();
