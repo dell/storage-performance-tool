@@ -4016,8 +4016,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 */
 	@Override
 	protected void cancelDurationRunCleanupResourcesAfterExhaustion() {
-		// The output the run writes after this reads the slices' metrics, which their release ends.
-		takeTerminalMetricsSnapshotsForTheOutput();
 		// The slices are released below: the aggregator stops polling them first.
 		stopMetricsAggregator();
 		final List<LoadStep> slices = stepSlices.stream().filter(Objects::nonNull).toList();
@@ -4128,10 +4126,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final Map<OpType, Long> successCounts = itemOutputFileAggregators.isEmpty()
 							? Map.of()
 							: successCounts(metricsContexts);
-			if (outputWaits) {
-				// The output is written after the slices close, which ends their metrics: read them now.
-				takeTerminalMetricsSnapshotsForTheOutput();
-			} else {
+			if (!outputWaits) {
 				terminalCause = closeMetricsAtClose(terminalCause);
 			}
 			slicesClosing = true;
@@ -4480,23 +4475,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			metricsAggregator = null;
 		}
 		return terminalCause;
-	}
-
-	/**
-	 * Takes the terminal snapshot of each metrics context while the slices can still be read, for an
-	 * output still to be written: that write reuses it, with the outcome the step has then.
-	 */
-	private void takeTerminalMetricsSnapshotsForTheOutput() {
-		if (!failureBudgetMetricsOutputDeferred) {
-			return;
-		}
-		for (final var metricsContext : metricsContexts) {
-			try {
-				metricsContext.terminalSnapshot();
-			} catch (final RuntimeException e) {
-				LogUtil.exception(Level.WARN, e, "{}: failed to read the terminal metrics", loadStepId());
-			}
-		}
 	}
 
 	private void emitDeferredFailureBudgetMetricsOutput() {
