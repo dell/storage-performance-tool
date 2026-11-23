@@ -527,8 +527,8 @@ class StopBetweenSliceStartsTest {
 	}
 
 	@Test
-	void aStartWhoseLastSliceFailsToStartCollectsTheStartedSlicesLifecycleFileOnly() throws Exception {
-		// The failing slice's folder may hold another step's or run's file, so it is never merged.
+	void aStartWhoseLastSliceFailsToStartStillCollectsEverySlicesLifecycleFile() throws Exception {
+		// The start reached the failing slice, so that slice may have written its file: it is collected too.
 		final LoadStep entry = mock(LoadStep.class);
 		final LoadStep worker = mock(LoadStep.class);
 		doAnswer(call -> {
@@ -545,7 +545,7 @@ class StopBetweenSliceStartsTest {
 		assertDoesNotThrow(client::close);
 		assertTrue(Files.exists(lifecycleFile()), "no lifecycle file was published");
 		assertTrue(Files.exists(nodeLifecycleFile(0)), "the entry slice's lifecycle file was not collected");
-		assertFalse(Files.exists(nodeLifecycleFile(1)), "the failed slice's lifecycle file was collected");
+		assertTrue(Files.exists(nodeLifecycleFile(1)), "the failed slice's lifecycle file was not collected");
 	}
 
 	@Test

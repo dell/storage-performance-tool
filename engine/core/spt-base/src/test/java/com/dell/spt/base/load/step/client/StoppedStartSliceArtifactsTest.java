@@ -22,6 +22,7 @@ import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
+import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -54,10 +55,11 @@ import org.mockito.MockedStatic;
 /**
  * A start that ends as a stop publishes the slice files of the slices whose start returned, and
  * nothing when none did: a slice refused at JVM exit, never reached, or cut partway through its
- * start is left out. A start that fails at a slice after an earlier one started publishes the files
- * of the slices whose start returned, the same way: the failed slice's folder may hold another
- * step's or run's file. One that fails before any slice's start returned publishes nothing, as a
- * stopped one.
+ * start is left out. A start that fails after a slice started still needs every slice's files, the
+ * failed slice's and those never reached among them, unless the failed slice was refused for its
+ * step-id files: its folder holds another step's or run's file, so only the slices whose start
+ * returned are published, as after a stop. One that fails before any slice's start returned
+ * publishes nothing, as a stopped one.
  */
 class StoppedStartSliceArtifactsTest {
 
@@ -263,14 +265,14 @@ class StoppedStartSliceArtifactsTest {
 	}
 
 	@Test
-	void aStartThatFailsAtTheSecondSliceMergesTheFirstSliceOnly() throws Exception {
-		// The other node refuses its slice at its start, and its folder holds an earlier run's file.
+	void aStartRefusedAtTheSecondSliceForItsStepIdFilesMergesTheFirstSliceOnly() throws Exception {
+		// The other node refuses its slice at its start for a file in its folder from an earlier run.
 		final LoadStep entry = sliceWritingItsLifecycleRowAtClose("entry-worker");
 		final AtomicBoolean workerFileThere = new AtomicBoolean();
 		final LoadStep worker = mock(LoadStep.class);
 		doAnswer(call -> {
 			workerFileThere.set(true);
-			throw new IllegalStateException("the slice refused to start");
+			throw new StepIdInUseException("step", Path.of("log", "step", "operation.lifecycle.csv"));
 		}).when(worker).start();
 		final TestLoadStepClient client = twoSliceClient(entry, worker, workerFileThere);
 

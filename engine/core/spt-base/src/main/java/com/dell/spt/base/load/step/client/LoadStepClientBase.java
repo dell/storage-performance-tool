@@ -257,7 +257,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	// Whether this start created a slice and never called its start(): it ended between the two.
 	private volatile boolean createdSliceUnreached;
 	// Whether a slice's start() threw: the close then merges the slices whose start returned only.
-	private volatile boolean sliceStartFailed;
+	private volatile boolean sliceRefusedForStepIdFiles;
 	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
 	private volatile boolean startEntered;
 
@@ -387,7 +387,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		startedSliceCount = 0;
 		startStopped = false;
 		createdSliceUnreached = false;
-		sliceStartFailed = false;
+		sliceRefusedForStepIdFiles = false;
 		stepSliceNodeAddrs.clear();
 		slicesClosing = false;
 		resetDurationLifecycleForStart();
@@ -1612,7 +1612,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				stepSlice.start();
 				startedSliceCount = i + 1;
 			} catch (final Exception e) {
-				sliceStartFailed = true;
+				// A slice refused for its step-id files found a file in its folder that is not this step's.
+				final var refusal = RunTerminalException.find(e);
+				sliceRefusedForStepIdFiles = refusal instanceof StepIdInUseException || refusal instanceof StepIdCheckException;
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
 				}
@@ -4502,13 +4504,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/**
 	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
-	 * stop or at a slice whose start failed, from the slices whose start returned only. A slice refused
-	 * at JVM exit or never reached wrote nothing, and a slice cut partway through its start, or refused
-	 * at it, is left out with them: its folder may hold another step's file. With no slice started, as
-	 * after a start that failed before any slice started, nothing is published.
+	 * stop or at a slice refused for its step-id files, from the slices whose start returned only. A
+	 * slice refused at JVM exit or never reached wrote nothing, and a slice cut partway through its
+	 * start, or refused at it for its step-id files, is left out with them: its folder holds, or may
+	 * hold, another step's or run's file. A slice whose start failed otherwise may have written its
+	 * file, so it is collected. With no slice started, as after a start that failed before any slice
+	 * started, nothing is published.
 	 */
 	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
-		if ((closesAsStoppedStart(slicesStarted) || sliceStartFailed)
+		if ((closesAsStoppedStart(slicesStarted) || sliceRefusedForStepIdFiles)
 						&& aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
 			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
