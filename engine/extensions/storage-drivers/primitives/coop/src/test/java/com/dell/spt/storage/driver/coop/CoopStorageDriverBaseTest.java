@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -239,13 +240,21 @@ class CoopStorageDriverBaseTest {
 						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, partSize);
 	}
 
-	private static void awaitCapturedEvents(
-					final CapturingAppender appender, final int minCount, final long timeoutMillis)
-					throws InterruptedException {
-		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
-		while (appender.events().size() < minCount && System.nanoTime() < deadlineNanos) {
-			Thread.sleep(10);
-		}
+	/**
+	 * The events captured so far, with every event this thread logged before the call among them. The
+	 * logger is asynchronous, so a warning the driver logged may not have reached the appender yet; a
+	 * marker this thread logs after it is delivered after it, so once the marker arrives the warning has.
+	 */
+	private static List<LogEvent> drainedEvents(final CapturingAppender appender) throws InterruptedException {
+		final String marker = "coop-driver-base-test drain " + UUID.randomUUID();
+		Loggers.ERR.warn(marker);
+		awaitCondition(
+						() -> appender.events().stream().anyMatch(e -> marker.equals(e.getMessage().getFormattedMessage())),
+						"the asynchronous logger did not deliver the drain marker",
+						10_000);
+		return appender.events().stream()
+						.filter(e -> !marker.equals(e.getMessage().getFormattedMessage()))
+						.toList();
 	}
 
 	private static void awaitCondition(
@@ -1203,16 +1212,15 @@ class CoopStorageDriverBaseTest {
 		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
 		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
 		try {
-			// In the try, so that the finally puts them back when the driver's construction throws.
+			// After the data input is built and in the try: a failure building either leaves the logger as it was.
 			logger.addAppender(appender);
 			logger.setLevel(Level.WARN);
 			driver = new CoopStorageDriverMock<>("parse-warn-step", dataInput, storageConfig, false, 16);
 
 			assertNull(mpuObjectThrottleOf(driver), "malformed multipart limits should fall back to unlimited MPU objects");
 			assertEquals(0, mpuMaxPartsOf(driver), "malformed multipart limits should fall back to unlimited MPU parts");
-			awaitCapturedEvents(appender, 1, 2000);
 
-			final var parseWarnEvents = appender.events().stream()
+			final var parseWarnEvents = drainedEvents(appender).stream()
 							.filter(e -> Level.WARN.equals(e.getLevel()))
 							.map(e -> e.getMessage().getFormattedMessage())
 							.filter(msg -> msg.contains("Failed to parse multipart limits"))
@@ -1250,7 +1258,7 @@ class CoopStorageDriverBaseTest {
 		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
 		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
 		try {
-			// In the try, so that the finally puts them back when the driver's construction throws.
+			// After the data input is built and in the try: a failure building either leaves the logger as it was.
 			logger.addAppender(appender);
 			logger.setLevel(Level.WARN);
 			driver = new CoopStorageDriverMock<>("parse-ok-step", dataInput, storageConfig, false, 16);
@@ -1261,7 +1269,7 @@ class CoopStorageDriverBaseTest {
 							"MPU throttle permits should match configured multipart object limit");
 			assertEquals(9, mpuMaxPartsOf(driver), "multipart part limit should match configured value");
 
-			final var parseWarnCount = appender.events().stream()
+			final var parseWarnCount = drainedEvents(appender).stream()
 							.filter(e -> Level.WARN.equals(e.getLevel()))
 							.map(e -> e.getMessage().getFormattedMessage())
 							.filter(msg -> msg.contains("Failed to parse multipart limits"))
@@ -1383,7 +1391,7 @@ class CoopStorageDriverBaseTest {
 		final var dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
 		CoopStorageDriverMock<Item, Operation<Item>> driver = null;
 		try {
-			// In the try, so that the finally puts them back when the driver's construction throws.
+			// After the data input is built and in the try: a failure building either leaves the logger as it was.
 			logger.addAppender(appender);
 			logger.setLevel(Level.WARN);
 			driver = new CoopStorageDriverMock<>("parse-missing-step", dataInput, storageConfig, false, 16);
@@ -1391,7 +1399,7 @@ class CoopStorageDriverBaseTest {
 			assertNull(mpuObjectThrottleOf(driver), "missing multipart object limit should keep MPU objects unlimited");
 			assertEquals(0, mpuMaxPartsOf(driver), "missing multipart part limit should keep MPU parts unlimited");
 
-			final var parseWarnCount = appender.events().stream()
+			final var parseWarnCount = drainedEvents(appender).stream()
 							.filter(e -> Level.WARN.equals(e.getLevel()))
 							.map(e -> e.getMessage().getFormattedMessage())
 							.filter(msg -> msg.contains("Failed to parse multipart limits"))
