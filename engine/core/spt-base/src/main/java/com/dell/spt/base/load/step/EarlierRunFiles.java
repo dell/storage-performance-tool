@@ -143,7 +143,7 @@ public final class EarlierRunFiles {
 			moved.add(file.getFileName().toString());
 		}
 		Loggers.ERR.warn(
-						"{}: this worker's folder for the step holds {} from an earlier run; moved {} aside to {}, and the step runs",
+						"{}: this worker's folder for the step holds {} from an earlier run; moved {} aside to {} before the step starts",
 						stepId, String.join(", ", moved), moved.size() == 1 ? "it" : "them", earlierDir);
 		return earlierDir;
 	}

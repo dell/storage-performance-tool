@@ -256,7 +256,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private volatile boolean startStopped;
 	// Whether this start created a slice and never called its start(): it ended between the two.
 	private volatile boolean createdSliceUnreached;
-	// Whether a slice's start() threw: the close then merges the slices whose start returned only.
+	// Whether a slice's start() failed as a refusal for its step-id files: the close then merges the
+	// slices whose start returned only.
 	private volatile boolean sliceRefusedForStepIdFiles;
 	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
 	private volatile boolean startEntered;
@@ -611,7 +612,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	LoadStepManagerService resolveStepManager(final String nodeAddr) throws Exception {
-		return ServiceUtil.resolve(nodeAddr, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class);
+		return ServiceUtil.resolveWithConnectTimeout(nodeAddr, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class);
 	}
 
 	/**
@@ -675,6 +676,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			final var node = nodeAddrs.get(i - 1);
 			final var earlier = found.get(i);
+			throwIfStartStopped(stepId, node);
 			final boolean firstHere;
 			try {
 				final var manager = managers.resolve(node);
@@ -684,6 +686,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				firstHere = manager.prepareStepIdFiles(runId, stepId, loggerNames);
 			} catch (final Exception failure) {
 				throwUncheckedIfInterrupted(failure);
+				// A stop or signal during the call, whose transport it failed: the start ends as a stop.
+				throwIfStartStopped(stepId, node);
 				if (lacksStepIdFilesPreparation(failure)) {
 					// An older node: its files are refused, as by an Entry Node that never asks.
 					if (earlier != null) {
@@ -692,11 +696,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					Loggers.MSG.debug("{}: node {} does not prepare a step's files, and holds none of this step's", stepId, node);
 					continue;
 				}
-				if (RunTerminalException.find(failure) instanceof StepIdCheckException) {
+				// Only a file this Entry Node saw there can have failed to move; else the node could not check.
+				if (earlier != null && RunTerminalException.find(failure) instanceof StepIdCheckException) {
 					throw StepIdCheckException.notMovedAsideOnNode(stepId, i, sliceCount, node, failure);
 				}
 				throw StepIdCheckException.onNode(stepId, i, sliceCount, node, "the step's files", failure);
 			}
+			throwIfStartStopped(stepId, node);
 			if (!firstHere && earlier != null) {
 				// That node had the id in this run already: a repeated run id, for example.
 				throw StepIdInUseException.onNode(stepId, i, sliceCount, node, earlier);
@@ -704,6 +710,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (earlier != null) {
 				Loggers.MSG.info("{}: an earlier run left {} on node {}, which moved it aside", stepId, earlier, node);
 			}
+		}
+	}
+
+	/** Ends the start as a stop when this thread was interrupted or the JVM is exiting. */
+	private static void throwIfStartStopped(final String stepId, final String node) {
+		if (Thread.currentThread().isInterrupted() || JvmExit.begun()) {
+			throwUnchecked(new InterruptedException(stepId + ": stopped while preparing the step's files on node " + node));
 		}
 	}
 

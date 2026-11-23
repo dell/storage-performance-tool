@@ -268,6 +268,62 @@ public class StepIdReuseAtStartTest {
 		verify(manager).prepareStepIdFiles(77L, stepId, List.of(Loggers.OPERATION_LIFECYCLE.getName()));
 	}
 
+	@Test
+	void aStopDuringOneNodesPreparationEndsTheStartBeforeTheNextNodeIsAsked() throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		final FileManager first = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final FileManager second = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService firstManager = mock(LoadStepManagerService.class);
+		final LoadStepManagerService secondManager = mock(LoadStepManagerService.class);
+		when(firstManager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenAnswer(call -> {
+			Thread.currentThread().interrupt();
+			return true;
+		});
+		try {
+			assertThrows(InterruptedException.class, () -> LoadStepClientBase.refuseNodeFiles(
+							stepId, List.of(FileManager.INSTANCE, first, second), List.of("n2", "n3"), merged,
+							List.of(false, false, false), 77L, node -> "n2".equals(node) ? firstManager : secondManager));
+		} finally {
+			Thread.interrupted();
+		}
+		verify(secondManager, never()).prepareStepIdFiles(anyLong(), anyString(), anyList());
+	}
+
+	@Test
+	void aPreparationWhoseTransportAStopFailedEndsTheStartAsAStop() throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenAnswer(call -> {
+			Thread.currentThread().interrupt();
+			throw new java.rmi.RemoteException("Load step manager is closing");
+		});
+		try {
+			assertThrows(InterruptedException.class, () -> LoadStepClientBase.refuseNodeFiles(
+							stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false),
+							77L, node -> manager));
+		} finally {
+			Thread.interrupted();
+		}
+	}
+
+	@Test
+	void aNodeThatCannotCheckItsFilesAtThePreparationIsRefusedAsUncheckedNotAsUnmoved() throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		// The Entry Node sees no file there, so there is nothing that could have failed to move.
+		final FileManager worker = node("another logger", NODE_FILE, 120);
+		final LoadStepManagerService manager = mock(LoadStepManagerService.class);
+		when(manager.prepareStepIdFiles(anyLong(), anyString(), anyList())).thenThrow(
+						StepIdCheckException.here(stepId, NODE_FILE, new java.io.IOException("denied")));
+
+		final var failure = assertThrows(StepIdCheckException.class, () -> LoadStepClientBase.refuseNodeFiles(
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false),
+						77L, node -> manager));
+
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" could not be checked in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+	}
+
 	@ParameterizedTest(name = "{0}")
 	@MethodSource("uncheckableNodes")
 	void aNodeThatCannotTellIsRefusedForTheFirstStepOfItsIdInTheRunToo(final String name, final Fault fault)

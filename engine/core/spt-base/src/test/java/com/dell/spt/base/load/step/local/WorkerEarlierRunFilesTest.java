@@ -91,7 +91,7 @@ class WorkerEarlierRunFilesTest {
 		final Path moved = onlyMovedFolder();
 		assertEquals(List.of(
 						stepId + ": this worker's folder for the step holds operation.lifecycle.csv from an earlier run; "
-										+ "moved it aside to " + moved + ", and the step runs"),
+										+ "moved it aside to " + moved + " before the step starts"),
 						warnings);
 		assertEquals("earlier", Files.readString(moved.resolve(lifecycle.getFileName())));
 		assertFalse(Files.exists(lifecycle), "the earlier run's file is still in the step's folder");
