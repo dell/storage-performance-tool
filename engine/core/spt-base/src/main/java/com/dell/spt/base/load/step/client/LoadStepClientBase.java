@@ -3690,9 +3690,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void stopMetricsAggregator() {
-		if (null != metricsAggregator) {
+		// Read once: the run's exhaustion cleanup calls this without stopCloseLock, while a close nulls it.
+		final var aggregator = metricsAggregator;
+		if (null != aggregator) {
 			try {
-				metricsAggregator.stop();
+				aggregator.stop();
 			} catch (final RemoteException e) {
 				LogUtil.trace(
 								Loggers.ERR,
