@@ -521,9 +521,9 @@ public class LoadStepServiceImplTest {
 		WatchedSlice(final LoadStep local, final long checkPeriodNanos) throws Exception {
 			stepId = local.loadStepId();
 			threadName = "spt-entry-watchdog-" + stepId;
-			System.setProperty("java.rmi.server.hostname", "127.0.0.1");
-			levels = LoggerLevels.set(Map.of(Loggers.ERR.getName(), Level.WARN));
 			try {
+				System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+				levels = LoggerLevels.set(Map.of(Loggers.ERR.getName(), Level.WARN));
 				warnings.start();
 				errors.addAppender(warnings);
 				final Config config = TestConfigBuilder.config();
@@ -537,7 +537,7 @@ public class LoadStepServiceImplTest {
 								releases::add, ENTRY_SILENCE_NANOS, checkPeriodNanos, clock::get);
 			} catch (final Throwable failure) {
 				// No try-with-resources closes a slice that failed to open: put back what it changed.
-				restore();
+				restore(failure);
 				throw failure;
 			}
 		}
@@ -566,17 +566,47 @@ public class LoadStepServiceImplTest {
 		public void close() throws Exception {
 			try {
 				service.close();
-			} finally {
-				restore();
+			} catch (final Throwable failure) {
+				restore(failure);
+				throw failure;
 			}
+			restore(null);
 		}
 
-		private void restore() {
-			errors.removeAppender(warnings);
-			warnings.stop();
-			levels.close();
-			ServiceUtil.shutdown();
-			restoreHost(originalHost);
+		/**
+		 * Puts back what the slice changed, each step even when an earlier one fails. Under a failure
+		 * already thrown, the steps' failures are suppressed under it; otherwise the first is thrown.
+		 */
+		private void restore(final Throwable failure) {
+			final List<Runnable> steps = List.of(
+							() -> errors.removeAppender(warnings),
+							warnings::stop,
+							() -> {
+								// Null when the failure came before the window opened.
+								if (levels != null) {
+									levels.close();
+								}
+							},
+							ServiceUtil::shutdown,
+							() -> restoreHost(originalHost));
+			Throwable first = failure;
+			for (final Runnable step : steps) {
+				try {
+					step.run();
+				} catch (final RuntimeException | Error e) {
+					if (first == null) {
+						first = e;
+					} else {
+						first.addSuppressed(e);
+					}
+				}
+			}
+			if (failure == null && first instanceof Error error) {
+				throw error;
+			}
+			if (failure == null && first instanceof RuntimeException e) {
+				throw e;
+			}
 		}
 	}
 
