@@ -115,15 +115,16 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 		if (closed) {
 			throw new IllegalStateException("The NIC-set pool is closed");
 		}
+		final var recheck = dispatchRecheck;
+		final var recoveryTimeoutMillis = Math.min(connectTimeoutMillis, NicSetSettings.MAX_PROBE_TIMEOUT_MILLIS);
 		final var built = new ArrayList<NicPathPool>(nics.size());
 		for (var i = 0; i < nics.size(); i++) {
 			final var nic = nics.get(i).nic();
 			built.add(new NicPathPool(i, nic.name(), nic.address(), nics.get(i).group(), template, channelHandler, binding,
-							connectTimeoutMillis, NicSetSettings.openLimit(concurrencyLimit, nics.size(), i), nic.paths(),
-							nanoClock));
+							connectTimeoutMillis, recoveryTimeoutMillis, recheck,
+							NicSetSettings.openLimit(concurrencyLimit, nics.size(), i), nic.paths(), nanoClock));
 		}
 		this.connectTimeoutMillis = connectTimeoutMillis;
-		final var recheck = dispatchRecheck;
 		final var loops = nics.isEmpty() ? null : nics.get(0).group();
 		this.admission = NicAdmission.of(concurrencyLimit, built, nanoClock,
 						recheck == null || loops == null ? null : timerOn(loops), recheck);
