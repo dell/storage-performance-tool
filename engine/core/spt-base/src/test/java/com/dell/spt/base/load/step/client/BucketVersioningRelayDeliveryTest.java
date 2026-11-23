@@ -117,19 +117,22 @@ class BucketVersioningRelayDeliveryTest {
 		};
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.TEST.getName());
 		blocker.start();
-		logger.addAppender(blocker);
-		try (final var levels = LoggerLevels.atMost(Level.INFO, Loggers.TEST.getName());
-						final var ctx = CloseableThreadContext.put(Constants.KEY_STEP_ID, step)) {
-			final var relay = relay(step, node(file, step));
-			Loggers.TEST.info("block " + step);
-			assertTrue(entered.await(5, TimeUnit.SECONDS));
+		// The Test logger has no entry of its own: the window adds one, which takes the appender, and its close
+		// removes that entry again once the appender is off it, so that the logger follows the root after this test.
+		try (final var levels = LoggerLevels.set(Map.of(Loggers.TEST.getName(), Level.INFO))) {
+			logger.addAppender(blocker);
+			try (final var ctx = CloseableThreadContext.put(Constants.KEY_STEP_ID, step)) {
+				final var relay = relay(step, node(file, step));
+				Loggers.TEST.info("block " + step);
+				assertTrue(entered.await(5, TimeUnit.SECONDS));
 
-			BucketVersioningNotice.info(step, "bucket b: versioning is already enabled");
-			relay.close();
-		} finally {
-			release.countDown();
-			logger.removeAppender(blocker);
-			blocker.stop();
+				BucketVersioningNotice.info(step, "bucket b: versioning is already enabled");
+				relay.close();
+			} finally {
+				release.countDown();
+				logger.removeAppender(blocker);
+				blocker.stop();
+			}
 		}
 
 		assertEquals(List.of("INFO " + step + ": node 001 (worker): bucket b: versioning is already enabled"), relayed);
