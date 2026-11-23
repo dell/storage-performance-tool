@@ -238,6 +238,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	// The failed outcome an incomplete duration stop wrote: a close after the one that threw its stop
 	// failure cleans up and closes with it, as a run's close retry does.
 	private IntegrityTerminalException incompleteDurationStopFailure;
+	// The failure-budget outcome last published, and whether the step's metrics output has been written.
+	private volatile ObjectFailureBudgetOutcome publishedFailureBudgetOutcome;
+	private volatile boolean metricsOutputWritten;
+	// Under stopCloseLock: a duration close is running, and a stop inside it leaves the output to it.
+	private boolean durationCloseRunning;
 	// The thread running the await's own stop, which the run's close follows; null otherwise.
 	private volatile Thread awaitStopThread;
 	// Set by a duration slice stop that a stop request interrupted, which leaves the timing files open.
@@ -736,6 +741,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
 			incompleteDurationStopFailure = null;
+			publishedFailureBudgetOutcome = null;
+			metricsOutputWritten = false;
 			failureBudgetMetricsOutputDeferred = false;
 			durationSliceStopInterrupted = false;
 			durationStopFailure = null;
@@ -3252,6 +3259,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		case COMPLETED_WITHIN_BUDGET -> MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_WITHIN_BUDGET;
 		case FAILED -> MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED;
 		};
+		publishedFailureBudgetOutcome = outcome;
 		metricsContexts.forEach(context -> context.metadata().put(
 						MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME, published));
 		metricsMgr.updateTerminalDeleteFailureOutcome(loadStepId(), published);
@@ -3578,7 +3586,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final Throwable cause = failures.first();
 			failures.run(() -> finalizeFailedFailureBudgetAtStop(cause));
 			failureBudgetMetricsOutputDeferred = false;
-			failures.run(super::doStop);
+			failures.run(this::writeMetricsOutput);
 			failures.throwFirst();
 			return;
 		}
@@ -3594,10 +3602,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final Throwable cause = failures.first();
 			failures.run(() -> finalizeFailedFailureBudgetAtStop(cause));
 		}
+		if (standaloneDeleteDurationMode() && failures.first() == null && aDurationCloseWritesTheOutput()) {
+			// The close writes it after its last stage: a close that fails on every attempt then ends
+			// failed in the output as in the run's exit, and one that completes keeps this outcome.
+			failureBudgetMetricsOutputDeferred = true;
+			return;
+		}
 		// Written here, the output is not written again by a close that an earlier stop deferred it to.
 		failureBudgetMetricsOutputDeferred = false;
-		failures.run(super::doStop);
+		failures.run(this::writeMetricsOutput);
 		failures.throwFirst();
+	}
+
+	/**
+	 * Whether a close follows this duration stop and writes its output: the close this stop runs in,
+	 * or the run's close. Not at engine exit, whose close may not come, nor once the output is written.
+	 */
+	private boolean aDurationCloseWritesTheOutput() {
+		return !metricsOutputWritten && (durationCloseRunning || (runClosesAgain() && !JvmExit.begun()));
 	}
 
 	/**
@@ -3690,9 +3712,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void stopMetricsAggregator() {
-		if (null != metricsAggregator) {
+		// Read once: the run's exhaustion cleanup calls this without stopCloseLock, while a close nulls it.
+		final var aggregator = metricsAggregator;
+		if (null != aggregator) {
 			try {
-				metricsAggregator.stop();
+				aggregator.stop();
 			} catch (final RemoteException e) {
 				LogUtil.trace(
 								Loggers.ERR,
@@ -3823,8 +3847,34 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		final Throwable cause = durationStopFailure;
 		failures.run(() -> finalizeFailedFailureBudgetAtIncompleteDurationStop(cause));
+		// An earlier attempt's stop may have finalized a clean outcome before its close failed.
+		failures.run(() -> failOutcomeAtFailedDurationClose(cause));
 		failureBudgetMetricsOutputDeferred = false;
-		failures.run(super::doStop);
+		failures.run(this::writeMetricsOutput);
+	}
+
+	/**
+	 * Makes a finalized outcome failed when the output is written after a duration close that failed
+	 * and that no close of the run follows: the run ends failed, and so does the output. A later close
+	 * whose cleanup completes keeps it and closes the step, as after an incomplete stop.
+	 */
+	private synchronized void failOutcomeAtFailedDurationClose(final Throwable cause) {
+		if (failureBudgetController == null
+						|| !failureBudgetFinalized
+						|| !hasStartedStandaloneDeleteWork()
+						|| publishedFailureBudgetOutcome == ObjectFailureBudgetOutcome.FAILED) {
+			return;
+		}
+		failureBudgetTerminalFailure = appendTerminalFailure(
+						appendExistingFailure(failureBudgetFailure, durationValidityFailure),
+						IntegrityTerminalException.Category.CLEANUP,
+						"Standalone DELETE close failed after its stop; the outcome is failed",
+						cause instanceof InterruptedException ? null : cause);
+		if (failureBudgetFailure == null) {
+			incompleteDurationStopFailure = failureBudgetTerminalFailure;
+		}
+		publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
+		Loggers.MSG.error("{}: Standalone DELETE close failed after its stop: the outcome is failed", loadStepId());
 	}
 
 	private synchronized void finalizeFailedFailureBudgetAtIncompleteDurationStop(final Throwable cause) {
@@ -3911,6 +3961,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
 		if (durationMode) {
+			durationCloseRunning = true;
 			try {
 				closeForStandaloneDeleteMode(true);
 			} catch (final IOException | RuntimeException | Error e) {
@@ -3921,6 +3972,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					writeOutputLeftToALaterClose(e);
 				}
 				throw e;
+			} finally {
+				durationCloseRunning = false;
 			}
 			return;
 		}
@@ -4043,7 +4096,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			// (failureKeptByClose), so it ends failed, as its output says.
 			budgetTerminal = null;
 		}
-		emitDeferredFailureBudgetMetricsOutput();
+		// The output a duration stop left to this close is written after its last stage, with the
+		// metrics contexts and the aggregator it reads still open: see writeOutputAtDurationCloseEnd.
+		final boolean outputWaits = durationMode && failureBudgetMetricsOutputDeferred;
+		if (!outputWaits) {
+			emitDeferredFailureBudgetMetricsOutput();
+		}
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			IntegrityTerminalException terminalCause = appendExistingFailure(
 							durationStopFailure, budgetTerminal);
@@ -4066,34 +4124,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final Map<OpType, Long> successCounts = itemOutputFileAggregators.isEmpty()
 							? Map.of()
 							: successCounts(metricsContexts);
-			try {
-				closeMetricsContexts();
-			} catch (final Throwable cause) {
-				throwUncheckedIfInterrupted(cause);
-				if (!integrityModeEnabled()) {
-					rethrowCloseFailure(cause);
-				}
-				terminalCause = appendTerminalFailure(
-								terminalCause,
-								IntegrityTerminalException.Category.CLEANUP,
-								"failed to close metadata-mode metrics contexts",
-								cause);
-			}
-			if (null != metricsAggregator) {
-				try {
-					metricsAggregator.close();
-				} catch (final Throwable cause) {
-					throwUncheckedIfInterrupted(cause);
-					if (!integrityModeEnabled()) {
-						rethrowCloseFailure(cause);
-					}
-					terminalCause = appendTerminalFailure(
-									terminalCause,
-									IntegrityTerminalException.Category.CLEANUP,
-									"failed to close metadata-mode metrics aggregator",
-									cause);
-				}
-				metricsAggregator = null;
+			if (!outputWaits) {
+				terminalCause = closeMetricsAtClose(terminalCause);
 			}
 			slicesClosing = true;
 			if (durationMode && durationAdmissionBarrierSatisfied) {
@@ -4325,6 +4357,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			storageAuthFileSlicers.clear();
+			if (outputWaits) {
+				terminalCause = writeOutputAtDurationCloseEnd(terminalCause);
+			}
 			if (terminalCause != null) {
 				if (durationMode) {
 					durationStopFailure = terminalCause;
@@ -4337,6 +4372,59 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			closeRetainedDurationPhases();
 		}
+	}
+
+	/**
+	 * Writes the output a duration stop left to this close, after the close's last stage, so the
+	 * outcome agrees with the close: the finalized one when the close completes, failed when it fails
+	 * and no close of the run follows. With a close of the run still to come, the output waits for it
+	 * and the metrics stay open. The metrics contexts and the aggregator close after the write.
+	 */
+	private IntegrityTerminalException writeOutputAtDurationCloseEnd(final IntegrityTerminalException terminalCause)
+					throws IOException {
+		if (terminalCause != null && runClosesAgain() && !JvmExit.begun()) {
+			return terminalCause;
+		}
+		if (terminalCause != null) {
+			failOutcomeAtFailedDurationClose(terminalCause);
+		}
+		emitDeferredFailureBudgetMetricsOutput();
+		return closeMetricsAtClose(terminalCause);
+	}
+
+	private IntegrityTerminalException closeMetricsAtClose(final IntegrityTerminalException failureSoFar)
+					throws IOException {
+		IntegrityTerminalException terminalCause = failureSoFar;
+		try {
+			closeMetricsContexts();
+		} catch (final Throwable cause) {
+			throwUncheckedIfInterrupted(cause);
+			if (!integrityModeEnabled()) {
+				rethrowCloseFailure(cause);
+			}
+			terminalCause = appendTerminalFailure(
+							terminalCause,
+							IntegrityTerminalException.Category.CLEANUP,
+							"failed to close metadata-mode metrics contexts",
+							cause);
+		}
+		if (null != metricsAggregator) {
+			try {
+				metricsAggregator.close();
+			} catch (final Throwable cause) {
+				throwUncheckedIfInterrupted(cause);
+				if (!integrityModeEnabled()) {
+					rethrowCloseFailure(cause);
+				}
+				terminalCause = appendTerminalFailure(
+								terminalCause,
+								IntegrityTerminalException.Category.CLEANUP,
+								"failed to close metadata-mode metrics aggregator",
+								cause);
+			}
+			metricsAggregator = null;
+		}
+		return terminalCause;
 	}
 
 	/**
@@ -4372,6 +4460,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			return;
 		}
 		failureBudgetMetricsOutputDeferred = false;
+		writeMetricsOutput();
+	}
+
+	/** Writes the step's metrics output: {@code # Results}, the terminal entry and the metrics files. */
+	private void writeMetricsOutput() {
+		metricsOutputWritten = true;
 		super.doStop();
 	}
 

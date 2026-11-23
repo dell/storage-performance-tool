@@ -158,6 +158,64 @@ class DurationCloseRetryRecordsTest {
 	}
 
 	@Test
+	void aSliceCloseThatFailsOnEveryAttemptWritesFailedRecordsAndTheRunFails() throws Exception {
+		final LoadStep slice = slice();
+		failFirstCalls(Integer.MAX_VALUE).when(slice).close();
+		build(slice);
+
+		final IntegrityTerminalException failure = assertThrows(IntegrityTerminalException.class, client::run);
+
+		assertTrue(failure.getMessage().contains("failed to close a step slice"), failure.getMessage());
+		// The stop completed and drained: the records carry the drained counts, and the outcome the close's failure.
+		assertRecords(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, "failed", 10, true);
+	}
+
+	@Test
+	void anAdmissionCloseRetryWhoseSliceCloseFailsOnEveryAttemptWritesFailedRecordsAndTheRunFails()
+					throws Exception {
+		final LoadStep slice = slice();
+		failFirstCalls(1).when(slice).closeOperationAdmissionForStepStop();
+		failFirstCalls(Integer.MAX_VALUE).when(slice).close();
+		build(slice);
+
+		assertThrows(IntegrityTerminalException.class, client::run);
+
+		assertRecords(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, "failed", 10, true);
+	}
+
+	@Test
+	void aSliceCloseRetryThatSucceedsWritesCleanRecordsAndTheRunSucceeds() throws Exception {
+		final LoadStep slice = slice();
+		failFirstCalls(1).when(slice).close();
+		build(slice);
+
+		assertDoesNotThrow(client::run);
+
+		assertRecords(MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY, "completed cleanly", 10, true);
+		assertTrue(client.isClosed());
+	}
+
+	@Test
+	void anEngineExitAtAFailedSliceCloseWritesFailedRecordsAndTheRetryClosesTheStep() throws Exception {
+		final LoadStep slice = slice();
+		final AtomicInteger closes = new AtomicInteger();
+		doAnswer(invocation -> {
+			if (closes.incrementAndGet() == 1) {
+				JvmExit.markBegun();
+				throw new RemoteException("slice close fails as the engine exits");
+			}
+			return null;
+		}).when(slice).close();
+		build(slice);
+
+		// The failed close had no close of the run to wait for: it wrote failed, and the run keeps it.
+		assertThrows(IntegrityTerminalException.class, client::run);
+
+		assertRecords(MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED, "failed", 10, true);
+		assertTrue(client.isClosed(), "the retry whose cleanup succeeds closes the step");
+	}
+
+	@Test
 	void anInterruptDuringACloseRetryWritesFailedRecordsAndReleasesTheSlice() throws Exception {
 		final LoadStep slice = slice();
 		failFirstCalls(1).when(slice).closeOperationAdmissionForStepStop();
