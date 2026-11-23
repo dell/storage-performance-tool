@@ -809,7 +809,8 @@ class LoadStepLocalBaseTest {
 	@Test
 	void doStartWrappedFailsTheStepWhenOneContextFails() throws RemoteException {
 		final Config config = baseConfig();
-		config.val("load-step-id", "step-start");
+		final String stepId = "step-start-" + UUID.randomUUID();
+		config.val("load-step-id", stepId);
 
 		final LoadStepContext healthy = mock(LoadStepContext.class);
 		final LoadStepContext failing = mock(LoadStepContext.class);
@@ -818,7 +819,7 @@ class LoadStepLocalBaseTest {
 		final TestLoadStepLocalBase loadStep = track(new TestLoadStepLocalBase(config, mockMetricsManager(), healthy, failing));
 
 		final var failure = assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
-		assertEquals("step-start", failure.stepId());
+		assertEquals(stepId, failure.stepId());
 		assertTrue(failure.getMessage().startsWith("failed to start a load step context"));
 		verify(healthy).start();
 		verify(failing).start();
@@ -827,7 +828,7 @@ class LoadStepLocalBaseTest {
 	@Test
 	void doStartWrappedThrowsWhenAllContextsFail() throws RemoteException {
 		final Config config = baseConfig();
-		config.val("load-step-id", "step-none");
+		config.val("load-step-id", "step-none-" + UUID.randomUUID());
 
 		final LoadStepContext failing = mock(LoadStepContext.class);
 		when(failing.start()).thenThrow(new RemoteException("boom"));
