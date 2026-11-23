@@ -180,6 +180,9 @@ class LoadStepManagerServiceImplTest {
 
 	@SuppressWarnings("unchecked")
 	private static Consumer<LoadStepServiceImpl> releaseHook(final List<?> constructorArguments) {
-		return (Consumer<LoadStepServiceImpl>) constructorArguments.getLast();
+		return (Consumer<LoadStepServiceImpl>) constructorArguments.stream()
+						.filter(Consumer.class::isInstance)
+						.findFirst()
+						.orElseThrow();
 	}
 }

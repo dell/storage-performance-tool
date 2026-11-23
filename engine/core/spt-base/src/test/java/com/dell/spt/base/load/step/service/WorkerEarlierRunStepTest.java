@@ -110,14 +110,14 @@ class WorkerEarlierRunStepTest {
 		final List<String> sliceRows = Files.readAllLines(lifecycle);
 		assertEquals(OperationLifecycleArtifact.HEADER, sliceRows.get(0));
 		assertEquals(1, sliceRows.size() - 1, sliceRows.toString());
-		assertEquals(String.valueOf(RUN_ID), sliceRows.get(1).split(",")[1], sliceRows.toString());
+		assertEquals(String.valueOf(RUN_ID), runIdOf(sliceRows.get(1)), sliceRows.toString());
 
 		// The Entry Node's merge of the step's lifecycle files then holds this run's row alone.
 		new CsvLoggerArtifactAggregator(stepId, List.of(FileManager.INSTANCE), Loggers.OPERATION_LIFECYCLE.getName(),
 						OperationLifecycleArtifact.FILE_NAME, OperationLifecycleArtifact.HEADER).close();
 		final List<String> merged = Files.readAllLines(lifecycle);
 		assertEquals(2, merged.size(), merged.toString());
-		assertEquals(String.valueOf(RUN_ID), merged.get(1).split(",")[1], merged.toString());
+		assertEquals(String.valueOf(RUN_ID), runIdOf(merged.get(1)), merged.toString());
 		assertFalse(String.join("\n", merged).contains("worker-of-an-earlier-run"), merged.toString());
 	}
 
@@ -143,7 +143,7 @@ class WorkerEarlierRunStepTest {
 		runSlice(newSlice(RUN_ID + 1));
 
 		assertEquals(published, Files.readString(movedFolder().resolve(OperationLifecycleArtifact.FILE_NAME)));
-		assertEquals(String.valueOf(RUN_ID + 1), Files.readAllLines(lifecycle()).get(1).split(",")[1]);
+		assertEquals(String.valueOf(RUN_ID + 1), runIdOf(Files.readAllLines(lifecycle()).get(1)));
 	}
 
 	private void runSlice() throws Exception {
@@ -216,6 +216,11 @@ class WorkerEarlierRunStepTest {
 		try (Stream<Path> siblings = Files.list(lifecycle().toAbsolutePath().getParent().getParent())) {
 			return siblings.filter(dir -> dir.getFileName().toString().startsWith(stepId + ".earlier-")).toList();
 		}
+	}
+
+	/** The engine_run_id of a lifecycle row. */
+	private static String runIdOf(final String row) {
+		return row.split(",", -1)[1];
 	}
 
 	private static boolean causedBy(final Throwable thrown, final Class<? extends Throwable> type) {
