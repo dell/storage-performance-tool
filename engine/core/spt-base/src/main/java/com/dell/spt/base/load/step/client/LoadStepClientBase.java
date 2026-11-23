@@ -3689,7 +3689,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final int timingSlicesStarted = startedSliceCount;
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {
-				if (startStopped && itemMetricsOutputFileAggregator instanceof ItemTimingMetricOutputFileAggregator timingAggregator) {
+				if (closesAsStoppedStart(timingSlicesStarted)
+								&& itemMetricsOutputFileAggregator instanceof ItemTimingMetricOutputFileAggregator timingAggregator) {
 					timingAggregator.closeAfterStoppedStart(timingSlicesStarted);
 				} else {
 					itemMetricsOutputFileAggregator.close();
@@ -3937,8 +3938,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							durationStopFailure, budgetTerminal);
 			durationStopFailure = null;
 			boolean durationSlicesClosed = true;
+			final int slicesStarted = startedSliceCount;
 			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
-			if (integrityModeEnabled() && (!startStopped || startedSliceCount > 0)) {
+			if (integrityModeEnabled() && !noSliceStarted(slicesStarted)) {
 				try {
 					terminalFailureCountsByOpType = terminalFailureCounts(metricsContexts);
 				} catch (final Throwable cause) {
@@ -4039,7 +4041,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			Loggers.MSG.debug("{}: closed all {} step slices", loadStepId(), stepSlices.size());
-			final int slicesStarted = startedSliceCount;
 			if (!durationMode || (durationSlicesClosed && terminalCause == null)) {
 				stepSlices.clear();
 				sliceLost = false;
@@ -4047,7 +4048,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
 			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
 				try {
-					if (startStopped && deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
+					if (closesAsStoppedStart(slicesStarted)
+									&& deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
 						aggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						deleteArtifactAggregator.close();
@@ -4136,12 +4138,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					if (itemOutputFileAggregator instanceof CsvArtifactAggregator csvAggregator) {
 						final long failedOperationCount = terminalFailureCountsByOpType.getOrDefault(
 										csvAggregator.artifactOpType(), -1L);
-						if (startStopped) {
+						if (closesAsStoppedStart(slicesStarted)) {
 							csvAggregator.closeAfterStoppedStart(failedOperationCount, slicesStarted);
 						} else {
 							csvAggregator.close(failedOperationCount);
 						}
-					} else if (startStopped && itemOutputFileAggregator instanceof ItemOutputFileAggregator itemAggregator) {
+					} else if (closesAsStoppedStart(slicesStarted)
+									&& itemOutputFileAggregator instanceof ItemOutputFileAggregator itemAggregator) {
 						itemAggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						itemOutputFileAggregator.close();
@@ -4165,7 +4168,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			itemOutputFileAggregators.clear();
-			if (itemOutputCollected && (!startStopped || slicesStarted > 0)) {
+			if (itemOutputCollected && !noSliceStarted(slicesStarted)) {
 				try {
 					itemOutputCollected(config.stringVal("item-output-file"), successCounts);
 				} catch (final Exception e) {
@@ -4175,7 +4178,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var opTraceLogFileAggregator : opTraceLogFileAggregators) {
 				try {
-					if (startStopped && opTraceLogFileAggregator instanceof OpTraceLogFileAggregator traceAggregator) {
+					if (closesAsStoppedStart(slicesStarted)
+									&& opTraceLogFileAggregator instanceof OpTraceLogFileAggregator traceAggregator) {
 						traceAggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						opTraceLogFileAggregator.close();
@@ -4228,13 +4232,31 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
+	 * Whether the step's start ended before any slice's start returned: a start stopped before its
+	 * first slice started, or one that failed from {@link #init()} on before that, a slice whose own
+	 * start threw among them. No slice ran, so the close captures no terminal counts and publishes
+	 * nothing. A step never started is judged on the slices it holds instead.
+	 */
+	private boolean noSliceStarted(final int slicesStarted) {
+		return slicesStarted == 0 && (startStopped || startStepEntered());
+	}
+
+	/**
+	 * Whether the close publishes the slice artifacts from the slices whose start returned only: after
+	 * a start that ended as a stop, or that ended before any slice started.
+	 */
+	private boolean closesAsStoppedStart(final int slicesStarted) {
+		return startStopped || noSliceStarted(slicesStarted);
+	}
+
+	/**
 	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
 	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
 	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
-	 * started, nothing is published.
+	 * started, as after a start that failed before any slice started, nothing is published.
 	 */
 	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
-		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+		if (closesAsStoppedStart(slicesStarted) && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
 			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
 			aggregator.close();
