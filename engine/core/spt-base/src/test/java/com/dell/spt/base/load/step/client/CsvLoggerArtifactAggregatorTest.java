@@ -12,6 +12,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -421,7 +422,7 @@ class CsvLoggerArtifactAggregatorTest {
 	}
 
 	@Test
-	void anInterruptedFileReadStopsTheCollectionAtOnce() throws Exception {
+	void aWorkersOwnInterruptedReadCountsAsThatNodeMissing() throws Exception {
 		final Path canonical = entryFile("w0");
 		final FileManager interrupted = remote(1);
 		when(interrupted.readFromFile(remoteName(1), 0)).thenThrow(new ClosedByInterruptException());
@@ -435,11 +436,36 @@ class CsvLoggerArtifactAggregatorTest {
 			warnings.flush(stepId);
 		}
 
+		assertFalse(Thread.currentThread().isInterrupted(), "a worker's interrupt reached the entry's thread");
+		assertTrue(failure.getMessage().contains("missing node-001; collected the other 2 of 3"), failure.getMessage());
+		assertEquals(1, warnings.lines(stepId).size(), warnings.lines(stepId).toString());
+		verify(later, atLeastOnce()).readFromFile(anyString(), anyLong());
+	}
+
+	@Test
+	void anInterruptInTheCauseChainStopsTheCollectionAndKeepsTheFlag() throws Exception {
+		final Path canonical = entryFile("w0");
+		final FileManager interrupted = remote(1);
+		when(interrupted.readFromFile(remoteName(1), 0))
+						.thenThrow(new IOException("read stopped", new InterruptedException("stop")));
+		final FileManager later = healthy(2);
+		final var warnings = new CollectionWarnings();
+		final var aggregator = aggregator(entry(canonical), interrupted, later);
+
+		final IntegrityTerminalException failure;
+		try (warnings) {
+			try {
+				failure = assertThrows(IntegrityTerminalException.class, aggregator::close);
+				assertTrue(Thread.currentThread().isInterrupted(), "the interrupt flag was not set again");
+			} finally {
+				Thread.interrupted();
+			}
+			warnings.flush(stepId);
+		}
+
 		assertEquals("failed to aggregate " + ARTIFACT, failure.getMessage());
-		assertInstanceOf(ClosedByInterruptException.class, failure.getCause().getCause());
 		assertEquals(List.of(), warnings.lines(stepId), "an interrupt was taken for a missing node");
 		verify(later, never()).readFromFile(anyString(), anyLong());
-		assertFalse(Files.exists(canonical));
 	}
 
 	@Test

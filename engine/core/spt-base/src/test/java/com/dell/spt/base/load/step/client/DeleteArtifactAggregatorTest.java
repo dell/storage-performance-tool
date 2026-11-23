@@ -10,6 +10,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -575,7 +576,7 @@ class DeleteArtifactAggregatorTest {
 	}
 
 	@Test
-	void anInterruptedFileReadStopsTheDeleteCollectionAtOnce() throws Exception {
+	void aWorkersOwnInterruptedReadCountsAsThatNodesMissingFiles() throws Exception {
 		final var aggregator = interruptedCollection(invocation -> {
 			throw new ClosedByInterruptException();
 		});
@@ -588,11 +589,10 @@ class DeleteArtifactAggregatorTest {
 			warnings.flush("step");
 		}
 
+		assertFalse(Thread.currentThread().isInterrupted(), "a worker's interrupt reached the entry's thread");
 		assertEquals("failed to collect and publish DELETE evidence", failure.getMessage());
-		assertInstanceOf(ClosedByInterruptException.class, failure.getCause().getCause());
-		assertEquals(List.of(), warnings.lines("step"), "an interrupt was taken for a missing file");
-		verify(aggregator.interrupted(), times(1)).readFromFile(anyString(), anyLong());
-		verify(aggregator.later(), never()).readFromFile(anyString(), anyLong());
+		assertFalse(warnings.lines("step").isEmpty(), "the worker's missing files were not reported");
+		verify(aggregator.later(), atLeastOnce()).readFromFile(anyString(), anyLong());
 	}
 
 	@Test
