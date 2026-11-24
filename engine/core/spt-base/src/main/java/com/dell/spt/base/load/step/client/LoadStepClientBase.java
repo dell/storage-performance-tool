@@ -51,6 +51,8 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.LoadStepManagerService;
+import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
@@ -71,6 +73,7 @@ import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.svc.ServiceUtil;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketProvisioning;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
@@ -134,6 +137,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/** Proposed in the spec, until the payload's measurement says otherwise. */
 	private static final long BUCKET_METRICS_FETCH_SECONDS = 30;
+	/**
+	 * The ids of the steps with {@link StepIdFiles} each run started on this Entry Node, which tell a
+	 * worker's earlier-run file from this run's.
+	 */
+	private static final RunStepIds RUN_STEP_IDS = new RunStepIds();
 
 	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 	private static final long DURATION_REMOTE_AWAIT_POLL_NANOS = TimeUnit.SECONDS.toNanos(1);
@@ -235,6 +243,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private boolean failureBudgetFinalized;
 	private IntegrityTerminalException failureBudgetTerminalFailure;
 	private volatile boolean failureBudgetMetricsOutputDeferred;
+	// The failed outcome an incomplete duration stop wrote: a close after the one that threw its stop
+	// failure cleans up and closes with it, as a run's close retry does.
+	private IntegrityTerminalException incompleteDurationStopFailure;
 	// The thread running the await's own stop, which the run's close follows; null otherwise.
 	private volatile Thread awaitStopThread;
 	// Set by a duration slice stop that a stop request interrupted, which leaves the timing files open.
@@ -245,6 +256,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private volatile boolean startStopped;
 	// Whether this start created a slice and never called its start(): it ended between the two.
 	private volatile boolean createdSliceUnreached;
+	// Whether a slice's start() failed as a refusal for its step-id files: the close then merges the
+	// slices whose start returned only.
+	private volatile boolean sliceRefusedForStepIdFiles;
 	// Whether a start ever reached doStartWrapped(); a start the base class refused never did.
 	private volatile boolean startEntered;
 
@@ -374,6 +388,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		startedSliceCount = 0;
 		startStopped = false;
 		createdSliceUnreached = false;
+		sliceRefusedForStepIdFiles = false;
 		stepSliceNodeAddrs.clear();
 		slicesClosing = false;
 		resetDurationLifecycleForStart();
@@ -518,7 +533,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * aggregate, and the Entry Node's copies of them. The Entry Node's own files are tested before any
 	 * bucket is provisioned when the id is configured; with {@code nodes}, after the target checks and
 	 * before any item is distributed or any slice started, it resolves the nodes' file managers for the
-	 * step and tests theirs too. Each slice tests its own files again when it starts. A metadata-mode step's manifest is refused the
+	 * step and tests theirs too. Another node's file is refused only when an earlier step of this run
+	 * had the id; for the first, it can only be an earlier run's, which that worker is asked to move
+	 * aside there and then, before any slice of the step exists, and a worker that cannot refuses the
+	 * step. Each slice tests its own files again when it starts. A metadata-mode step's manifest is refused the
 	 * same way when it was already published. A step that publishes none of these files runs as
 	 * before.
 	 */
@@ -579,26 +597,56 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		fileMgrs.clear();
 		initFileManagers(nodeAddrs, fileMgrs);
-		refuseNodeFiles(loadStepId(), fileMgrs, nodeAddrs, merged, nicSetExpected);
+		// A step that publishes none of the files claims no id: a later one of the run may be the first.
+		final boolean firstInRun = !nodeAddrs.isEmpty() && !paths.isEmpty()
+						&& RUN_STEP_IDS.firstInRun(runId(), loadStepId());
+		refuseNodeFiles(
+						loadStepId(), fileMgrs, nodeAddrs, merged, nicSetExpected, runId(),
+						firstInRun ? this::resolveStepManager : null);
+	}
+
+	/** Resolves a node's step manager service, which prepares its files for a step. */
+	@FunctionalInterface
+	interface StepManagers {
+		LoadStepManagerService resolve(String nodeAddr) throws Exception;
+	}
+
+	LoadStepManagerService resolveStepManager(final String nodeAddr) throws Exception {
+		return ServiceUtil.resolveWithConnectTimeout(nodeAddr, LoadStepManagerService.SVC_NAME, LoadStepManagerService.class);
 	}
 
 	/**
 	 * Refuses step {@code stepId} when an earlier step with its id left, on another node of the step,
 	 * a file that node's slice would publish, or when the node cannot tell whether one is there: a
-	 * slice must not start over a file nobody could test.
+	 * slice must not start over a file nobody could test. With {@code managers}, the step is the first
+	 * with its id in its run on this Entry Node, so only an earlier run can have left such a file:
+	 * once every node is tested, each node whose slice publishes such files is asked to prepare them
+	 * (see {@link LoadStepManagerService#prepareStepIdFiles}), which moves an earlier run's aside. The
+	 * step is refused when a node cannot, when a node had the id in this run already and holds such a
+	 * file, or when an older node, which does not know the call, holds one. All of it comes before any
+	 * slice of the step is created on any node.
 	 *
 	 * @param fileMgrs one per slice, the Entry Node's first
 	 * @param nodeAddrs one per other node, in slice order
 	 * @param nicSetExpected one per slice: whether that slice requested a NIC set
+	 * @param managers the nodes' step managers when the step is the first of its id in its run; else
+	 *     {@code null}, and every such file is refused
 	 */
 	static void refuseNodeFiles(
 					final String stepId,
 					final List<FileManager> fileMgrs,
 					final List<String> nodeAddrs,
 					final List<StepIdFiles.LoggerArtifact> merged,
-					final List<Boolean> nicSetExpected) {
-		for (var i = 1; i < fileMgrs.size(); i++) {
+					final List<Boolean> nicSetExpected,
+					final long runId,
+					final StepManagers managers) {
+		final int sliceCount = fileMgrs.size();
+		// The first file found on each node, or null.
+		final var found = new ArrayList<String>(sliceCount);
+		found.add(null);
+		for (var i = 1; i < sliceCount; i++) {
 			final var fileMgr = fileMgrs.get(i);
+			String first = null;
 			for (final var loggerName : StepIdFiles.sliceLoggerNames(merged, nicSetExpected.get(i))) {
 				String file = "the " + loggerName + " file";
 				final boolean exists;
@@ -607,13 +655,86 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					exists = StepIdFiles.exists(fileMgr, file);
 				} catch (final IOException | RuntimeException unknown) {
 					throwUncheckedIfInterrupted(unknown);
-					throw StepIdCheckException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file, unknown);
+					throw StepIdCheckException.onNode(stepId, i, sliceCount, nodeAddrs.get(i - 1), file, unknown);
 				}
-				if (exists) {
-					throw StepIdInUseException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file);
+				if (exists && managers == null) {
+					throw StepIdInUseException.onNode(stepId, i, sliceCount, nodeAddrs.get(i - 1), file);
+				}
+				if (exists && first == null) {
+					first = file;
 				}
 			}
+			found.add(first);
 		}
+		if (managers == null) {
+			return;
+		}
+		for (var i = 1; i < sliceCount; i++) {
+			final var loggerNames = StepIdFiles.sliceLoggerNames(merged, nicSetExpected.get(i));
+			if (loggerNames.isEmpty()) {
+				continue;
+			}
+			final var node = nodeAddrs.get(i - 1);
+			final var earlier = found.get(i);
+			throwIfStartStopped(stepId, node);
+			final boolean firstHere;
+			try {
+				final var manager = managers.resolve(node);
+				if (manager == null) {
+					throw new IllegalStateException("no step manager service @ " + node);
+				}
+				firstHere = manager.prepareStepIdFiles(runId, stepId, loggerNames);
+			} catch (final Exception failure) {
+				throwUncheckedIfInterrupted(failure);
+				// A stop or signal during the call, whose transport it failed: the start ends as a stop.
+				throwIfStartStopped(stepId, node);
+				if (lacksStepIdFilesPreparation(failure)) {
+					// An older node: its files are refused, as by an Entry Node that never asks.
+					if (earlier != null) {
+						throw StepIdInUseException.onNode(stepId, i, sliceCount, node, earlier);
+					}
+					Loggers.MSG.debug("{}: node {} does not prepare a step's files, and holds none of this step's", stepId, node);
+					continue;
+				}
+				// Only a file this Entry Node saw there can have failed to move; else the node could not check.
+				if (earlier != null && RunTerminalException.find(failure) instanceof StepIdCheckException) {
+					throw StepIdCheckException.notMovedAsideOnNode(stepId, i, sliceCount, node, failure);
+				}
+				throw StepIdCheckException.onNode(stepId, i, sliceCount, node, "the step's files", failure);
+			}
+			throwIfStartStopped(stepId, node);
+			if (!firstHere && earlier != null) {
+				// That node had the id in this run already: a repeated run id, for example.
+				throw StepIdInUseException.onNode(stepId, i, sliceCount, node, earlier);
+			}
+			if (earlier != null) {
+				Loggers.MSG.info("{}: an earlier run left {} on node {}, which moved it aside", stepId, earlier, node);
+			}
+		}
+	}
+
+	/** Ends the start as a stop when this thread was interrupted or the JVM is exiting. */
+	private static void throwIfStartStopped(final String stepId, final String node) {
+		if (Thread.currentThread().isInterrupted() || JvmExit.begun()) {
+			throwUnchecked(new InterruptedException(stepId + ": stopped while preparing the step's files on node " + node));
+		}
+	}
+
+	/**
+	 * Whether a node failed {@link LoadStepManagerService#prepareStepIdFiles} for not knowing it: its
+	 * server wraps an unknown method as a {@code ServerException} around an {@code UnmarshalException}.
+	 */
+	static boolean lacksStepIdFilesPreparation(final Throwable failure) {
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			final String message = cause.getMessage();
+			if (message != null && message.contains(LoadStepManagerService.NO_STEP_ID_FILES_PREPARATION)) {
+				return true;
+			}
+			if (cause instanceof UnmarshalException && message != null && message.contains("unrecognized method hash")) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private AdmissionBarrier newAdmissionBarrier() {
@@ -732,6 +853,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			deletePostVerificationGloballySkipped = false;
 			failureBudgetFinalized = false;
 			failureBudgetTerminalFailure = null;
+			incompleteDurationStopFailure = null;
 			failureBudgetMetricsOutputDeferred = false;
 			durationSliceStopInterrupted = false;
 			durationStopFailure = null;
@@ -1389,9 +1511,31 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							engine + " did not start; see the engine log",
 							cause);
 		}
+		final var nodeRefusal = nodeStepIdRefusal(typed, cause, slice, sliceCount);
+		if (nodeRefusal != null) {
+			return nodeRefusal;
+		}
 		return sliceCount == 1
 						? typed.withStepId(loadStepId())
 						: new RunTerminalException(typed.category(), loadStepId(), engine + ": " + typed.getMessage(), cause);
+	}
+
+	/**
+	 * Another node's refusal of its slice at the start for its step-id files, as the Entry Node words
+	 * it for another node, the engine counted: the node's own message names its file, so it goes to
+	 * the log. Otherwise {@code null}.
+	 */
+	private RunTerminalException nodeStepIdRefusal(
+					final RunTerminalException typed, final Exception cause, final int slice, final int sliceCount) {
+		if (slice < 1 || !(typed instanceof StepIdInUseException || typed instanceof StepIdCheckException)) {
+			return null;
+		}
+		final String node = slice < stepSliceNodeAddrs.size() && stepSliceNodeAddrs.get(slice) != null
+						? stepSliceNodeAddrs.get(slice)
+						: "of engine " + (slice + 1);
+		return typed instanceof StepIdInUseException
+						? StepIdInUseException.fromNode(loadStepId(), slice, sliceCount, node, typed)
+						: StepIdCheckException.fromNode(loadStepId(), slice, sliceCount, node, cause);
 	}
 
 	/**
@@ -1407,9 +1551,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						IntegrityTerminalException.Category.EXECUTION, "failed to start metadata-mode step slice " + slice, cause);
 	}
 
-	/** A slice that didn't start under the admission barrier: its engine named, and the category of a cause that has one, such as a bad items line. */
-	RunTerminalException barrierStartFailure(final Exception cause, final String engine) {
+	/**
+	 * A slice that didn't start under the admission barrier: its engine named, and the category of a
+	 * cause that has one, such as a bad items line. Another node's refusal for its step-id files reads
+	 * as {@link #sliceStartFailure} words it.
+	 */
+	RunTerminalException barrierStartFailure(
+					final Exception cause, final String engine, final int slice, final int sliceCount) {
 		final var typed = RunTerminalException.find(cause);
+		final var nodeRefusal = nodeStepIdRefusal(typed, cause, slice, sliceCount);
+		if (nodeRefusal != null) {
+			return nodeRefusal;
+		}
 		final var refusal = typed == null ? CompositeOperationSupport.find(cause) : null;
 		if (refusal != null) {
 			return new RunTerminalException(
@@ -1472,6 +1625,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				stepSlice.start();
 				startedSliceCount = i + 1;
 			} catch (final Exception e) {
+				// A slice refused for its step-id files found a file in its folder that is not this step's.
+				final var refusal = RunTerminalException.find(e);
+				sliceRefusedForStepIdFiles = refusal instanceof StepIdInUseException || refusal instanceof StepIdCheckException;
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
 				}
@@ -1485,7 +1641,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 				if (barrier != null) {
-					throw barrierStartFailure(e, i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1));
+					throw barrierStartFailure(e, i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1), i, sliceCount);
 				}
 				// One engine missing would leave a lower load reported as the one asked for.
 				throw sliceStartFailure(e, i, sliceCount);
@@ -3542,19 +3698,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final boolean closeFollows = awaitStopThread == Thread.currentThread();
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
-				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
-				failures.run(this::relayBucketVersioningNoticesAtStop);
-				if (durationSliceStopInterrupted) {
-					// The interrupted stop left them open: they are written with the rest of the output.
-					durationSliceStopInterrupted = false;
-					failures.run(this::closeItemTimingMetricsOutputFileAggregators);
-				}
-				failures.run(this::publishFailedOutcomeBeforeIncompleteDurationMetricsOutput);
-				failures.run(super::doStop);
-				failures.throwFirst();
+				stopIncompleteDuration(failures);
 				return;
 			}
 			failures.run(this::stopDurationSlices);
+			if (durationStopFailure != null && !(failures.first() instanceof InterruptedException)) {
+				// A slice failed to stop: the stop is incomplete as when its coordination fails, and the
+				// close fails with that failure, so the outcome cannot be a clean one.
+				stopIncompleteDuration(failures);
+				return;
+			}
 		} else {
 			failures.run(() -> stopSlicesAtStop(stoppedAtOnce));
 		}
@@ -3596,6 +3749,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// Written here, the output is not written again by a close that an earlier stop deferred it to.
 		failureBudgetMetricsOutputDeferred = false;
 		failures.run(super::doStop);
+		failures.throwFirst();
+	}
+
+	/**
+	 * Ends a duration stop that is incomplete: its coordination or a slice's stop failed, so the close
+	 * that follows fails with that failure and a later close retries the cleanup.
+	 */
+	private void stopIncompleteDuration(final StopFailures failures) {
+		// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
+		failures.run(this::relayBucketVersioningNoticesAtStop);
+		if (runClosesAgain() && !JvmExit.begun()) {
+			// The run closes again: the close that settles the cleanup writes the output, with its
+			// outcome and the counts captured after the drain, or the run writes it failed at its end.
+			failureBudgetMetricsOutputDeferred = true;
+			failures.throwFirst();
+			return;
+		}
+		writeIncompleteDurationStopOutput(failures);
 		failures.throwFirst();
 	}
 
@@ -3671,9 +3842,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void stopMetricsAggregator() {
-		if (null != metricsAggregator) {
+		// Read once: the run's exhaustion cleanup calls this without stopCloseLock, while a close nulls it.
+		final var aggregator = metricsAggregator;
+		if (null != aggregator) {
 			try {
-				metricsAggregator.stop();
+				aggregator.stop();
 			} catch (final RemoteException e) {
 				LogUtil.trace(
 								Loggers.ERR,
@@ -3685,11 +3858,23 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	private void closeMetricsAggregatorAfterTheRun() {
+		if (null != metricsAggregator) {
+			try {
+				metricsAggregator.close();
+			} catch (final Exception e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to close the metrics aggregator", loadStepId());
+			}
+			metricsAggregator = null;
+		}
+	}
+
 	private void closeItemTimingMetricsOutputFileAggregators() {
 		final int timingSlicesStarted = startedSliceCount;
 		itemTimingMetricsOutputFileAggregators.parallelStream().forEach(itemMetricsOutputFileAggregator -> {
 			try {
-				if (startStopped && itemMetricsOutputFileAggregator instanceof ItemTimingMetricOutputFileAggregator timingAggregator) {
+				if (closesAsStoppedStart(timingSlicesStarted)
+								&& itemMetricsOutputFileAggregator instanceof ItemTimingMetricOutputFileAggregator timingAggregator) {
 					timingAggregator.closeAfterStoppedStart(timingSlicesStarted);
 				} else {
 					itemMetricsOutputFileAggregator.close();
@@ -3780,9 +3965,79 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
-	private void publishFailedOutcomeBeforeIncompleteDurationMetricsOutput() {
-		if (failureBudgetController != null && hasStartedStandaloneDeleteWork()) {
-			publishFailureBudgetOutcome(ObjectFailureBudgetOutcome.FAILED);
+	/**
+	 * Writes the metrics output of an incomplete duration stop, or the output a stop left to a later
+	 * close, with the outcome final as failed: no close can settle the cleanup first. A later close
+	 * still cleans up, and keeps that outcome. Each stage runs whatever an earlier one threw.
+	 */
+	private void writeIncompleteDurationStopOutput(final StopFailures failures) {
+		if (durationSliceStopInterrupted) {
+			// The interrupted stop left them open: they are written with the rest of the output.
+			durationSliceStopInterrupted = false;
+			failures.run(this::closeItemTimingMetricsOutputFileAggregators);
+		}
+		final Throwable cause = durationStopFailure;
+		failures.run(() -> finalizeFailedFailureBudgetAtIncompleteDurationStop(cause));
+		failureBudgetMetricsOutputDeferred = false;
+		failures.run(super::doStop);
+	}
+
+	private synchronized void finalizeFailedFailureBudgetAtIncompleteDurationStop(final Throwable cause) {
+		if (failureBudgetFinalizedOrAbsent()) {
+			return;
+		}
+		// The failure policy's own failure fails every close; without one, a close whose cleanup
+		// completes closes the step and keeps this outcome.
+		final boolean noPolicyFailure = failureBudgetFailure == null;
+		finalizeFailedFailureBudgetAtStop(cause);
+		if (noPolicyFailure) {
+			incompleteDurationStopFailure = failureBudgetTerminalFailure;
+		}
+	}
+
+	/** The failed outcome an incomplete duration stop wrote, once a later close has closed the step. */
+	@Override
+	protected final synchronized Throwable failureKeptByClose() {
+		return isClosed() ? incompleteDurationStopFailure : null;
+	}
+
+	/** A stop left the output to a close that did not come: it is written now, failed. */
+	private void writeOutputLeftToALaterClose(final Throwable closeFailure) {
+		if (!failureBudgetMetricsOutputDeferred) {
+			return;
+		}
+		final var failures = new StopFailures();
+		writeIncompleteDurationStopOutput(failures);
+		final Throwable writeFailure = failures.first();
+		if (writeFailure != null && writeFailure != closeFailure) {
+			closeFailure.addSuppressed(writeFailure);
+		}
+	}
+
+	@Override
+	protected final void writeOutputLeftToTheRunsClose() {
+		// The run's last close may have ended on a stop request: the output is still written.
+		final boolean interrupted = Thread.interrupted();
+		stopCloseLock.lock();
+		try {
+			if (failureBudgetMetricsOutputDeferred) {
+				final var failures = new StopFailures();
+				writeIncompleteDurationStopOutput(failures);
+				if (failures.first() != null) {
+					LogUtil.exception(
+									Level.WARN,
+									failures.first(),
+									"{}: failed to write the metrics output after the run's last close",
+									loadStepId());
+				}
+			}
+			// No close of the run closed the aggregator, and none will: it stops polling the slices now.
+			closeMetricsAggregatorAfterTheRun();
+		} finally {
+			stopCloseLock.unlock();
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
 		}
 	}
 
@@ -3816,6 +4071,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} catch (final IOException | RuntimeException | Error e) {
 				// A close that fails keeps the relay for its retry, but relays what the nodes wrote so far.
 				relayBucketVersioningNoticesAtClose(e);
+				if (!runClosesAgain() || JvmExit.begun()) {
+					// No close of the run follows this one to settle the cleanup.
+					writeOutputLeftToALaterClose(e);
+				}
 				throw e;
 			}
 			return;
@@ -3858,6 +4117,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 */
 	@Override
 	protected void cancelDurationRunCleanupResourcesAfterExhaustion() {
+		// The slices are released below: the aggregator stops polling them first.
+		stopMetricsAggregator();
 		final List<LoadStep> slices = stepSlices.stream().filter(Objects::nonNull).toList();
 		DurationPhaseAttempt result = null;
 		for (var attempt = 0; attempt < DURATION_RUN_CLOSE_ATTEMPT_LIMIT; attempt++) {
@@ -3925,11 +4186,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 		}
-		final IntegrityTerminalException budgetTerminal;
+		IntegrityTerminalException budgetTerminal;
 		try {
 			budgetTerminal = finalizeFailureBudget();
 		} finally {
 			closeFailureBudgetSnapshotCollector();
+		}
+		if (budgetTerminal != null && budgetTerminal == incompleteDurationStopFailure) {
+			// An earlier close threw the stop failure behind this outcome, and the output carries it: this
+			// close, whose stop has now completed, cleans up and closes. A run still ends with that failure
+			// (failureKeptByClose), so it ends failed, as its output says.
+			budgetTerminal = null;
 		}
 		emitDeferredFailureBudgetMetricsOutput();
 		try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
@@ -3937,8 +4204,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							durationStopFailure, budgetTerminal);
 			durationStopFailure = null;
 			boolean durationSlicesClosed = true;
+			final int slicesStarted = startedSliceCount;
 			Map<OpType, Long> terminalFailureCountsByOpType = Map.of();
-			if (integrityModeEnabled() && (!startStopped || startedSliceCount > 0)) {
+			if (integrityModeEnabled() && !noSliceStarted(slicesStarted)) {
 				try {
 					terminalFailureCountsByOpType = terminalFailureCounts(metricsContexts);
 				} catch (final Throwable cause) {
@@ -4039,7 +4307,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			Loggers.MSG.debug("{}: closed all {} step slices", loadStepId(), stepSlices.size());
-			final int slicesStarted = startedSliceCount;
 			if (!durationMode || (durationSlicesClosed && terminalCause == null)) {
 				stepSlices.clear();
 				sliceLost = false;
@@ -4047,7 +4314,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final List<AutoCloseable> failedDeleteArtifactAggregators = new ArrayList<>();
 			for (final var deleteArtifactAggregator : deleteArtifactAggregators) {
 				try {
-					if (startStopped && deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
+					if (closesAsStoppedStart(slicesStarted)
+									&& deleteArtifactAggregator instanceof DeleteArtifactAggregator aggregator) {
 						aggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						deleteArtifactAggregator.close();
@@ -4136,12 +4404,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					if (itemOutputFileAggregator instanceof CsvArtifactAggregator csvAggregator) {
 						final long failedOperationCount = terminalFailureCountsByOpType.getOrDefault(
 										csvAggregator.artifactOpType(), -1L);
-						if (startStopped) {
+						if (closesAsStoppedStart(slicesStarted)) {
 							csvAggregator.closeAfterStoppedStart(failedOperationCount, slicesStarted);
 						} else {
 							csvAggregator.close(failedOperationCount);
 						}
-					} else if (startStopped && itemOutputFileAggregator instanceof ItemOutputFileAggregator itemAggregator) {
+					} else if (closesAsStoppedStart(slicesStarted)
+									&& itemOutputFileAggregator instanceof ItemOutputFileAggregator itemAggregator) {
 						itemAggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						itemOutputFileAggregator.close();
@@ -4165,7 +4434,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			itemOutputFileAggregators.clear();
-			if (itemOutputCollected && (!startStopped || slicesStarted > 0)) {
+			if (itemOutputCollected && !noSliceStarted(slicesStarted)) {
 				try {
 					itemOutputCollected(config.stringVal("item-output-file"), successCounts);
 				} catch (final Exception e) {
@@ -4175,7 +4444,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			for (final var opTraceLogFileAggregator : opTraceLogFileAggregators) {
 				try {
-					if (startStopped && opTraceLogFileAggregator instanceof OpTraceLogFileAggregator traceAggregator) {
+					if (closesAsStoppedStart(slicesStarted)
+									&& opTraceLogFileAggregator instanceof OpTraceLogFileAggregator traceAggregator) {
 						traceAggregator.closeAfterStoppedStart(slicesStarted);
 					} else {
 						opTraceLogFileAggregator.close();
@@ -4228,13 +4498,35 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
+	 * Whether the step's start ended before any slice's start returned: a start stopped before its
+	 * first slice started, or one that failed from {@link #init()} on before that, a slice whose own
+	 * start threw among them. No slice ran, so the close captures no terminal counts and publishes
+	 * nothing. A step never started is judged on the slices it holds instead.
+	 */
+	private boolean noSliceStarted(final int slicesStarted) {
+		return slicesStarted == 0 && (startStopped || startStepEntered());
+	}
+
+	/**
+	 * Whether the close publishes the slice artifacts from the slices whose start returned only: after
+	 * a start that ended as a stop, or that ended before any slice started.
+	 */
+	private boolean closesAsStoppedStart(final int slicesStarted) {
+		return startStopped || noSliceStarted(slicesStarted);
+	}
+
+	/**
 	 * Publishes a logger-backed slice artifact: from every slice, or after a start that ended as a
-	 * stop, from the slices whose start returned only. A slice refused at JVM exit or never reached
-	 * wrote nothing, and a slice cut partway through its start is left out with them. With no slice
+	 * stop or at a slice refused for its step-id files, from the slices whose start returned only. A
+	 * slice refused at JVM exit or never reached wrote nothing, and a slice cut partway through its
+	 * start, or refused at it for its step-id files, is left out with them: its folder holds, or may
+	 * hold, another step's or run's file. A slice whose start failed otherwise may have written its
+	 * file, so it is collected. With no slice started, as after a start that failed before any slice
 	 * started, nothing is published.
 	 */
 	private void closeSliceLoggerArtifact(final AutoCloseable aggregator, final int slicesStarted) throws Exception {
-		if (startStopped && aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
+		if ((closesAsStoppedStart(slicesStarted) || sliceRefusedForStepIdFiles)
+						&& aggregator instanceof CsvLoggerArtifactAggregator sliceArtifact) {
 			sliceArtifact.closeAfterStoppedStart(slicesStarted);
 		} else {
 			aggregator.close();

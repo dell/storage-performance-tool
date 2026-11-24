@@ -10,6 +10,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,6 +42,7 @@ class StopFailureStillClosesTest {
 	private final Config config = TestConfigBuilder.config();
 	private final MetricsManager metricsMgr = mock(MetricsManager.class);
 	private final List<LoadStep> slices = new ArrayList<>();
+	private final List<TestLoadStepClient> clients = new ArrayList<>();
 
 	@BeforeEach
 	void configure() {
@@ -50,9 +52,43 @@ class StopFailureStillClosesTest {
 		config.val("item-data-verify", false);
 	}
 
+	/**
+	 * Disarms the failures a test injected and closes each client it made, even when the test failed
+	 * before it disarmed one itself. A client left registered whose close throws an InterruptedException
+	 * fails the {@code DaemonBase.closeAll()} of a later test class in the same JVM. One client's failed
+	 * close does not stop the others' closes; the first failure is thrown, the rest suppressed under it.
+	 */
 	@AfterEach
-	void clearInterrupt() {
+	void closeClients() throws Throwable {
 		Thread.interrupted();
+		Throwable failure = null;
+		try {
+			for (var i = 0; i < slices.size(); i++) {
+				reset(slices.get(i));
+				stubName(slices.get(i), i);
+			}
+			for (final TestLoadStepClient client : clients) {
+				try {
+					list(client, "itemTimingMetricsOutputFileAggregators").clear();
+					list(client, "operationLifecycleAggregators").clear();
+					list(client, "itemOutputFileAggregators").clear();
+					metricsAggregatorField().set(client, null);
+					client.close();
+					assertTrue(client.isClosed(), "the test's client is closed after it");
+				} catch (final Throwable e) {
+					if (failure == null) {
+						failure = e;
+					} else {
+						failure.addSuppressed(e);
+					}
+				}
+			}
+		} finally {
+			Thread.interrupted();
+		}
+		if (failure != null) {
+			throw failure;
+		}
 	}
 
 	@Test
@@ -137,8 +173,7 @@ class StopFailureStillClosesTest {
 		final IllegalStateException first = new IllegalStateException("injected: metrics aggregator stop");
 		final MetricsAggregator aggregator = mock(MetricsAggregator.class);
 		doThrow(first).when(aggregator).stop();
-		final Field field = LoadStepClientBase.class.getDeclaredField("metricsAggregator");
-		field.setAccessible(true);
+		final Field field = metricsAggregatorField();
 		field.set(client, aggregator);
 		final InterruptedException later = new InterruptedException("injected: interrupted");
 		final AtomicInteger timingCloses = new AtomicInteger();
@@ -199,13 +234,15 @@ class StopFailureStillClosesTest {
 
 	private TestLoadStepClient clientWithThreeSlices() throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), metricsMgr);
+		clients.add(client);
+		final List<LoadStep> own = new ArrayList<>();
 		for (var i = 0; i < 3; i++) {
 			final LoadStep slice = mock(LoadStep.class);
-			when(slice.loadStepId()).thenReturn("slice-" + i);
-			when(slice.toString()).thenReturn("slice-" + i);
+			stubName(slice, slices.size());
 			slices.add(slice);
+			own.add(slice);
 		}
-		list(client, "stepSlices").addAll(slices);
+		list(client, "stepSlices").addAll(own);
 		final List<Object> addrs = list(client, "stepSliceNodeAddrs");
 		addrs.add(null);
 		addrs.add("127.0.0.1:1");
@@ -214,6 +251,18 @@ class StopFailureStillClosesTest {
 		started.setAccessible(true);
 		started.setInt(client, 3);
 		return client;
+	}
+
+	private static void stubName(final LoadStep slice, final int index) throws Exception {
+		final String name = "slice-" + index;
+		when(slice.loadStepId()).thenReturn(name);
+		when(slice.toString()).thenReturn(name);
+	}
+
+	private static Field metricsAggregatorField() throws Exception {
+		final Field field = LoadStepClientBase.class.getDeclaredField("metricsAggregator");
+		field.setAccessible(true);
+		return field;
 	}
 
 	@SuppressWarnings("unchecked")

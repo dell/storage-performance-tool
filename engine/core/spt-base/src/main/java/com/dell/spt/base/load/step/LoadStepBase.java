@@ -78,8 +78,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	private volatile long startTimeSec = -1;
 	private volatile Throwable runFailure;
 	private volatile List<? extends AllMetricsSnapshot> completedRunMetricsSnapshots;
+	// Whether run() will close this step again after the stop or close now running.
+	private volatile boolean runClosesAgain;
 	// Set when a start reaches this step: one stopped or closed before it never ran.
 	private volatile boolean startReached;
+	// Set when a start reaches init(): a start that fails from there on made the step's resources.
+	private volatile boolean startStepEntered;
 
 	protected LoadStepBase(
 					final Config config,
@@ -249,6 +253,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		// Set when the flag was set before the close or by its end. An InterruptedException that is
 		// already propagating skips the code after the finally block, so it alone carries the stop.
 		boolean stoppedAtClose = false;
+		// The run's close follows the start and the await, with its retries in duration mode.
+		runClosesAgain = standaloneDeleteDurationMode;
 		try {
 			start();
 			try {
@@ -288,17 +294,30 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		} finally {
 			// The window ends where the run does, before the freeze, on normal and exceptional exits.
 			closeSteadyWindows("run exit");
+			boolean closesNext = false;
 			try {
-				completedRunMetricsSnapshots = List.copyOf(currentMetricsSnapshots());
-			} catch (final Throwable metricsFailure) {
-				throwUncheckedIfInterrupted(metricsFailure);
-				completedRunMetricsSnapshots = List.of();
-				recordRunFailure(metricsFailure);
+				try {
+					completedRunMetricsSnapshots = List.copyOf(currentMetricsSnapshots());
+				} catch (final Throwable metricsFailure) {
+					throwUncheckedIfInterrupted(metricsFailure);
+					completedRunMetricsSnapshots = List.of();
+					recordRunFailure(metricsFailure);
+				}
+				closesNext = true;
+			} finally {
+				if (!closesNext) {
+					// A stop request here skips the close: what a stop left to it is written now.
+					endRunWithoutClose();
+				}
 			}
 			// The stop may leave the interrupt set; the close runs with it clear so it still writes the
 			// step's artifacts, and the stop ends the run after it (below).
 			final boolean interruptedBeforeClose = Thread.interrupted();
-			final Throwable closeCause = closeAfterRun();
+			Throwable closeCause = closeAfterRun();
+			if (closeCause == null) {
+				// A close that completed may keep the failed outcome an earlier stop wrote: the run ends with it.
+				closeCause = failureKeptByClose();
+			}
 			stoppedAtClose = Thread.interrupted() || interruptedBeforeClose;
 			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
@@ -382,38 +401,104 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		final int attemptLimit = standaloneDeleteDurationMode
 						? DURATION_RUN_CLOSE_ATTEMPT_LIMIT
 						: 1;
-		Throwable firstFailure = null;
-		for (var attempt = 0; attempt < attemptLimit; attempt++) {
-			try {
-				close();
-				return null;
-			} catch (final Throwable closeCause) {
-				throwUncheckedIfInterrupted(closeCause);
-				if (firstFailure == null) {
-					firstFailure = closeCause;
-				} else if (closeCause != firstFailure) {
-					firstFailure.addSuppressed(closeCause);
+		boolean closed = false;
+		try {
+			Throwable firstFailure = null;
+			Throwable stopRequest = null;
+			for (var attempt = 0; attempt < attemptLimit; attempt++) {
+				runClosesAgain = standaloneDeleteDurationMode && attempt < attemptLimit - 1;
+				try {
+					close();
+					closed = true;
+					return null;
+				} catch (final Throwable closeCause) {
+					if (closeCause instanceof InterruptedException) {
+						// A stop request ends the retries, not their cleanup below; it ends the run after it.
+						stopRequest = closeCause;
+						break;
+					}
+					if (firstFailure == null) {
+						firstFailure = closeCause;
+					} else if (closeCause != firstFailure) {
+						firstFailure.addSuppressed(closeCause);
+					}
 				}
 			}
-		}
-		if (standaloneDeleteDurationMode) {
-			// A normal run has no caller left to perform another explicit close. Cancel any
-			// still-owned lifecycle resources after the bounded retries so they cannot leak.
+			runClosesAgain = false;
+			// The cleanup runs with the interrupt clear, so it can still deliver its calls; it is set again after.
+			final boolean interrupted = Thread.interrupted();
 			try {
-				cancelDurationRunCleanupResourcesAfterExhaustion();
-			} catch (final Throwable cleanupCause) {
-				throwUncheckedIfInterrupted(cleanupCause);
-				if (cleanupCause != firstFailure) {
-					firstFailure.addSuppressed(cleanupCause);
+				if (standaloneDeleteDurationMode) {
+					// A normal run has no caller left to perform another explicit close. Cancel any
+					// still-owned lifecycle resources after the bounded retries so they cannot leak.
+					try {
+						cancelDurationRunCleanupResourcesAfterExhaustion();
+					} catch (final Throwable cleanupCause) {
+						throwUncheckedIfInterrupted(cleanupCause);
+						if (firstFailure == null) {
+							firstFailure = cleanupCause;
+						} else if (cleanupCause != firstFailure) {
+							firstFailure.addSuppressed(cleanupCause);
+						}
+					} finally {
+						closeRetainedDurationPhases();
+					}
+				} else {
+					closeRetainedDurationPhases();
 				}
 			} finally {
-				closeRetainedDurationPhases();
+				if (interrupted) {
+					Thread.currentThread().interrupt();
+				}
 			}
-		} else {
-			closeRetainedDurationPhases();
+			if (stopRequest != null) {
+				if (firstFailure != null) {
+					stopRequest.addSuppressed(firstFailure);
+				}
+				throwUnchecked(stopRequest);
+			}
+			return firstFailure;
+		} finally {
+			runClosesAgain = false;
+			if (!closed) {
+				// No close of this run settled the step, as when one is stopped: what waited for one is written now.
+				endRunWithoutClose();
+			}
 		}
-		return firstFailure;
 	}
+
+	private void endRunWithoutClose() {
+		runClosesAgain = false;
+		if (standaloneDeleteDurationMode) {
+			writeOutputLeftToTheRunsClose();
+		}
+	}
+
+	/**
+	 * Whether {@link #run()} closes this step again after the stop or close now running: true from
+	 * the start of a duration-mode run to the close attempt before its last, false otherwise. A stop
+	 * whose metrics output needs a later close to be complete may leave it to that close while this is
+	 * true; the run's last close attempt, or {@link #writeOutputLeftToTheRunsClose()}, writes it.
+	 */
+	protected final boolean runClosesAgain() {
+		return runClosesAgain;
+	}
+
+	/**
+	 * The failure that a close which completed kept from an earlier stop of this step, as when that
+	 * stop wrote the outcome {@code failed} before the cleanup could settle: {@link #run()} ends with
+	 * it although its close returned. Null by default and when no close kept one.
+	 */
+	protected Throwable failureKeptByClose() {
+		return null;
+	}
+
+	/**
+	 * Called once a duration-mode run ends without a close that closed the step, as when its close
+	 * attempts run out or a stop request ends one: writes any output a stop left to a later close, and
+	 * releases what only that close would have released. It must not throw.
+	 */
+	protected void writeOutputLeftToTheRunsClose() {}
 
 	/** Stops the step after a failed close outside a terminal failure; a failure it throws ends the run. */
 	protected void stopAfterFailedClose() {
@@ -432,6 +517,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	 */
 	protected final boolean startReached() {
 		return startReached;
+	}
+
+	/**
+	 * Whether a start got past its configuration checks and bucket provisioning to {@link #init()}.
+	 * It stays false for a step never started, or whose start ended before init().
+	 */
+	protected final boolean startStepEntered() {
+		return startStepEntered;
 	}
 
 	/**
@@ -493,6 +586,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			refuseStepIdInUseHere(false);
 		}
 		provisionTargetBuckets();
+		startStepEntered = true;
 		init();
 		// Before anything the step writes: a refused step leaves the earlier step's files, its build
 		// record among them, as they were. The other nodes are reached only after the target checks.

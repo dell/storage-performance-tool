@@ -267,6 +267,37 @@ class StopBetweenSliceStartsTest {
 	}
 
 	@Test
+	void aStartWhoseEntrySliceFailsToStartReadsNoItemOutputTracesOrTimingsOfAnySlice() throws Exception {
+		// A failure, not a stop: no slice's start returned, so none wrote item output, traces or timings.
+		tempDir = Files.createTempDirectory("stop-between-slice-starts");
+		final Config config = config();
+		config.val("item-output-file", tempDir.resolve("items.csv").toString());
+		config.val("output-metrics-trace-persist", true);
+		config.val("output-metrics-timing-persist", true);
+		final LoadStep entry = mock(LoadStep.class);
+		doAnswer(call -> {
+			throw new IllegalStateException("the entry slice did not start");
+		}).when(entry).start();
+		final TestLoadStepClient client = client(config, entry, mock(LoadStep.class));
+		final FileManager worker = nodeFiles.values().iterator().next();
+
+		final Throwable failure = assertThrows(Throwable.class, client::start);
+		assertFalse(failure instanceof InterruptedException, failure::toString);
+		Thread.interrupted();
+		verify(entry).start();
+		assertNotResolved(0);
+		clearInvocations(worker);
+		// The start logged its own failure: the asynchronous loggers deliver it before the close's capture.
+		warningsWhile(() -> {});
+
+		final List<String> warnings = warningsWhile(() -> assertDoesNotThrow(client::close));
+
+		assertEquals(List.of(), warnings);
+		verify(worker, never()).readFromFile(anyString(), anyLong());
+		verify(worker, never()).deleteFile(anyString());
+	}
+
+	@Test
 	void aStartStoppedBeforeAnySliceStartedHandsNoItemOutputToTheStep() throws Exception {
 		tempDir = Files.createTempDirectory("stop-between-slice-starts");
 		final Config config = config();
@@ -480,7 +511,7 @@ class StopBetweenSliceStartsTest {
 	}
 
 	@Test
-	void aMetadataStartWhoseRunIdCheckFailsFailsClosedWithoutALifecycleFailure() throws Exception {
+	void aMetadataStartWhoseRunIdCheckFailsClosesWithNothingPublished() throws Exception {
 		final LoadStepFactory<LoadStep, ?> factory = realSliceFactory(new CopyOnWriteArrayList<>(), () -> {},
 						"runId", () -> 8L);
 		final TestLoadStepClient client = metadataClient(factory);
@@ -489,13 +520,10 @@ class StopBetweenSliceStartsTest {
 		assertTrue(failure.getMessage().contains("run.id mismatch"), failure.getMessage());
 		Thread.interrupted();
 
-		final var closeFailure = assertThrows(IntegrityTerminalException.class, client::close);
-		assertTrue(closeFailure.getMessage().contains("failed to capture terminal metadata-mode operation failure counts"),
-						closeFailure.getMessage());
-		for (final Throwable suppressed : closeFailure.getSuppressed()) {
-			assertFalse(String.valueOf(suppressed.getMessage()).contains(OperationLifecycleArtifact.FILE_NAME),
-							suppressed::toString);
-		}
+		// No slice started, so the close captures no terminal counts and publishes nothing.
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+		assertNoSliceFiles();
 	}
 
 	@Test

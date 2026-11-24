@@ -360,10 +360,11 @@ class NettyStorageDriverPqcConfigTest {
 	}
 
 	private static CapturingAppender attachCapture() {
-		final var appender = new CapturingAppender();
-		appender.start();
 		final var msgLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MSG.getName());
 		final var errLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+		// detachCapture puts these back, so that later tests in this JVM see the levels this one found
+		final var appender = new CapturingAppender(msgLogger.getLevel(), errLogger.getLevel());
+		appender.start();
 		msgLogger.addAppender(appender);
 		errLogger.addAppender(appender);
 		msgLogger.setLevel(Level.INFO);
@@ -372,21 +373,31 @@ class NettyStorageDriverPqcConfigTest {
 	}
 
 	private static void detachCapture(final CapturingAppender appender) throws InterruptedException {
-		LogUtil.flushAll();
-		Thread.sleep(25);
-		final var msgLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MSG.getName());
-		final var errLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
-		msgLogger.removeAppender(appender);
-		errLogger.removeAppender(appender);
-		appender.stop();
+		try {
+			LogUtil.flushAll();
+			Thread.sleep(25);
+		} finally {
+			// Even when the wait is interrupted or the flush fails, so that the appender and levels never stay
+			final var msgLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MSG.getName());
+			final var errLogger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+			msgLogger.removeAppender(appender);
+			errLogger.removeAppender(appender);
+			msgLogger.setLevel(appender.previousMsgLevel);
+			errLogger.setLevel(appender.previousErrLevel);
+			appender.stop();
+		}
 	}
 
 	private static final class CapturingAppender extends AbstractAppender {
 
 		private final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+		private final Level previousMsgLevel;
+		private final Level previousErrLevel;
 
-		private CapturingAppender() {
+		private CapturingAppender(final Level previousMsgLevel, final Level previousErrLevel) {
 			super("netty-pqc-capture", null, null, true, Property.EMPTY_ARRAY);
+			this.previousMsgLevel = previousMsgLevel;
+			this.previousErrLevel = previousErrLevel;
 		}
 
 		@Override
