@@ -47,11 +47,12 @@ public final class RetryDelayScheduler {
 	/**
 	 * Every task replaces the thread's whole context, even when the previous task came from the same
 	 * producer: a task may have changed the context, and a skipped equal snapshot would then leave
-	 * the next task logging to another step.
+	 * the next task logging to another step. It puts each entry with {@code forEach}: {@code putAll}
+	 * walks the snapshot's entry set, which allocates on every retry.
 	 */
 	private static void applyLogContext(final Map<String, String> logContext) {
 		ThreadContext.clearMap();
-		ThreadContext.putAll(logContext);
+		logContext.forEach(ThreadContext::put);
 	}
 
 	/** Whether {@code future} is still waiting in the timer's queue. */
