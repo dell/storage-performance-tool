@@ -117,19 +117,22 @@ class BucketVersioningRelayDeliveryTest {
 		};
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.TEST.getName());
 		blocker.start();
-		logger.addAppender(blocker);
-		try (final var levels = LoggerLevels.atMost(Level.INFO, Loggers.TEST.getName());
-						final var ctx = CloseableThreadContext.put(Constants.KEY_STEP_ID, step)) {
-			final var relay = relay(step, node(file, step));
-			Loggers.TEST.info("block " + step);
-			assertTrue(entered.await(5, TimeUnit.SECONDS));
+		// The Test logger has no entry of its own: the window adds one, which takes the appender, and its close
+		// removes that entry again once the appender is off it, so that the logger follows the root after this test.
+		try (final var levels = LoggerLevels.set(Map.of(Loggers.TEST.getName(), Level.INFO))) {
+			logger.addAppender(blocker);
+			try (final var ctx = CloseableThreadContext.put(Constants.KEY_STEP_ID, step)) {
+				final var relay = relay(step, node(file, step));
+				Loggers.TEST.info("block " + step);
+				assertTrue(entered.await(5, TimeUnit.SECONDS));
 
-			BucketVersioningNotice.info(step, "bucket b: versioning is already enabled");
-			relay.close();
-		} finally {
-			release.countDown();
-			logger.removeAppender(blocker);
-			blocker.stop();
+				BucketVersioningNotice.info(step, "bucket b: versioning is already enabled");
+				relay.close();
+			} finally {
+				release.countDown();
+				logger.removeAppender(blocker);
+				blocker.stop();
+			}
 		}
 
 		assertEquals(List.of("INFO " + step + ": node 001 (worker): bucket b: versioning is already enabled"), relayed);
@@ -225,11 +228,6 @@ class BucketVersioningRelayDeliveryTest {
 		final var loggerContext = LoggerContext.getContext(false);
 		final var msg = loggerContext.getLogger(Loggers.MSG.getName());
 		final var err = loggerContext.getLogger(Loggers.ERR.getName());
-		// Earlier tests in this JVM may leave the errors at ERROR, which would drop the relayed WARN.
-		final var levels = LoggerLevels.atMost(Level.INFO, Loggers.MSG.getName(), Loggers.ERR.getName());
-		capture.start();
-		msg.addAppender(capture);
-		err.addAppender(capture);
 		final var w1 = "INFO " + step + ": node 001 (worker:1099): bucket w1: versioning is already enabled";
 		final var w2 = "WARN " + step + ": node 001 (worker:1099): bucket w2: could not enable versioning";
 		final var relayedAtTotals = new AtomicBoolean();
@@ -238,20 +236,25 @@ class BucketVersioningRelayDeliveryTest {
 			relayedAtTotals.set(awaitEvent(events, w1, 3));
 			return null;
 		}).when(metricsMgr).unregister(any());
-		try {
-			client.doStop();
-			assertTrue(relayedAtTotals.get(), "the relay ran before the total metrics: " + events);
+		// Earlier tests in this JVM may leave the errors at ERROR, which would drop the relayed WARN.
+		try (final var levels = LoggerLevels.atMost(Level.INFO, Loggers.MSG.getName(), Loggers.ERR.getName())) {
+			capture.start();
+			try {
+				msg.addAppender(capture);
+				err.addAppender(capture);
+				client.doStop();
+				assertTrue(relayedAtTotals.get(), "the relay ran before the total metrics: " + events);
 
-			append(file, "WARN bucket w2: could not enable versioning (PUT ?versioning timed out after 400 ms); the run goes"
-							+ " on un-versioned\n");
-			client.doClose();
-			assertTrue(awaitEvent(events, w2, 5), "the close relays what was written later: " + events);
-			assertEquals(1, events.stream().filter(event -> event.startsWith(w1)).count(), "relayed once: " + events);
-		} finally {
-			msg.removeAppender(capture);
-			err.removeAppender(capture);
-			capture.stop();
-			levels.close();
+				append(file, "WARN bucket w2: could not enable versioning (PUT ?versioning timed out after 400 ms); the run goes"
+								+ " on un-versioned\n");
+				client.doClose();
+				assertTrue(awaitEvent(events, w2, 5), "the close relays what was written later: " + events);
+				assertEquals(1, events.stream().filter(event -> event.startsWith(w1)).count(), "relayed once: " + events);
+			} finally {
+				msg.removeAppender(capture);
+				err.removeAppender(capture);
+				capture.stop();
+			}
 		}
 	}
 
@@ -327,14 +330,21 @@ class BucketVersioningRelayDeliveryTest {
 
 		final List<String> lines = new CopyOnWriteArrayList<>();
 		private final List<org.apache.logging.log4j.core.Logger> loggers;
-		private final LoggerLevels levels = LoggerLevels.atMost(Level.INFO, Loggers.MSG.getName(), Loggers.ERR.getName());
+		private final LoggerLevels levels;
 
 		Events() {
 			super("relay-events-" + System.nanoTime(), null, null, true, Property.EMPTY_ARRAY);
 			final var context = LoggerContext.getContext(false);
 			loggers = List.of(context.getLogger(Loggers.MSG.getName()), context.getLogger(Loggers.ERR.getName()));
-			start();
-			loggers.forEach(logger -> logger.addAppender(this));
+			levels = LoggerLevels.atMost(Level.INFO, Loggers.MSG.getName(), Loggers.ERR.getName());
+			try {
+				start();
+				loggers.forEach(logger -> logger.addAppender(this));
+			} catch (final RuntimeException | Error failure) {
+				// No try-with-resources closes a capture that failed to open: put back what it changed.
+				close();
+				throw failure;
+			}
 		}
 
 		@Override

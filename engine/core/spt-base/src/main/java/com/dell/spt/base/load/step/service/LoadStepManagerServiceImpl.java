@@ -1,10 +1,13 @@
 package com.dell.spt.base.load.step.service;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
+import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.EarlierRunFiles;
 import com.dell.spt.base.load.step.LoadStepManagerService;
+import com.dell.spt.base.load.step.RunStepIds;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -12,6 +15,7 @@ import com.dell.spt.base.svc.ServiceBase;
 import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -23,6 +27,8 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 
 	private final List<Extension> extensions;
 	private final MetricsManager metricsMgr;
+	/** The step ids each run prepared on this worker: only an earlier run's files are moved aside. */
+	private final RunStepIds runStepIds = new RunStepIds();
 	/** Created and not released, oldest first. Several are normal: a scenario can run steps concurrently. */
 	private final List<LoadStepServiceImpl> openStepSvcs = new CopyOnWriteArrayList<>();
 	private volatile LoadStepService stepSvc = null;
@@ -86,7 +92,7 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 		final List<Long> runIds = new ArrayList<>();
 		for (final var openStepSvc : openStepSvcs.reversed()) {
 			if (openStepSvc.isRunning()) {
-				runIds.add(openStepSvc.runId());
+				runIds.add(openStepSvc.sliceRunId());
 			}
 		}
 		return runIds;
@@ -102,12 +108,12 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 		var matched = false;
 		final List<String> stoppedStepIds = new ArrayList<>();
 		for (final var openStepSvc : openStepSvcs) {
-			if (openStepSvc.runId() != runId) {
+			if (openStepSvc.sliceRunId() != runId) {
 				continue;
 			}
 			matched = true;
 			if (openStepSvc.isRunning()) {
-				final var stepId = openStepSvc.loadStepId();
+				final var stepId = openStepSvc.sliceStepId();
 				try {
 					openStepSvc.stop();
 					stoppedStepIds.add(stepId);
@@ -138,5 +144,21 @@ public final class LoadStepManagerServiceImpl extends ServiceBase
 		stepSvc = newStepSvc;
 		Loggers.MSG.info("New step service started @ port #{}: {}", port, newStepSvc.name());
 		return newStepSvc.name();
+	}
+
+	/**
+	 * Moves aside an earlier run's files for the first step of its id in its run, before the Entry
+	 * Node creates any slice of the step. The warning and any failure go to the step's own log here.
+	 */
+	@Override
+	public final synchronized boolean prepareStepIdFiles(
+					final long runId, final String stepId, final List<String> loggerNames) throws RemoteException {
+		if (!acceptingSteps) {
+			throw new RemoteException("Load step manager is closing");
+		}
+		try (final Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
+						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+			return EarlierRunFiles.prepare(runStepIds, runId, stepId, List.copyOf(loggerNames), Instant.now());
+		}
 	}
 }
