@@ -1219,7 +1219,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} finally {
 			xml.setLength(0);
 		}
-		final var uri = SLASH + deleteRequest.bucket() + '?' + DELETE_QUERY;
+		final var bucket = deleteRequest.bucket();
+		final String uri;
+		xml.setLength(0);
+		try {
+			uri = appendManifestBucket(xml.append(SLASH), bucket).append('?').append(DELETE_QUERY).toString();
+		} finally {
+			xml.setLength(0);
+		}
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1245,12 +1252,27 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var uri = THREAD_LOCAL_STRB.get();
 		uri.setLength(0);
 		try {
-			uri.append(SLASH).append(bucket).append(SLASH);
+			appendManifestBucket(uri.append(SLASH), bucket).append(SLASH);
 			appendPercentEncodedPath(uri, target.key());
 			return uri.toString();
 		} finally {
 			uri.setLength(0);
 		}
+	}
+
+	/**
+	 * Appends a manifest bucket's name without the one trailing slash it may be written with, so that
+	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does. The
+	 * name is always appended whole, as before, and the slash then dropped: appending a span of a
+	 * string is slower than appending it whole and shortening the builder.
+	 */
+	private static StringBuilder appendManifestBucket(final StringBuilder sb, final String bucket) {
+		sb.append(bucket);
+		final int last = bucket.length() - 1;
+		if (last > 0 && bucket.charAt(last) == '/') {
+			sb.setLength(sb.length() - 1);
+		}
+		return sb;
 	}
 
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
@@ -1265,7 +1287,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		final String bucketPath = SLASH + target.bucket();
+		// The same key prepare() stores the bucket's credential under.
+		final String bucketPath = requestNewPathCacheKey(SLASH + target.bucket());
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,
@@ -1320,6 +1343,55 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 								.append(URI_HEX_DIGITS[ch & 0xF]);
 			}
 		}
+	}
+
+	/**
+	 * {@code path} with each character that a target never reads as part of the key percent-encoded:
+	 * {@code ?} as {@code %3F}, {@code #} as {@code %23} and a space as {@code %20}. Sent raw, a
+	 * {@code ?} starts the query, so the request names another key; a {@code #} starts a fragment; and
+	 * Netty refuses a space before sending. Every other character is sent as before, so a key that
+	 * holds a valid {@code %XX} still reaches the object it reached. The path is signed as sent.
+	 */
+	@Override
+	protected String requestPath(final String path) {
+		return encodeKeyQueryChars(path);
+	}
+
+	/**
+	 * {@link #requestPath}'s encoding. When no character needs encoding, as in every generated name,
+	 * it returns {@code path} itself and allocates nothing. The search uses {@link String#indexOf(int)}
+	 * for each character.
+	 */
+	static String encodeKeyQueryChars(final String path) {
+		final int first = firstOf(firstOf(path.indexOf('?'), path.indexOf('#')), path.indexOf(' '));
+		return first < 0 ? path : encodeKeyQueryChars(path, first);
+	}
+
+	/** The lower of two {@link String#indexOf(int)} results, or -1 when both are -1. */
+	private static int firstOf(final int a, final int b) {
+		if (a < 0) {
+			return b;
+		}
+		return b < 0 ? a : Math.min(a, b);
+	}
+
+	private static String encodeKeyQueryChars(final String path, final int first) {
+		final int length = path.length();
+		final var out = new StringBuilder(length + 8);
+		out.append(path, 0, first);
+		for (int i = first; i < length; i++) {
+			final char ch = path.charAt(i);
+			if (isKeyQueryChar(ch)) {
+				out.append('%').append(URI_HEX_DIGITS[(ch >>> 4) & 0xF]).append(URI_HEX_DIGITS[ch & 0xF]);
+			} else {
+				out.append(ch);
+			}
+		}
+		return out.toString();
+	}
+
+	private static boolean isKeyQueryChar(final char ch) {
+		return ch == '?' || ch == '#' || ch == ' ';
 	}
 
 	private static void appendXmlText(final StringBuilder escaped, final String value) {
@@ -1837,7 +1909,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (srcPath != null && !srcPath.isEmpty()) {
 			throw new AssertionError("Multipart copy operation is not implemented yet");
 		}
-		final var uri = dataUriPath(item, srcPath, op.dstPath(), OpType.CREATE) + "?uploads";
+		final var uri = requestPath(dataUriPath(item, srcPath, op.dstPath(), OpType.CREATE)) + "?uploads";
 		final var httpHeaders = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1860,7 +1932,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final PartialDataOperation partialDataOp, final String nodeAddr) {
 		final var item = (I) partialDataOp.item();
 		final var srcPath = partialDataOp.srcPath();
-		final var uri = dataUriPath(item, srcPath, partialDataOp.dstPath(), OpType.CREATE)
+		final var uri = requestPath(dataUriPath(item, srcPath, partialDataOp.dstPath(), OpType.CREATE))
 						+ "?partNumber="
 						+ (partialDataOp.partNumber() + 1)
 						+ "&uploadId="
@@ -1891,7 +1963,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var parentOp = partialOp.parent();
 		final var item = (I) parentOp.item();
 		final var srcPath = partialOp.srcPath();
-		final var uri = dataUriPath(item, srcPath, partialOp.dstPath(), OpType.READ);
+		final var uri = requestPath(dataUriPath(item, srcPath, partialOp.dstPath(), OpType.READ));
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1953,7 +2025,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var srcPath = mpuTask.srcPath();
 		final var item = (I) mpuTask.item();
 		final var uploadId = mpuTask.get(S3Api.KEY_UPLOAD_ID);
-		final var uri = dataUriPath(item, srcPath, mpuTask.dstPath(), OpType.CREATE) + "?uploadId=" + uploadId;
+		final var uri = requestPath(dataUriPath(item, srcPath, mpuTask.dstPath(), OpType.CREATE)) + "?uploadId=" + uploadId;
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = HttpMethod.POST;
@@ -1977,7 +2049,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final CompositeDataOperation mpuTask, final String nodeAddr) {
 		final var item = (I) mpuTask.item();
 		final var uploadId = mpuTask.get(S3Api.KEY_UPLOAD_ID);
-		final var uri = dataUriPath(item, mpuTask.srcPath(), mpuTask.dstPath(), OpType.CREATE)
+		final var uri = requestPath(dataUriPath(item, mpuTask.srcPath(), mpuTask.dstPath(), OpType.CREATE))
 						+ "?uploadId=" + uploadId;
 		final var httpHeaders = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
@@ -2123,7 +2195,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										|| OpType.STAT.equals(opType));
 		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
 		final String uri;
-		if (!useVersionQuery) {
+		final String encodedItemUri = requestPath(itemUri);
+		if (!encodedItemUri.equals(itemUri)) {
+			// The path holds a character it must not carry raw (requestPath returns itemUri itself when it
+			// changes nothing, so the test is a reference comparison then): the key's path is encoded on its
+			// own, after the ~versionId is cut off the name, so the cut does not depend on the encoding.
+			final String keyPath = legacyVersion ? requestPath(itemUri.substring(0, keyEnd)) : encodedItemUri;
+			uri = useVersionQuery ? keyPath + VERSION_ID_QUERY + encodedVersionId : keyPath;
+		} else if (!useVersionQuery) {
 			uri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
 		} else if (legacyVersion && encodedVersionId.length() == versionId.length()) {
 			// itemUri is <the key's path>~<versionId>, and the version ID needs no encoding (encoding
@@ -2204,7 +2283,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	FullHttpRequest objectTaggingRequest(final O op, final String nodeAddr) {
 		final var srcPath = op.srcPath();
 		final var item = (I) op.item();
-		final var uri = dataUriPath(item, srcPath, op.dstPath(), OpType.CREATE) + "?tagging";
+		final var uri = requestPath(dataUriPath(item, srcPath, op.dstPath(), OpType.CREATE)) + "?tagging";
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var opType = op.type();
@@ -3142,7 +3221,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void applyCopyHeaders(final HttpHeaders httpHeaders, final String srcPath)
 					throws URISyntaxException {
-		httpHeaders.set(S3Api.KEY_X_AMZ_COPY_SOURCE, srcPath);
+		httpHeaders.set(S3Api.KEY_X_AMZ_COPY_SOURCE, requestPath(srcPath));
 	}
 
 	private static final byte[] HEX_ARRAY = "0123456789abcdef".getBytes(StandardCharsets.US_ASCII);

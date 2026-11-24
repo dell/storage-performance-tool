@@ -193,6 +193,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
 	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
 	private final DeleteArtifactRecorder deleteArtifactRecorder;
+	// A standalone DELETE outside duration mode shuts down and stops once: the shutdown and stop that
+	// close() repeats after a failed one return, so the close reaches doClose. The failure was thrown
+	// by the first attempt and is the slice's to keep. Duration mode retries its stop until the slice
+	// gives up (releaseAfterFailedStop); other workloads retry as before. Read and written under the
+	// lifecycle lock.
+	private boolean shutdownAttempted;
+	private boolean shutdownFailed;
+	private boolean stopAttempted;
+	private volatile boolean stopRetriesAbandoned;
 	private final Path deleteSelectionManifest;
 	private final DeleteOperationalOutcomeLedger deleteTargetOutcomes;
 	private final AtomicReference<DeleteVerificationReport> deletePreValidationReport = new AtomicReference<>();
@@ -362,6 +371,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final String immutableListRootPrefix,
 					final Config explicitItemConfig,
 					final DeleteArtifactRecorderFactory deleteArtifactRecorderFactory) {
+		// Registered at the end, once its fields are set: a constructor that throws leaves nothing registered.
+		super(true);
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
@@ -534,6 +545,39 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			closeDeleteVerificationStorage();
 			throw failure;
 		}
+		warnIfSizeLimitCannotStop(configSizeLimit.get(), standaloneDelete.enabled());
+		registerForCloseAll();
+	}
+
+	/**
+	 * Warns once, at construction, when this load has a size limit but its primary metrics
+	 * context counts operations that transfer no body: such a load is never stopped by the size
+	 * limit, which counts transferred bytes. A mixed step's primary context is its first enabled
+	 * type, so it warns only when that type is bodyless.
+	 */
+	private void warnIfSizeLimitCannotStop(final long configuredSizeLimit, final boolean standaloneDeleteFlag) {
+		if (configuredSizeLimit <= 0) {
+			return;
+		}
+		final OpType bodylessType;
+		if (standaloneDeleteFlag) {
+			bodylessType = OpType.DELETE;
+		} else {
+			final OpType primaryType = metricsCtx == null ? null : metricsCtx.opType();
+			bodylessType = OpType.DELETE.equals(primaryType) || OpType.STAT.equals(primaryType)
+							|| OpType.NOOP.equals(primaryType)
+											? primaryType
+											: null;
+		}
+		if (bodylessType != null) {
+			Loggers.ERR.warn(
+							"{}: load.step.limit.size counts transferred bytes, and {} operations transfer none, so this"
+											+ " load is not stopped by the size limit of {}; it ends at its count limit, the"
+											+ " step's time limit, or the end of its items",
+							id,
+							bodylessType,
+							BinarySizeFormat.formatFixedSize(configuredSizeLimit));
+		}
 	}
 
 	/**
@@ -575,7 +619,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
-	public boolean isDone() {
+	public void checkTerminalFailure() {
 		if (rangeRuntime != null && rangeRuntime.failure() != null)
 			throw rangeRuntime.failure();
 		final var generatorFailure = generator.terminalFailure();
@@ -586,6 +630,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driverFailure != null) {
 			throw driverFailure;
 		}
+	}
+
+	@Override
+	public boolean isDone() {
+		checkTerminalFailure();
 		if (!STARTED.equals(state()) && !SHUTDOWN.equals(state())) {
 			Loggers.MSG.debug("{}: done due to {} state", id, state());
 			return true;
@@ -606,9 +655,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		if (rangeRuntime != null) {
+			// Read order matters with recycling: the result count first, the generated count last,
+			// custody, pending results and the recycle queue between them (the order of the generic
+			// recycle dry check). A result published and its successor generated during this check
+			// then raise the generated count past the earlier result count, so the check fails.
+			final long resultCount = counterResults.sum();
 			return generator.isItemInputFinished() && !operationLifecycle.hasOutstandingOperations()
-							&& !rangeRuntime.hasPendingResults() && counterResults.sum() >= generator.generatedOpCount()
-							&& (!recycleFlag || generator.isNothingToRecycle());
+							&& !rangeRuntime.hasPendingResults()
+							&& (!recycleFlag || generator.isNothingToRecycle())
+							&& resultCount >= generator.generatedOpCount();
 		}
 		if (listPathWorkload) {
 			// LIST continuations can leave the recycle queue before generated/active
@@ -1791,8 +1846,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	/** Range-only optional output; generic output swallows some rejections and cannot be reused. */
 	private void outputRangeResult(final O op) {
 		try {
-			if (tracePersistFlag)
-				Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+			if (tracePersistFlag) {
+				// A settled range result may be published from a generator or pool thread.
+				try (final Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, id)) {
+					Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+				}
+			}
 			if (op.status() != Status.SUCC)
 				return;
 			if (opsResultsOutput != null && !opsResultsOutput.put(op))
@@ -2490,8 +2549,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// historical active-concurrency wait behavior.
 				awaitOutstanding(() -> activeOpCount() != 0, deadlineNanos);
 			}
-			if (rangeRuntime != null)
+			if (rangeRuntime != null) {
+				if (!waitOpFinishBeforeStop) {
+					// Without the in-flight wait, a range result settled before the stop, or a success the
+					// deadline settled whose transport callback is still queued, may still be on its way
+					// to output; deliver it within the same bound instead of failing it.
+					awaitOutstanding(rangeRuntime::hasPendingResults, deadlineNanos);
+				}
 				rangeRuntime.finishResults();
+			}
 			operationDrainComplete.set(true);
 			if (rangeRuntime != null && rangeRuntime.failure() != null)
 				throw rangeRuntime.failure();
@@ -2589,45 +2655,108 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	/** Whether a shutdown or stop that already ran returns when repeated (see shutdownAttempted). */
+	private boolean runsOnce() {
+		return stopRetriesAbandoned || (standaloneDeleteEnabled && !standaloneDeleteDurationMode);
+	}
+
 	@Override
 	protected final void doShutdown() {
-		// Close both admission gates before retry settlement or recovery. Only operations
-		// already past actual driver dispatch remain drain-eligible.
-		prepareOperationDrain();
-		drainDispatchedOperations();
-		verifyDeleteInventoryForDirectLifecycle();
-		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
-						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			driver.shutdown();
-			Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
-		} catch (final RemoteException e) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+		if (shutdownAttempted && runsOnce()) {
+			return;
 		}
+		if (stopRetriesAbandoned) {
+			// Given up before any shutdown: the close releases the context without draining it.
+			shutdownAttempted = true;
+			shutdownFailed = true;
+			return;
+		}
+		// Set before the attempt, cleared once the drain and verification pass: a failure there leaves
+		// it set, so the stop only
+		// releases. A retry that passes, where the shutdown is retried, clears it, and that stop runs
+		// in full.
+		// An interrupt leaves shutdownAttempted unset, so the shutdown runs again when repeated.
+		shutdownFailed = true;
+		try {
+			// Close both admission gates before retry settlement or recovery. Only operations
+			// already past actual driver dispatch remain drain-eligible.
+			prepareOperationDrain();
+			drainDispatchedOperations();
+			// The driver stays up for a failed verification: a duration-mode retry verifies with it,
+			// and the stop that follows a failure stops it.
+			verifyDeleteInventoryForDirectLifecycle();
+			// The drain and verification are complete: a driver shutdown that throws leaves the
+			// evidence for the stop to finish.
+			shutdownFailed = false;
+			try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
+							.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				driver.shutdown();
+				Loggers.MSG.debug("{}: storage driver {} shutdown", id, driver.toString());
+			} catch (final RemoteException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to shutdown the storage driver cleanly", id);
+			}
+		} catch (final RuntimeException e) {
+			shutdownAttempted = true;
+			throw e;
+		}
+		shutdownAttempted = true;
 	}
 
 	@Override
 	protected final void doStop() throws IllegalStateException {
-		// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
-		prepareOperationDrain();
-		drainDispatchedOperations();
-		verifyDeleteInventoryForDirectLifecycle();
-		finalizeDeleteVerificationSummary();
-
-		RuntimeException artifactFailure = null;
-		if (deleteArtifactRecorder != null) {
+		if (stopAttempted && runsOnce()) {
+			return;
+		}
+		if (shutdownFailed || stopRetriesAbandoned) {
+			// The drain or verification did not complete, or the slice gave up: no evidence to
+			// finish and no results to output. Release what the stop owns; the close does the rest.
+			// Fix the summary first: later reads of the context take it, not the closed storage.
+			RuntimeException failure = null;
+			if (standaloneDeleteEnabled) {
+				try {
+					finalizeDeleteVerificationSummary();
+				} catch (final RuntimeException e) {
+					failure = e;
+				}
+			}
+			failure = appendRecoveryFailure(failure, closeDeleteVerificationStorage());
 			try {
+				driver.stop();
+			} catch (final RuntimeException e) {
+				failure = appendRecoveryFailure(failure, e);
+			}
+			stopAttempted = true;
+			if (failure != null) {
+				throw failure;
+			}
+			return;
+		}
+		RuntimeException artifactFailure = null;
+		try {
+			// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
+			prepareOperationDrain();
+			drainDispatchedOperations();
+			verifyDeleteInventoryForDirectLifecycle();
+			finalizeDeleteVerificationSummary();
+			if (deleteArtifactRecorder != null) {
 				deleteArtifactRecorder.finish(
 								operationLifecycle.snapshot(),
 								deleteMetricsSnapshot(),
 								deletePreValidationReport.get(),
 								deletePostVerificationReport.get());
-			} catch (final RuntimeException failure) {
-				artifactFailure = failure;
 			}
+		} catch (final RuntimeException failure) {
+			artifactFailure = failure;
 		}
 		artifactFailure = appendRecoveryFailure(artifactFailure, closeDeleteVerificationStorage());
 
-		driver.stop();
+		try {
+			driver.stop();
+		} catch (final RuntimeException e) {
+			artifactFailure = appendRecoveryFailure(artifactFailure, e);
+		}
+		// Only now: a stop cut short by an interrupt runs again when repeated.
+		stopAttempted = true;
 		if (artifactFailure != null) {
 			throw artifactFailure;
 		}
@@ -2998,6 +3127,22 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			i++;
 		}
 		return a.substring(0, i);
+	}
+
+	@Override
+	public final void releaseAfterFailedStop() throws IOException {
+		stopRetriesAbandoned = true;
+		RuntimeException stopFailure = null;
+		try {
+			// Runs once now: the stop that close() repeats returns, whatever this one throws.
+			stop();
+		} catch (final RuntimeException e) {
+			stopFailure = e;
+		}
+		close();
+		if (stopFailure != null) {
+			throw stopFailure;
+		}
 	}
 
 	@Override

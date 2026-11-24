@@ -11,6 +11,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -150,5 +153,114 @@ class SingleTaskExecutorImplTest {
 		final CountDownLatch nextLatch = new CountDownLatch(1);
 		executor.execute(nextLatch::countDown);
 		assertTrue(nextLatch.await(5, TimeUnit.SECONDS));
+	}
+
+	@Test
+	void anInterruptThatWasNotAStopLeavesTheWorkerToRunTheNextTask() throws InterruptedException {
+		final var firstThread = new AtomicReference<Thread>();
+		final Runnable interrupted = () -> {
+			firstThread.set(Thread.currentThread());
+			throwUnchecked(new InterruptedException("not a stop"));
+		};
+		executor.execute(interrupted);
+		awaitSlotCleared();
+
+		final var next = nextTask();
+
+		assertTrue(next.ran.await(5, TimeUnit.SECONDS), "the worker ended with the interrupt");
+		assertSame(firstThread.get(), next.thread.get(), "no stop was requested, so the worker is the same");
+		assertFalse(next.interrupted.get(), "the next task started interrupted");
+	}
+
+	@Test
+	void aTaskThatEndsWithItsInterruptFlagSetDoesNotInterruptTheNextTask() throws InterruptedException {
+		// The next task is submitted as soon as the slot frees, before the worker can park, which would
+		// clear the flag on its own
+		for (int i = 0; i < 1000; i++) {
+			final var finished = new AtomicBoolean();
+			final var next = new NextTask();
+			final Runnable nextTask = () -> {
+				next.thread.set(Thread.currentThread());
+				next.interrupted.set(Thread.currentThread().isInterrupted());
+				next.ran.countDown();
+			};
+			final var submitter = new Thread(() -> {
+				while (!finished.get()) {
+					Thread.onSpinWait();
+				}
+				while (true) {
+					try {
+						executor.execute(nextTask);
+						return;
+					} catch (final RejectedExecutionException busy) {
+						Thread.onSpinWait();
+					}
+				}
+			});
+			submitter.start();
+			executor.execute(() -> {
+				Thread.currentThread().interrupt();
+				finished.set(true);
+			});
+
+			assertTrue(next.ran.await(5, TimeUnit.SECONDS));
+			assertFalse(next.interrupted.get(), "the next task started interrupted, round " + i);
+			submitter.join(5000);
+			awaitSlotCleared();
+		}
+	}
+
+	@Test
+	void aStoppedTaskEndsQuietlyWithExactlyOneReplacementWorker() throws InterruptedException {
+		final var started = new CountDownLatch(1);
+		final var stoppedThread = new AtomicReference<Thread>();
+		final Runnable task = () -> {
+			stoppedThread.set(Thread.currentThread());
+			started.countDown();
+			try {
+				new CountDownLatch(1).await();
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		};
+		executor.execute(task);
+		assertTrue(started.await(5, TimeUnit.SECONDS));
+		assertTrue(executor.stop(task));
+		stoppedThread.get().join(5000);
+		assertFalse(stoppedThread.get().isAlive(), "the stopped worker did not end");
+
+		final var second = nextTask();
+		assertTrue(second.ran.await(5, TimeUnit.SECONDS));
+		awaitSlotCleared();
+		final var third = nextTask();
+		assertTrue(third.ran.await(5, TimeUnit.SECONDS));
+
+		assertNotSame(stoppedThread.get(), second.thread.get());
+		assertSame(second.thread.get(), third.thread.get(), "a stop starts exactly one replacement worker");
+		assertFalse(second.interrupted.get());
+	}
+
+	private NextTask nextTask() {
+		final var next = new NextTask();
+		executor.execute(() -> {
+			next.thread.set(Thread.currentThread());
+			next.interrupted.set(Thread.currentThread().isInterrupted());
+			next.ran.countDown();
+		});
+		return next;
+	}
+
+	private void awaitSlotCleared() throws InterruptedException {
+		final long deadline = System.currentTimeMillis() + 5000;
+		while (executor.task() != null && System.currentTimeMillis() < deadline) {
+			Thread.sleep(10);
+		}
+		assertNull(executor.task(), "the task did not end");
+	}
+
+	private static final class NextTask {
+		private final CountDownLatch ran = new CountDownLatch(1);
+		private final AtomicReference<Thread> thread = new AtomicReference<>();
+		private final AtomicBoolean interrupted = new AtomicBoolean();
 	}
 }

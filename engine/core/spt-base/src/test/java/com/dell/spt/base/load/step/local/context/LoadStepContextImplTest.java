@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -205,6 +206,29 @@ public class LoadStepContextImplTest {
 		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
 		when(generator.isNothingPendingRetry()).thenReturn(true);
 		return generator;
+	}
+
+	/** The await's sweep relies on this check: the failure {@code isDone()} throws, and nothing else. */
+	@Test
+	void theTerminalFailureCheckThrowsWhatIsDoneThrowsAndReadsNoLimit() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		final var context = new LoadStepContextImpl<>(
+						"failure-check-context", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			assertDoesNotThrow(context::checkTerminalFailure);
+			verify(generator, never()).isItemInputFinished();
+			verify(generator, never()).generatedOpCount();
+
+			final IntegrityTerminalException failure = new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION, "driver failed");
+			when(driver.terminalFailure()).thenReturn(failure);
+			assertSame(failure, assertThrows(IntegrityTerminalException.class, context::checkTerminalFailure));
+			assertSame(failure, assertThrows(IntegrityTerminalException.class, context::isDone));
+		} finally {
+			context.close();
+		}
 	}
 
 	@Test

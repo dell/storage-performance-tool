@@ -80,7 +80,7 @@ func stubAPIPortRunRoutes(t *testing.T) *apiPortRunCalls {
 		startMultiHostHeadlessRunFunc = previousRemote
 	})
 	got := &apiPortRunCalls{errReached: errors.New("the run reached its route")}
-	resolvePortConflictFunc = func(_ context.Context, port string, _ bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(_ context.Context, port string, _ portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		got.calls++
 		got.checkedPort = port
 		return nil, got.errReached
@@ -188,7 +188,7 @@ func TestReplayCommandRefusesAnAPIPortOutsideTheTCPRange(t *testing.T) {
 	defer source.Close()
 	t.Cleanup(installReplayEngineInfoSeams(t))
 	var calls atomic.Int32
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		calls.Add(1)
 		return nil, errors.New("the replay checked its port")
 	}
@@ -282,7 +282,7 @@ func runReplayToLaunchWithAPIPort(t *testing.T, server *httptest.Server, hosts, 
 	t.Helper()
 	t.Cleanup(installReplayEngineInfoSeams(t))
 	var got replayAPIPorts
-	resolvePortConflictFunc = func(_ context.Context, port string, _ bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(_ context.Context, port string, _ portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		got.checked = true
 		got.checkedPort = port
 		return &portcheck.ResolutionResult{Success: true}, nil

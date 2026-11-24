@@ -152,8 +152,11 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	/**
 	 * Construction-selected deadline settlement for retained-outcome workloads. The callback
-	 * returns whether it committed recovery, must remain bounded, and must not invoke output or
-	 * transport code. Ordinary trackers keep their existing recovery behavior.
+	 * returns whether it committed recovery and must remain bounded: it runs on the draining
+	 * thread after the drain bound, so it must not invoke transport code or any output that can
+	 * wait on a consumer (item, timing or pipeline handoff output, recycling). It may publish a
+	 * settled failure, whose only output is its optional op-trace row. Ordinary trackers keep
+	 * their existing recovery behavior.
 	 */
 	public static <O extends Operation<? extends Item>> OperationLifecycleTracker<O> withDeadlineSettlement(
 					final BiPredicate<O, OperationLifecycleTracker<O>> settlement) {

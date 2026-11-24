@@ -50,6 +50,20 @@ public final class NicAdmission {
 	@FunctionalInterface
 	interface Gate {
 		boolean servesNow();
+
+		/**
+		 * An attempt on the NIC ended with no response; every one, also while a trial interval runs.
+		 * Runs {@code markFailing}, the admission's own update, under the same lock as the gate's, so the
+		 * two cannot disagree after a racing {@link #answered}.
+		 */
+		default void failedWithoutAnswer(final Runnable markFailing) {
+			markFailing.run();
+		}
+
+		/** An attempt on the failing NIC got a response; runs {@code markAnswered} as above. */
+		default void answered(final Runnable markAnswered) {
+			markAnswered.run();
+		}
 	}
 
 	/** Runs a task once, after a delay; the NIC set's event loops. */
@@ -211,7 +225,21 @@ public final class NicAdmission {
 	 */
 	private boolean trialReady(final int nic) {
 		return trials.get(nic) == 0 && counts.get(nic) == 0 && nanoClock.getAsLong() - trialAfter.get(nic) >= 0
-						&& gates[nic].servesNow();
+						&& anyWorking() && gates[nic].servesNow();
+	}
+
+	/**
+	 * Whether a NIC is not failing. Only then is a trial asked of the gate: with every NIC failing the
+	 * rotation takes the attempt, and a recovery connect started by the gate would take the Path's
+	 * connect trial from it.
+	 */
+	private boolean anyWorking() {
+		for (var nic = 0; nic < limits.length; nic++) {
+			if (failing.get(nic) == 0) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -329,6 +357,10 @@ public final class NicAdmission {
 	 * nothing. Reported before the attempt gives back its NIC.
 	 */
 	public void failed(final int nic) {
+		gates[nic].failedWithoutAnswer(() -> markFailed(nic));
+	}
+
+	private void markFailed(final int nic) {
 		final int inRow = failing.get(nic);
 		final long now = nanoClock.getAsLong();
 		if (inRow != 0 && now - trialAfter.get(nic) < 0) {
@@ -346,7 +378,7 @@ public final class NicAdmission {
 	 */
 	public void answered(final int nic) {
 		if (failing.get(nic) != 0) {
-			failing.set(nic, 0);
+			gates[nic].answered(() -> failing.set(nic, 0));
 		}
 	}
 

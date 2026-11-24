@@ -359,9 +359,9 @@ public class NioStorageDriverBaseTest {
 			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
 			final var stillInterrupted = Thread.interrupted();
 
-			// A worker that outlives the stop wait still fails the stop, as before.
-			assertInstanceOf(IllegalStateException.class, stopFailure, () -> "the stop threw " + stopFailure);
-			assertTrue(stopFailure.getMessage().contains("NIO worker termination"), stopFailure.getMessage());
+			// A worker that outlives the stop wait is warned about and left behind; the stop goes on.
+			assertNull(stopFailure, () -> "the stop threw " + stopFailure);
+			assertTrue(drv.isStopped());
 			assertTrue(stillInterrupted, "the stop must keep the caller's interrupt");
 			assertTrue(elapsedMillis >= 900, "the interrupt must not skip the wait, which took " + elapsedMillis + " ms");
 			assertTrue(elapsedMillis < 2500, "the wait keeps its one-second bound but took " + elapsedMillis + " ms");
@@ -370,6 +370,137 @@ public class NioStorageDriverBaseTest {
 			drv.releaseInvoke.countDown();
 			drv.close();
 		}
+	}
+
+	@Test
+	@Timeout(30)
+	void aStopThatOutlivesAWorkerWarnsOnceWaitsOnceAndStillCloses() throws Exception {
+		final var appender = new CapturingAppender();
+		appender.start();
+		final var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+		logger.addAppender(appender);
+		final var drv = new StuckInvokeDriver("test-nio-stuck-warn", dataInput, buildStorageConfig(2, 2), false, 16);
+		drv.operationResultOutput(results);
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("stuck-warn", 256)));
+			assertTrue(drv.invokeEntered.await(2, TimeUnit.SECONDS));
+			final var workerThreads = workerThreadsOf(drv);
+			// As the step's bounded drain does before it stops the driver: the late operation is
+			// settled unresolved, and an unresolved operation cannot become terminal later.
+			assertEquals(1, drv.operationLifecycle().resolveOutstandingAsUnresolved());
+
+			final long startedAt = System.nanoTime();
+			final var shutdownFailure = thrownBy(drv::shutdown);
+			final var stopFailure = thrownBy(drv::stop);
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+			assertNull(shutdownFailure, () -> "the shutdown threw " + shutdownFailure);
+			assertNull(stopFailure, () -> "the stop threw " + stopFailure);
+			assertTrue(drv.isStopped());
+			assertTrue(elapsedMillis >= 900, "the shutdown must wait for the worker, which took " + elapsedMillis + " ms");
+			// The stop after the shutdown does not wait a second time.
+			assertTrue(elapsedMillis < 1800, "the shutdown and stop must wait once but took " + elapsedMillis + " ms");
+			final var warnings = appender.awaitLateWorkerWarnings(1, 2_000);
+			assertEquals(1, warnings.size(), () -> "one warning per driver, got " + warnings);
+			assertEquals(Level.WARN, warnings.get(0).getLevel());
+			assertTrue(warnings.get(0).getMessage().getFormattedMessage().contains("1 of 2 I/O workers"),
+							warnings.get(0).getMessage().getFormattedMessage());
+
+			final var closeFailure = thrownBy(drv::close);
+			assertNull(closeFailure, () -> "the close threw " + closeFailure);
+			assertTrue(drv.isClosed());
+			appender.flush(logger);
+			assertEquals(1, appender.lateWorkerWarnings().size(), "the close logs no second late-worker warning");
+
+			// The worker released after the close ends quietly.
+			final int eventsBeforeRelease = appender.events.size();
+			drv.releaseInvoke.countDown();
+			for (final var thread : workerThreads) {
+				thread.join(TimeUnit.SECONDS.toMillis(LIVENESS_SECONDS));
+				assertFalse(thread.isAlive(), "I/O worker " + thread + " still runs after its release");
+			}
+			appender.flush(logger);
+			final List<LogEvent> later;
+			synchronized (appender.events) {
+				later = List.copyOf(appender.events.subList(eventsBeforeRelease, appender.events.size()));
+			}
+			assertEquals(1, drv.operationLifecycle().snapshot().unresolved());
+			assertEquals(0, drv.operationLifecycle().snapshot().terminal());
+			assertTrue(later.stream().noneMatch(event -> event.getLevel().isMoreSpecificThan(Level.WARN)
+							&& !event.getMessage().getFormattedMessage().startsWith("capture-flush-")),
+							() -> "the released worker logged " + later);
+		} finally {
+			drv.releaseInvoke.countDown();
+			drv.close();
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+	}
+
+	@Test
+	@Timeout(30)
+	void aRestartAfterAStopThatLeftAWorkerRunningRefusesCleanly() throws Exception {
+		final var drv = new StuckInvokeDriver("test-nio-stuck-restart", dataInput, buildStorageConfig(1, 1), false, 16);
+		drv.operationResultOutput(results);
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("stuck-restart", 256)));
+			assertTrue(drv.invokeEntered.await(2, TimeUnit.SECONDS));
+			final var workerThreads = workerThreadsOf(drv);
+			drv.stop();
+			assertTrue(drv.isStopped());
+
+			for (var attempt = 0; attempt < 2; attempt++) {
+				final var startFailure = thrownBy(drv::start);
+				assertInstanceOf(IllegalStateException.class, startFailure, () -> "the restart threw " + startFailure);
+				assertTrue(startFailure.getMessage().contains("cannot restart"), startFailure.getMessage());
+				assertTrue(drv.isStopped(), "a refused restart leaves the driver stopped");
+			}
+
+			// Once the late worker has ended, the driver restarts and serves operations again.
+			drv.releaseInvoke.countDown();
+			for (final var thread : workerThreads) {
+				thread.join(TimeUnit.SECONDS.toMillis(LIVENESS_SECONDS));
+				assertFalse(thread.isAlive(), "I/O worker " + thread + " still runs after its release");
+			}
+			drv.start();
+			assertTrue(drv.isStarted());
+			assertTrue(drv.put(newCreateOp("after-restart", 256)));
+			Operation<DataItemImpl> done;
+			do {
+				done = results.await(TimeUnit.SECONDS.toMillis(LIVENESS_SECONDS));
+				assertNotNull(done, "the restarted driver completes an operation");
+			} while (!done.item().name().endsWith("after-restart"));
+			assertEquals(Operation.Status.SUCC, done.status());
+			drv.stop();
+		} finally {
+			drv.releaseInvoke.countDown();
+			drv.close();
+		}
+	}
+
+	@Test
+	@Timeout(30)
+	void aStopWhoseWorkersEndInTimeLogsNoLateWorkerWarning() throws Exception {
+		final var appender = new CapturingAppender();
+		appender.start();
+		final var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+		logger.addAppender(appender);
+		try (var drv = newDriver(buildStorageConfig(4, 2))) {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("clean-stop", 256)));
+			assertNotNull(results.await(2_000));
+			drv.stop();
+			assertTrue(drv.isStopped());
+			drv.start();
+			drv.stop();
+			appender.flush(logger);
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+		assertEquals(List.of(), appender.lateWorkerWarnings());
 	}
 
 	/** What {@code call} threw, or null; it does not touch the interrupt flag. */
@@ -1567,6 +1698,47 @@ public class NioStorageDriverBaseTest {
 				Thread.sleep(1);
 			} while (System.nanoTime() < deadline);
 			return matchingNioFailureEvents();
+		}
+
+		/**
+		 * Logs a marker on {@code logger} and waits until it arrives, so that every event logged
+		 * before it has arrived too; a later check for an absent event then means something.
+		 */
+		private void flush(final org.apache.logging.log4j.core.Logger logger) throws InterruptedException {
+			final var marker = "capture-flush-" + System.nanoTime();
+			logger.warn(marker);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(LIVENESS_SECONDS);
+			while (System.nanoTime() < deadline) {
+				synchronized (events) {
+					if (events.stream().anyMatch(event -> event.getMessage().getFormattedMessage().equals(marker))) {
+						return;
+					}
+				}
+				Thread.sleep(1);
+			}
+			fail("the log marker did not arrive");
+		}
+
+		private List<LogEvent> awaitLateWorkerWarnings(final int expected, final long timeoutMs)
+						throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+			List<LogEvent> matching;
+			do {
+				matching = lateWorkerWarnings();
+				if (matching.size() >= expected) {
+					return matching;
+				}
+				Thread.sleep(1);
+			} while (System.nanoTime() < deadline);
+			return lateWorkerWarnings();
+		}
+
+		private List<LogEvent> lateWorkerWarnings() {
+			synchronized (events) {
+				return events.stream()
+								.filter(event -> event.getMessage().getFormattedMessage().contains("did not stop within"))
+								.toList();
+			}
 		}
 
 		private List<LogEvent> matchingNioFailureEvents() {

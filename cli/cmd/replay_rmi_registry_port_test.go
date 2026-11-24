@@ -85,7 +85,7 @@ func runReplayToLaunch(t *testing.T, server *httptest.Server, hosts string, head
 	t.Helper()
 	t.Cleanup(installReplayEngineInfoSeams(t))
 	var got replayEnginePorts
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{Success: true}, nil
 	}
 	connectReplayOrchestrator = func(_ context.Context, orchestrator *tui.MultiHostOrchestrator) error {

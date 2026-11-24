@@ -12,6 +12,15 @@ Storage-side concatenation (further - ***SSC***).
 4. Cooperative storage drivers derive composite operation scheduling limits and apply bounded
  child-operation backpressure. Setting `load-batch-size=1` remains a conservative troubleshooting
  option, but it is no longer required to prevent dropped child operations.
+5. A storage driver whose class names the marker interface `CompositeOperationsUnsupported` in its
+ own `implements` clause, as `fs`, `atmos` and `s3-tables` do, has an `item-data-ranges-threshold`
+ above 0 for a CREATE or a READ refused at step start by `CompositeOperationSupport.requireSupport`.
+ The entry engine's step client checks each appended context before it distributes any item
+ input, and the base on its own driver before that driver's item input is built; the load
+ generator builder and the `mixed` step check again in each step slice, before any operation is
+ built. Every other driver, a driver built outside the engine among them, accepts the threshold.
+ Only the runtime class's own `implements` clause counts: a subclass of a refusing driver, and a
+ driver that wraps one, accept the threshold unless their own class names the marker.
 
 # Approach
 

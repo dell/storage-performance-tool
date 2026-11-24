@@ -1,0 +1,23 @@
+# Trimmed from a fetched step config.yaml (spt run mixed, --duration 12s,
+# load.op.limit.fail.count=20); only the keys around the limits are kept.
+output:
+  metrics:
+    summary:
+      persist: true
+load:
+  op:
+    type: "create"
+    limit:
+      count: 0
+      recycle: 1000000
+      fail:
+        count: 20
+        rate: false
+      rate: 0.0
+    recycle:
+      mode: false
+  step:
+    limit:
+      size: 0
+      time: "12s"
+    id: "mt-002-20261121.002840.821-mixed"

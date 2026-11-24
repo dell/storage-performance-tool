@@ -51,7 +51,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Part;
 
-import com.github.akurilov.confuse.impl.BasicConfig;
 import org.apache.logging.log4j.Level;
 import org.eclipse.jetty.http.HttpHeader;
 
@@ -343,11 +342,12 @@ public class RunServlet extends HttpServlet {
 
 	/**
 	 * Requests cancellation of the active API run and waits for its cleanup and
-	 * terminal-status publication. A false return means the bounded wait expired.
+	 * terminal-status publication. A run a {@code DELETE} has already stopped is still active until then,
+	 * so this waits for it too. A false return means the bounded wait expired.
 	 */
 	public boolean stopActiveRunAndAwait(final long timeout, final TimeUnit timeUnit)
 					throws InterruptedException {
-		final var activeTask = scenarioExecutor.task();
+		final var activeTask = activeTask();
 		if (activeTask == null) {
 			return true;
 		}
@@ -410,6 +410,10 @@ public class RunServlet extends HttpServlet {
 			} catch (final Exception e) {
 				// A step refused at JVM exit ends the scenario with this: a stop, not an uncaught failure.
 				if (!(e instanceof InterruptedException && JvmExit.begun())) {
+					if (e instanceof InterruptedException) {
+						// An interrupt no stop requested is a failure; a requested stop still wins below
+						failure = e;
+					}
 					throw e;
 				}
 			} finally {
@@ -477,8 +481,9 @@ public class RunServlet extends HttpServlet {
 		final Config configResult;
 		boolean runVersionOverrideAttempted = false;
 		if (defaultsPart == null) {
-			// NOTE: If custom config hasn't been specified in POST request, set the default one
-			configResult = new BasicConfig(aggregatedConfigWithArgs);
+			// NOTE: If custom config hasn't been specified in POST request, set the default one. The run
+			// gets its own maps and lists: what it sets must not stay on the node for later runs.
+			configResult = ConfigUtil.copyOf(aggregatedConfigWithArgs);
 		} else {
 			final var configIncoming = configFromPart(defaultsPart, resp, aggregatedConfigWithArgs.schema());
 			runVersionOverrideAttempted = containsRunVersion(configIncoming);

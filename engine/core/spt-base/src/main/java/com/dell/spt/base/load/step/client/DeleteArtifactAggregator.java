@@ -21,6 +21,14 @@ import java.util.Locale;
 
 /** Collects per-node DELETE evidence and publishes the canonical aggregate last. */
 final class DeleteArtifactAggregator implements AutoCloseable {
+	/** In the order of {@link SourceNames}' components. */
+	private static final List<String> ARTIFACT_NAMES = List.of(
+					DeleteArtifacts.METRICS_FILE_NAME,
+					DeleteArtifacts.REQUESTS_FILE_NAME,
+					DeleteArtifacts.OBJECTS_FILE_NAME,
+					DeleteArtifacts.RESIDUAL_FILE_NAME,
+					DeleteArtifacts.VERIFICATION_FILE_NAME);
+
 	private record SourceNames(
 					String totals, String requests, String objects, String residual, String verification) {}
 
@@ -66,33 +74,87 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 
 	@Override
 	public void close() {
+		publish(sourceNames.size());
+	}
+
+	/**
+	 * Publishes the evidence of a step whose start ended as a stop, from its first
+	 * {@code startedSlices} slices: those whose start returned. The others wrote nothing to publish.
+	 * With none, publishes nothing. A missing source of a started slice is still a failure.
+	 */
+	void closeAfterStoppedStart(final int startedSlices) {
+		if (startedSlices < 0 || startedSlices > sourceNames.size()) {
+			throw new IllegalArgumentException(
+							"started slices " + startedSlices + " not in 0.." + sourceNames.size());
+		}
+		if (startedSlices > 0) {
+			publish(startedSlices);
+		}
+	}
+
+	private void publish(final int sliceCount) {
 		try {
-			collectAndPublish();
+			collectAndPublish(sliceCount);
 		} catch (final IntegrityTerminalException e) {
 			throw e;
 		} catch (final Exception e) {
+			throwUncheckedIfInterrupted(e);
 			throw new IntegrityTerminalException(
 							Category.AGGREGATION, stepId, "failed to collect and publish DELETE evidence", e);
 		}
 	}
 
-	private void collectAndPublish() throws IOException {
+	private void collectAndPublish(final int sliceCount) throws Exception {
 		DeleteArtifactAggregation.retainSelection(
 						stepId, outputDirectory, selection, selectionCompletion);
 		LogUtil.flushAll();
 		Files.createDirectories(outputDirectory);
-		final List<DeleteArtifactAggregation.NodeSource> sources = new ArrayList<>(sourceNames.size());
-		for (int nodeIndex = 0; nodeIndex < sourceNames.size(); nodeIndex++) {
+		final List<DeleteArtifactAggregation.NodeSource> sources = new ArrayList<>(sliceCount);
+		// Each file on its own, so a missing one costs only itself; a collected one is kept for a retry.
+		Exception failure = null;
+		for (int nodeIndex = 0; nodeIndex < sliceCount; nodeIndex++) {
 			final SourceNames names = sourceNames.get(nodeIndex);
-			sources.add(new DeleteArtifactAggregation.NodeSource(
-							collect(nodeIndex, names.totals(), DeleteArtifacts.METRICS_FILE_NAME),
-							collect(nodeIndex, names.requests(), DeleteArtifacts.REQUESTS_FILE_NAME),
-							collect(nodeIndex, names.objects(), DeleteArtifacts.OBJECTS_FILE_NAME),
-							collect(nodeIndex, names.residual(), DeleteArtifacts.RESIDUAL_FILE_NAME),
-							collect(nodeIndex, names.verification(), DeleteArtifacts.VERIFICATION_FILE_NAME)));
+			final List<String> remoteNames = List.of(
+							names.totals(), names.requests(), names.objects(), names.residual(), names.verification());
+			final List<Path> collected = new ArrayList<>(ARTIFACT_NAMES.size());
+			for (int k = 0; k < ARTIFACT_NAMES.size(); k++) {
+				try {
+					collected.add(collect(nodeIndex, remoteNames.get(k), ARTIFACT_NAMES.get(k)));
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					if (CollectionInterrupt.isInterrupt(e)) {
+						// Not a missing file: stop at once, reading no later file or node.
+						throw e;
+					}
+					if (sliceCount > 1) {
+						Loggers.ERR.warn(
+										"{}: failed to collect {} from node-{}: {}",
+										stepId,
+										ARTIFACT_NAMES.get(k),
+										String.format(Locale.ROOT, "%03d", nodeIndex),
+										e.getMessage());
+					}
+					if (failure == null) {
+						failure = e;
+					} else {
+						failure.addSuppressed(e);
+					}
+					if (e.getCause() instanceof LostNodeFileManager.NotCollected) {
+						// The entry reads none of a lost node's files.
+						break;
+					}
+				}
+			}
+			if (collected.size() == ARTIFACT_NAMES.size()) {
+				sources.add(new DeleteArtifactAggregation.NodeSource(
+								collected.get(0), collected.get(1), collected.get(2), collected.get(3), collected.get(4)));
+			}
+		}
+		if (failure != null) {
+			throw failure;
 		}
 		DeleteArtifactAggregation.publish(
-						stepId, outputDirectory, sources, contributorIds, selection, selectionCompletion);
+						stepId, outputDirectory, sources, contributorIds.subList(0, sliceCount), selection, selectionCompletion);
 	}
 
 	private Path collect(final int nodeIndex, final String remoteName, final String artifactName)
@@ -138,6 +200,8 @@ final class DeleteArtifactAggregator implements AutoCloseable {
 					sawData = true;
 					offset = Math.addExact(offset, bytes.length);
 				}
+			} catch (final LostNodeFileManager.NotCollected notRead) {
+				throw new IOException("remote DELETE artifact was not collected, as the entry lost its node's step slice: " + remoteName, notRead);
 			} catch (final EOFException expected) {
 				// FileManager signals normal EOF with this exception.
 			} catch (final Exception e) {

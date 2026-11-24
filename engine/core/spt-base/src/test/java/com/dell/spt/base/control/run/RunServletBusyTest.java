@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -271,6 +272,76 @@ class RunServletBusyTest {
 		awaitIdle();
 		assertEquals(ApiStatus.State.STOPPED, status.state());
 		assertEquals(204, head().status);
+	}
+
+	@Test
+	void aShutdownAfterAStopWaitsForTheStoppedRunsCleanup() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_CLEANUP_SCENARIO).status);
+		probes.awaitBody();
+		assertEquals(200, delete(RUN_A));
+		probes.awaitCleanup();
+		final int interruptsBefore = probes.cleanupInterrupts.get();
+
+		assertFalse(servlet.stopActiveRunAndAwait(100, TimeUnit.MILLISECONDS), "the cleanup is still held");
+
+		final var pool = Executors.newSingleThreadExecutor();
+		try {
+			final var stop = pool.submit(() -> servlet.stopActiveRunAndAwait(AWAIT_SECONDS, TimeUnit.SECONDS));
+			Thread.sleep(100);
+			assertFalse(stop.isDone(), "the shutdown did not wait for the stopped run");
+			assertEquals(ApiStatus.State.RUNNING, status.state());
+			probes.releaseCleanup();
+			assertTrue(stop.get(AWAIT_SECONDS, TimeUnit.SECONDS));
+			assertEquals(ApiStatus.State.STOPPED, status.state());
+		} finally {
+			pool.shutdownNow();
+		}
+		assertEquals(interruptsBefore, probes.cleanupInterrupts.get(), "a repeated stop interrupted the cleanup");
+		assertFalse(probes.cleanupEndedInterrupted, "a repeated stop interrupted the cleanup");
+	}
+
+	@Test
+	void aShutdownOfAnIdleNodeReturnsAtOnce() throws Exception {
+		assertTrue(servlet.stopActiveRunAndAwait(0, TimeUnit.MILLISECONDS));
+	}
+
+	@Test
+	void aShutdownStopsARunningRunAndWaitsForItsCleanup() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", HOLDING_CLEANUP_SCENARIO).status);
+		probes.awaitBody();
+
+		final var pool = Executors.newSingleThreadExecutor();
+		try {
+			final var stop = pool.submit(() -> servlet.stopActiveRunAndAwait(AWAIT_SECONDS, TimeUnit.SECONDS));
+			probes.awaitCleanup();
+			assertFalse(stop.isDone(), "the shutdown did not wait for the cleanup");
+			probes.releaseCleanup();
+			assertTrue(stop.get(AWAIT_SECONDS, TimeUnit.SECONDS));
+			assertEquals(ApiStatus.State.STOPPED, status.state());
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	void aRunInterruptedByAThreadAnEarlierRunLeftFailsAndTheNextRunStarts() throws Exception {
+		assertEquals(202, post(RUN_A, "runA", "Probe.leaveInterrupter();").status);
+		awaitIdle();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
+
+		assertEquals(202, post(RUN_B, "runB", "Probe.awaitInterrupter();").status);
+		awaitIdle();
+		assertEquals(ApiStatus.State.FAILED, status.state(), String.valueOf(status.snapshot()));
+		assertEquals(RUN_B, status.runId());
+
+		final long runC = RUN_A + RUN_B;
+		assertEquals(202, post(runC, "runC", HOLDING_SCENARIO).status);
+		probes.awaitHeld();
+		assertEquals(ApiStatus.State.RUNNING, status.state());
+		probes.release();
+		awaitIdle();
+		assertEquals(ApiStatus.State.COMPLETED, status.state());
+		assertEquals(new Report(runC, "runC", runC), probes.onlyReport());
 	}
 
 	@Test
@@ -536,7 +607,11 @@ class RunServletBusyTest {
 		private final CountDownLatch inBody = new CountDownLatch(1);
 		private final CountDownLatch inCleanup = new CountDownLatch(1);
 		private final CountDownLatch cleanupRelease = new CountDownLatch(1);
+		private final AtomicInteger cleanupInterrupts = new AtomicInteger();
+		private volatile boolean cleanupEndedInterrupted;
 		private volatile boolean failConfigure;
+		/** The thread an interrupter that an earlier run left behind interrupts. */
+		private final CompletableFuture<Thread> interrupterTarget = new CompletableFuture<>();
 
 		@SuppressWarnings({"rawtypes", "unchecked"
 		})
@@ -618,6 +693,25 @@ class RunServletBusyTest {
 			new CountDownLatch(1).await();
 		}
 
+		/** Leaves a thread that outlives this run and interrupts the thread of a later run. */
+		public void leaveInterrupter() {
+			final var interrupter = new Thread(() -> {
+				try {
+					probes.interrupterTarget.get(AWAIT_SECONDS, TimeUnit.SECONDS).interrupt();
+				} catch (final Exception e) {
+					// The later run did not start; its test fails on its own
+				}
+			}, "left-behind-interrupter");
+			interrupter.setDaemon(true);
+			interrupter.start();
+		}
+
+		/** Waits for the thread an earlier run left behind to interrupt this run. */
+		public void awaitInterrupter() throws InterruptedException {
+			probes.interrupterTarget.complete(Thread.currentThread());
+			new CountDownLatch(1).await(AWAIT_SECONDS, TimeUnit.SECONDS);
+		}
+
 		public void holdCleanup() {
 			probes.inCleanup.countDown();
 			// The stop's interruption must not end the held cleanup
@@ -627,9 +721,11 @@ class RunServletBusyTest {
 					probes.cleanupRelease.await();
 					break;
 				} catch (final InterruptedException e) {
+					probes.cleanupInterrupts.incrementAndGet();
 					interrupted = true;
 				}
 			}
+			probes.cleanupEndedInterrupted = interrupted || Thread.currentThread().isInterrupted();
 			if (interrupted) {
 				Thread.currentThread().interrupt();
 			}

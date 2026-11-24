@@ -113,7 +113,11 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	 */
 	void recycle(final O op);
 
-	/** Returns true when the recycle queue is currently empty. */
+	/**
+	 * Returns true when the recycle queue is empty and no recycled operation is still on its way from
+	 * the queue to being counted as generated. A step's dry check relies on the second half: a queue
+	 * that is only momentarily empty while the generator holds polled operations is not dry.
+	 */
 	boolean isNothingToRecycle();
 
 	/**

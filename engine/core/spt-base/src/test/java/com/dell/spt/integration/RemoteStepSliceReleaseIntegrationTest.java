@@ -2,6 +2,7 @@ package com.dell.spt.integration;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -78,6 +79,13 @@ class RemoteStepSliceReleaseIntegrationTest {
 	private static final int FAILING_STEPS = 5;
 	private static final int BALLAST_OPERATIONS = 200_000;
 	private static final long HEAP_GROWTH_LIMIT_BYTES = 16L << 20;
+	private static final String ENTRY_SILENCE_PROPERTY = "spt.step.entrySilenceTimeoutMillis";
+	private static final long ENTRY_SILENCE_MILLIS = 2_000;
+	/**
+	 * The limit for the slice polled every 100 ms: a stall of the polling thread on a loaded runner
+	 * must not reach it, so it is 50 polls long, and the test still runs past it and the start.
+	 */
+	private static final long POLLED_ENTRY_SILENCE_MILLIS = 5_000;
 
 	private final List<WeakReference<List<DataOperationImpl<DataItemImpl>>>> ballasts = new ArrayList<>();
 	private final List<String> stepIds = new ArrayList<>();
@@ -143,6 +151,120 @@ class RemoteStepSliceReleaseIntegrationTest {
 			assertEquals(List.of(), List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()));
 			assertTrue(worker.isClosed());
 		});
+	}
+
+	@Test
+	void aWorkerStopsAndClosesASliceWhoseEntryWentSilent() throws Exception {
+		withEntrySilenceLimit(() -> withWorker((worker, manager, port) -> {
+			final LoadStepService abandoned = newSlice(manager, port);
+			abandoned.start();
+			abandoned.metricsSnapshots();
+
+			awaitClosedContexts(1, ENTRY_SILENCE_MILLIS + 5_000);
+			// The slice's context closes before the service leaves the registry and the open set.
+			awaitNoOpenSlices(worker, 5_000);
+
+			assertThrows(java.rmi.RemoteException.class, abandoned::loadStepId);
+			assertEquals(List.of(), worker.busySliceRunIds());
+			assertFalse(worker.hasOpenSlices(), "the closed slice left the worker's open set");
+			assertEquals(List.of(LoadStepManagerService.SVC_NAME),
+							List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()));
+			assertFalse(worker.isClosed(), "the worker stays up for its next step");
+
+			final LoadStepService next = newSlice(manager, port);
+			next.start();
+			next.stop();
+			next.close();
+			assertEquals(2, contextCloses.get(), "the worker still serves steps");
+
+			worker.close();
+			assertTrue(worker.isClosed());
+			assertEquals(List.of(), List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()));
+		}));
+	}
+
+	@Test
+	void aSliceWhoseEntryKeepsCallingOrHasNotCalledYetStaysOpen() throws Exception {
+		withEntrySilenceLimit(POLLED_ENTRY_SILENCE_MILLIS, () -> withWorker((worker, manager, port) -> {
+			final LoadStepService polled = newSlice(manager, port);
+			polled.start();
+			final LoadStepService notCalledYet = newSlice(manager, port);
+			notCalledYet.start();
+
+			final long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2 * POLLED_ENTRY_SILENCE_MILLIS);
+			while (System.nanoTime() < end) {
+				polled.metricsSnapshots();
+				Thread.sleep(100);
+			}
+
+			assertEquals(0, contextCloses.get());
+			assertEquals(2, worker.busySliceRunIds().size());
+			polled.stop();
+			polled.close();
+			notCalledYet.stop();
+			notCalledYet.close();
+		}));
+	}
+
+	@Test
+	void aWorkerShutdownRacingTheSilenceCheckClosesEachSliceOnce() throws Exception {
+		withEntrySilenceLimit(() -> withWorker((worker, manager, port) -> {
+			final List<LoadStepService> slices = new ArrayList<>();
+			for (var i = 0; i < 4; i++) {
+				final LoadStepService slice = newSlice(manager, port);
+				slice.start();
+				slice.metricsSnapshots();
+				slices.add(slice);
+			}
+			// The checkers run once a second, so a close about now meets them at the limit.
+			Thread.sleep(ENTRY_SILENCE_MILLIS);
+			worker.close();
+
+			assertEquals(slices.size(), contextCloses.get(), "every slice's context closes once");
+			assertEquals(List.of(), List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()));
+			assertTrue(worker.isClosed());
+		}));
+	}
+
+	private void awaitClosedContexts(final int expected, final long timeoutMillis) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+		while (contextCloses.get() < expected && System.nanoTime() < deadline) {
+			Thread.sleep(20);
+		}
+		assertEquals(expected, contextCloses.get(), "slices closed by the worker");
+	}
+
+	/** Waits for the worker's last open slice to be unexported and to leave its open set. */
+	private static void awaitNoOpenSlices(final LoadStepManagerServiceImpl worker, final long timeoutMillis)
+					throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+		while (worker.hasOpenSlices() && System.nanoTime() < deadline) {
+			Thread.sleep(20);
+		}
+	}
+
+	/** The limit is read as each step service is built. */
+	private static void withEntrySilenceLimit(final Callable0 test) throws Exception {
+		withEntrySilenceLimit(ENTRY_SILENCE_MILLIS, test);
+	}
+
+	private static void withEntrySilenceLimit(final long limitMillis, final Callable0 test) throws Exception {
+		final String original = System.getProperty(ENTRY_SILENCE_PROPERTY);
+		System.setProperty(ENTRY_SILENCE_PROPERTY, Long.toString(limitMillis));
+		try {
+			test.run();
+		} finally {
+			if (original == null) {
+				System.clearProperty(ENTRY_SILENCE_PROPERTY);
+			} else {
+				System.setProperty(ENTRY_SILENCE_PROPERTY, original);
+			}
+		}
+	}
+
+	@FunctionalInterface
+	private interface Callable0 {
+		void run() throws Exception;
 	}
 
 	private static Callable<Void> raced(final CountDownLatch go, final Callable<Void> call) {

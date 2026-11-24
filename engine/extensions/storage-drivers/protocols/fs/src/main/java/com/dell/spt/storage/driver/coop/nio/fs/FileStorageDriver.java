@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.nio.fs;
 
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
 import com.dell.spt.base.data.DataCorruptionException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.data.DataSizeException;
@@ -43,11 +44,15 @@ import java.util.function.ToLongFunction;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
 /**
-Created by kurila on 19.07.16.
-*/
+ * Created by kurila on 19.07.16.
+ *
+ * <p>Has no composite (multipart) support: a composite's parts and its finalization each reopen
+ * the file with truncate and write at offset 0, and a range read counts its bytes twice, so a step
+ * refuses a ranges threshold here.
+ */
 public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				extends NioStorageDriverBase<I, O>
-				implements NioStorageDriver<I, O> {
+				implements NioStorageDriver<I, O>, CompositeOperationsUnsupported {
 
 	private final Map<DataOperation, FileChannel> srcOpenFiles = new ConcurrentHashMap<>();
 	private final Map<String, File> dstParentDirs = new ConcurrentHashMap<>();
@@ -350,11 +355,12 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 			op.status(writeFailStatusOf(op, e));
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (!isClosed()) { // shared content source may be already closed from the load generator
+			if (!isStopped() && !isClosed()) { // shared content source may be already closed from the load generator
 				LogUtil.trace(Loggers.ERR, Level.ERROR, e, "File I/O invocation failure");
 				op.status(Operation.Status.FAIL_UNKNOWN);
 			} else {
-				Loggers.ERR.debug("Load operation caused a failure while being interrupted: {}", op);
+				op.status(Operation.Status.INTERRUPTED);
+				Loggers.ERR.debug("Load operation caused a failure while being interrupted: {}", op, e);
 			}
 		}
 
@@ -399,7 +405,11 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void doClose()
 					throws IOException {
-
+		// Close the open channels but do not clear the maps: an I/O worker that outlived the stop
+		// (for example one blocked in a file open inside computeIfAbsent) holds its map slot, and
+		// clear() would wait on that slot for good. Iterating the values does not wait; the maps go
+		// with the driver. A late READ, UPDATE or CREATE open closes its own channel when its
+		// operation ends.
 		srcOpenFiles
 						.values()
 						.stream()
@@ -412,7 +422,6 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 												LogUtil.exception(Level.WARN, e, "Failed to close the source file channel {}", channel);
 											}
 										});
-		srcOpenFiles.clear();
 
 		dstOpenFiles
 						.values()
@@ -426,7 +435,6 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 												LogUtil.exception(Level.WARN, e, "Failed to close the source file channel {}", channel);
 											}
 										});
-		dstOpenFiles.clear();
 
 		super.doClose();
 	}

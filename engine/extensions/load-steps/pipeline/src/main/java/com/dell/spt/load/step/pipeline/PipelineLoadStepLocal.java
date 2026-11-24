@@ -145,6 +145,8 @@ public class PipelineLoadStepLocal
 
 				final int batchSize = loadConfig.intVal("batch-size");
 
+				// Set while the context being built is not in stepContexts: a failure then also closes the earlier contexts.
+				boolean contextPending = true;
 				try (final var pending = new ContextInitResources()) {
 
 					NicSetConfig.requireSupportedWorkload(
@@ -192,6 +194,7 @@ public class PipelineLoadStepLocal
 										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
 						pending.handedOver();
+						contextPending = false;
 
 						final var itemOutputConfig = itemConfig.configVal("output");
 						if (originIndex < subStepCount - 1) {
@@ -230,9 +233,14 @@ public class PipelineLoadStepLocal
 						throw new IllegalStateException("Failed to initialize the load generator", e);
 					}
 				} catch (final IllegalConfigurationException e) {
-					throw new IllegalStateException("Failed to initialize the storage driver", e);
+					throw closeAfterInitFailure(
+									new IllegalStateException("Failed to initialize the storage driver", e), contextPending);
 				} catch (final InterruptedException e) {
-					throwUnchecked(e);
+					throwUnchecked(closeAfterInitFailure(e, contextPending));
+				} catch (final RuntimeException e) {
+					throw closeAfterInitFailure(e, contextPending);
+				} catch (final Error e) {
+					throw closeAfterInitFailure(e, contextPending);
 				}
 			} catch (final IOException e) {
 				throw new IllegalStateException("Failed to initialize the data input", e);
