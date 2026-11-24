@@ -635,7 +635,10 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					final List<Range> ranges, final long baseLength, final StringBuilder dstBuff) {
 		Range nextFixedRange;
 		long nextRangeSize;
-		for (int i = 0; i < ranges.size(); i++) {
+		// each append starts where the previous append of the request ended
+		long appendBeg = baseLength;
+		final int lastIdx = ranges.size() - 1;
+		for (int i = 0; i <= lastIdx; i++) {
 			nextFixedRange = ranges.get(i);
 			nextRangeSize = nextFixedRange.getSize();
 			if (i > 0) {
@@ -644,7 +647,12 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			if (nextRangeSize == -1) {
 				dstBuff.append(nextFixedRange.toString());
 			} else {
-				dstBuff.append(baseLength).append("-");
+				dstBuff.append(appendBeg).append('-');
+				appendBeg += nextRangeSize;
+				if (i < lastIdx) {
+					// an open range can be split from the body only as the last one
+					dstBuff.append(appendBeg - 1);
+				}
 			}
 		}
 	}

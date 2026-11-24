@@ -822,8 +822,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 						}
 					}
 					dataItem.commitUpdatedRanges(dataOp.markedRangesMaskPair());
+					dataOp.countBytesDone(dataOp.markedRangesSize());
 				} else { // fixed byte ranges case
+					// Overwrite and size-relative ranges address the size before the request.
 					final var baseItemSize = dataItem.size();
+					long appendBeg = baseItemSize;
+					long bytesQueued = 0;
 					long beg;
 					long end;
 					long size;
@@ -842,11 +846,11 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 									size = end - beg + 1;
 								}
 							} else {
-								// append
-								beg = baseItemSize;
-								// note down the new size
-								dataItem.size(dataItem.size() + dataOp.markedRangesSize());
+								// append: each one starts where the previous append of this request ended
+								beg = appendBeg;
+								appendBeg += size;
 							}
+							bytesQueued += size;
 							channel.write(new SeekableByteChannelChunkedNioStream(dataItem.slice(beg, size)));
 						}
 					} else {
@@ -864,16 +868,49 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 									size = end - beg + 1;
 								}
 							} else {
-								// append
-								beg = baseItemSize;
-								// note down the new size
-								dataItem.size(dataItem.size() + dataOp.markedRangesSize());
+								// append: each one starts where the previous append of this request ended
+								beg = appendBeg;
+								appendBeg += size;
 							}
+							bytesQueued += size;
 							channel.write(new DataItemFileRegion(dataItem.slice(beg, size)));
 						}
 					}
+					// The item grows by the appended bytes in complete(), once the UPDATE succeeds.
+					dataOp.countBytesDone(bytesQueued);
 				}
-				dataOp.countBytesDone(dataOp.markedRangesSize());
+			}
+		}
+	}
+
+	/**
+	 * A successful UPDATE that queued its fixed ranges ({@code countBytesDone() > 0}, set only by
+	 * {@link #sendRequestData}) grows the item by the sum of its appends. Only this success grows it,
+	 * so a failed attempt never changes the size and its retry starts from the same one; a tagging
+	 * UPDATE queues no body and grows nothing.
+	 */
+	private static void commitAppendedSize(final Operation<?> op) {
+		if (op instanceof DataOperation<?> dataOp) {
+			// A random-range UPDATE has no fixed ranges: skip the volatile countBytesDone() read.
+			final List<Range> fixedRanges = dataOp.fixedRanges();
+			if (fixedRanges == null
+							|| dataOp.countBytesDone() <= 0
+							|| !(op.item() instanceof DataItem dataItem)) {
+				return;
+			}
+			long appended = 0;
+			for (final var fixedRange : fixedRanges) {
+				final long size = fixedRange.getSize();
+				if (size != -1) {
+					appended += size;
+				}
+			}
+			if (appended > 0) {
+				try {
+					dataItem.size(dataItem.size() + appended);
+				} catch (final IOException e) {
+					throw new AssertionError(e);
+				}
 			}
 		}
 	}
@@ -917,15 +954,20 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			channel.attr(ATTR_KEY_OPERATION).compareAndSet(op, null);
 		}
 
-		if (op.status() != Operation.Status.SUCC && channel != null) {
-			// Completion accounting must not wait for asynchronous channel teardown.
-			final var unusedClose = channel.close();
-		}
-
+		final boolean failed = op.status() != Operation.Status.SUCC;
 		final boolean transportHeld = channel != null
 						&& !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE);
+		if (failed) {
+			if (channel != null) {
+				// Completion accounting must not wait for asynchronous channel teardown.
+				final var unusedClose = channel.close();
+			}
+		} else if (transportHeld && OpType.UPDATE.equals(op.type())) {
+			// Once per attempt: a second complete() finds the transport released.
+			commitAppendedSize(op);
+		}
 		if (transportHeld && directDispatchEnabled()
-						&& op.status() == Operation.Status.SUCC
+						&& !failed
 						&& channel.isActive()
 						&& isDirectDispatchEligible(op)) {
 			// Keep the permit and the channel across completion so the next queued operation can
