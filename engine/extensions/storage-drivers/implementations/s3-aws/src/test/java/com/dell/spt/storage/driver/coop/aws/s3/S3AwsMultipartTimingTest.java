@@ -351,6 +351,12 @@ final class S3AwsMultipartTimingTest {
 		final List<String> aborts = new CopyOnWriteArrayList<>();
 		/** The upload IDs initiated and neither completed nor aborted. */
 		final Set<String> openUploads = ConcurrentHashMap.newKeySet();
+		/** The most uploads open at once. */
+		final AtomicInteger maxOpenUploads = new AtomicInteger();
+		/** The upload ID of each completion request, in order. */
+		final List<String> completedUploads = new CopyOnWriteArrayList<>();
+		/** The requests whose upload ID is {@code null}, by method and URI. */
+		final List<String> nullUploadIdRequests = new CopyOnWriteArrayList<>();
 		volatile IntPredicate failPart = n -> false;
 		volatile Predicate<String> failUpload = uploadId -> false;
 		volatile boolean failCompletion;
@@ -387,6 +393,9 @@ final class S3AwsMultipartTimingTest {
 				exchange.getRequestBody().readAllBytes();
 				final var method = exchange.getRequestMethod();
 				final var query = exchange.getRequestURI().getRawQuery() == null ? "" : exchange.getRequestURI().getRawQuery();
+				if ("null".equals(uploadId(query))) {
+					nullUploadIdRequests.add(method + " " + exchange.getRequestURI());
+				}
 				exchange.getResponseHeaders().set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
 				if ("PUT".equals(method) && query.contains("partNumber=")) {
 					final var n = partRequests.incrementAndGet();
@@ -404,6 +413,7 @@ final class S3AwsMultipartTimingTest {
 				} else if ("POST".equals(method) && query.contains("uploads")) {
 					final var uploadId = "upload-" + initiations.incrementAndGet();
 					openUploads.add(uploadId);
+					maxOpenUploads.accumulateAndGet(openUploads.size(), Math::max);
 					respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
 									+ "<UploadId>" + uploadId + "</UploadId></InitiateMultipartUploadResult>");
 				} else if ("POST".equals(method) && query.contains("uploadId=")
@@ -412,6 +422,7 @@ final class S3AwsMultipartTimingTest {
 					respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
 				} else if ("POST".equals(method) && query.contains("uploadId=")) {
 					completions.incrementAndGet();
+					completedUploads.add(uploadId(query));
 					openUploads.remove(uploadId(query));
 					respond(exchange, 200, "<CompleteMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
 									+ "<ETag>\"done\"</ETag></CompleteMultipartUploadResult>");
