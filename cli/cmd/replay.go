@@ -209,6 +209,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	case scenario.S3DriverAws:
 		_, _ = fmt.Fprintln(out, "Using AWS SDK S3 driver (s3-aws).")
 	}
+	_ = os.Unsetenv(constants.EnvRdmaEnabled)
 
 	// The port check asks an operator only outside headless mode, so the mode
 	// is settled before it.

@@ -27,7 +27,7 @@ const failureLimitEarlyEndMarginSeconds = 1.0
 // It gives no warning where the limits can't be read reliably: a step bounded by
 // load.step.limit.size, whose end the summary can't compare; a step with more than one metrics
 // row outside an spt run mixed workload (a weighted or pipeline step, whose sub-loads have their
-// own limits and whose config.yaml shows only the base); and, in a distributed step, any count
+// own limits; a pipeline step's config.yaml shows only the base); and, in a distributed step, any count
 // limit, because the entry's config.yaml holds slice 0's share of load.op.limit.count and
 // load.op.limit.fail.count while the metrics are the fleet's totals.
 func failureLimitStopWarning(label string, end RunEnd, workloadType string, step *StepData, operation string, metrics *PhaseMetrics) string {

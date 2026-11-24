@@ -25,7 +25,6 @@ import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Dedicated range transport; the ordinary S3 driver and its per-operation route remain unchanged.
@@ -116,13 +115,11 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 		final var circulation = op.circulation();
 		final boolean unattempted = ranges.recover(op);
 		if (!unattempted && circulation.lifecycle().state() == OperationLifecycleState.TERMINAL) {
-			// Queue recovery must not run output; publish the settled result from an I/O thread.
-			try {
-				bootstrap.config().group().execute(() -> publishRecovered(op, circulation));
-			} catch (RejectedExecutionException stopped) {
-				// The I/O threads have stopped, so no transport callback can race this publication.
-				publishRecovered(op, circulation);
-			}
+			// A recovered retry settles its earlier attempt's failure, never a success, so this runs
+			// no item, timing or recycle output. Publish it before the drain checks for undelivered
+			// results. Direct dispatch is off here, so no caller holds the driver's admission lock;
+			// the publication claim is once-only.
+			publishRecovered(op, circulation);
 		}
 		return unattempted;
 	}

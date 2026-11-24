@@ -371,6 +371,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final String immutableListRootPrefix,
 					final Config explicitItemConfig,
 					final DeleteArtifactRecorderFactory deleteArtifactRecorderFactory) {
+		// Registered at the end, once its fields are set: a constructor that throws leaves nothing registered.
+		super(true);
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
@@ -544,6 +546,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			throw failure;
 		}
 		warnIfSizeLimitCannotStop(configSizeLimit.get(), standaloneDelete.enabled());
+		registerForCloseAll();
 	}
 
 	/**
@@ -1857,8 +1860,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	/** Range-only optional output; generic output swallows some rejections and cannot be reused. */
 	private void outputRangeResult(final O op) {
 		try {
-			if (tracePersistFlag)
-				Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+			if (tracePersistFlag) {
+				// A settled range result may be published from a generator or pool thread.
+				try (final Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, id)) {
+					Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+				}
+			}
 			if (op.status() != Status.SUCC)
 				return;
 			if (opsResultsOutput != null && !opsResultsOutput.put(op))
@@ -2556,8 +2563,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// historical active-concurrency wait behavior.
 				awaitOutstanding(() -> activeOpCount() != 0, deadlineNanos);
 			}
-			if (rangeRuntime != null)
+			if (rangeRuntime != null) {
+				if (!waitOpFinishBeforeStop) {
+					// Without the in-flight wait, a range result settled before the stop, or a success the
+					// deadline settled whose transport callback is still queued, may still be on its way
+					// to output; deliver it within the same bound instead of failing it.
+					awaitOutstanding(rangeRuntime::hasPendingResults, deadlineNanos);
+				}
 				rangeRuntime.finishResults();
+			}
 			operationDrainComplete.set(true);
 			if (rangeRuntime != null && rangeRuntime.failure() != null)
 				throw rangeRuntime.failure();

@@ -22,6 +22,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.load.step.client.metrics.MetricsAggregator;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -65,6 +66,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
@@ -78,7 +80,6 @@ import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
-import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.logging.log4j.core.config.Property;
 
 /**
@@ -541,12 +542,12 @@ class LoadStepClientBaseTest {
 		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
 		final var typed = new RunTerminalException(
 						IntegrityTerminalException.Category.INPUT, "items file line 7 is blank", null);
-		final var input = client.barrierStartFailure(new IllegalStateException("wrapped", typed), "entry");
+		final var input = client.barrierStartFailure(new IllegalStateException("wrapped", typed), "entry", 0, 2);
 		assertEquals(IntegrityTerminalException.Category.INPUT, input.category());
 		assertEquals(client.loadStepId(), input.stepId());
 		assertTrue(input.getMessage().contains("did not start: entry:"), input.getMessage());
 
-		final var other = client.barrierStartFailure(new IllegalStateException("refused"), "198.51.100.12:1099");
+		final var other = client.barrierStartFailure(new IllegalStateException("refused"), "198.51.100.12:1099", 1, 2);
 		assertEquals(IntegrityTerminalException.Category.EXECUTION, other.category());
 		assertTrue(other.getMessage().contains("198.51.100.12:1099: refused"), other.getMessage());
 	}
@@ -2856,6 +2857,78 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void aFailedStopStageWithALiveCounterProbeStillWritesTheMetricsOutput() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final Map<String, Object> metadata = new HashMap<>();
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(metadata);
+		client.addMetricsContextForTest(metricsContext);
+		final CountDownLatch snapshotEntered = new CountDownLatch(1);
+		final CountDownLatch releaseSnapshot = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+			return true;
+		});
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> {
+			snapshotEntered.countDown();
+			awaitIgnoringInterrupt(releaseSnapshot);
+			return cleanDeleteLifecycle();
+		});
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		addRawStepSlice(client, slice);
+		final Field aggregatorField = LoadStepClientBase.class.getDeclaredField("metricsAggregator");
+		aggregatorField.setAccessible(true);
+		try {
+			// The await's stop defers the output to the close while the live probe runs.
+			assertTrue(client.await(2, TimeUnit.SECONDS));
+			verify(mockMetricsManager, never()).unregister(metricsContext);
+			final IllegalStateException injected = new IllegalStateException("injected: metrics aggregator stop");
+			final MetricsAggregator aggregator = mock(MetricsAggregator.class);
+			doThrow(injected).when(aggregator).stop();
+			aggregatorField.set(client, aggregator);
+
+			// The close's stop fails with the probe still live, so the close is skipped: the output is written now.
+			assertSame(injected, assertThrows(IllegalStateException.class, client::close));
+
+			verify(mockMetricsManager, times(1)).unregister(metricsContext);
+			assertEquals(
+							MetricsConstants.DELETE_FAILURE_OUTCOME_FAILED,
+							metadata.get(MetricsConstants.METADATA_DELETE_FAILURE_OUTCOME));
+			assertFalse(client.isClosed());
+		} finally {
+			aggregatorField.set(client, null);
+			releaseSnapshot.countDown();
+			try {
+				client.close();
+			} catch (final IOException | RuntimeException ignored) {
+				// Only the release of the probe and the collector matters here.
+			}
+		}
+		awaitFailureBudgetSnapshotProbeCount(0);
+	}
+
+	@Test
+	void aFailedStageOfAnIncompleteDurationStopStillWritesTheMetricsOutput() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						durationConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final MetricsContext<?> metricsContext = mock(MetricsContext.class);
+		when(metricsContext.metadata()).thenReturn(new HashMap<>());
+		client.addMetricsContextForTest(metricsContext);
+		final IllegalStateException injected = new IllegalStateException("injected: outcome publish");
+		doThrow(injected).when(mockMetricsManager).updateTerminalDeleteFailureOutcome(anyString(), anyString());
+		addStepSlice(client, mock(LoadStep.class));
+
+		// No admission barrier was reached: the stop takes the incomplete duration branch.
+		assertSame(injected, assertThrows(IllegalStateException.class, client::doStop));
+
+		verify(mockMetricsManager, times(1)).unregister(metricsContext);
+	}
+
+	@Test
 	void terminalCollectionReprobesEverySliceAfterAPartialLiveFlight() throws Exception {
 		final Config config = countDeleteConfig();
 		config.val("load-op-wait-limit", 0);
@@ -3514,6 +3587,57 @@ class LoadStepClientBaseTest {
 	void closePublishesFailureBudgetOutcomeIntoRetainedFleetMetrics() throws Exception {
 		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient client = closeCleanStepWithRetainedFleetRow(metricsManager);
+
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleetFailureOutcome(metricsManager, client.loadStepId()),
+						"close must update the retained fleet row after the controller decision");
+	}
+
+	@Test
+	void aNeverStartedPrototypeClosedAfterARealStepKeepsThatStepsRetainedOutcome() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient step = closeCleanStepWithRetainedFleetRow(metricsManager);
+		// An engine prototype inherits the real step's id from the base configuration.
+		final TestLoadStepClient prototype = new TestLoadStepClient(
+						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
+
+		assertDoesNotThrow(prototype::close);
+
+		assertEquals(
+						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+						retainedFleetFailureOutcome(metricsManager, step.loadStepId()));
+	}
+
+	@Test
+	void aNeverStartedDurationPrototypeStoppedAfterARealStepKeepsThatStepsRetainedOutcome() throws Exception {
+		final var metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsManager.setTerminalRetentionMillis(30_000L);
+		final TestLoadStepClient step = closeCleanStepWithRetainedFleetRow(metricsManager);
+		final Config config = durationConfig();
+		config.val("load-step-id", step.loadStepId());
+		try (var prototype = new TestLoadStepClient(config, extensions, ctxConfigs, metricsManager)) {
+			assertDoesNotThrow(prototype::doStop);
+
+			assertEquals(
+							MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
+							retainedFleetFailureOutcome(metricsManager, step.loadStepId()));
+		}
+	}
+
+	private static String retainedFleetFailureOutcome(final MetricsManager metricsManager, final String stepId) {
+		return metricsManager.getTerminalSteps().stream()
+						.filter(entry -> entry.distributed && stepId.equals(entry.stepId))
+						.findFirst()
+						.orElseThrow().deleteMetrics
+						.failureOutcome();
+	}
+
+	/** A count-mode standalone DELETE that completes cleanly and leaves its retained fleet row. */
+	private TestLoadStepClient closeCleanStepWithRetainedFleetRow(final MetricsManagerImpl metricsManager)
+					throws Exception {
 		final TestLoadStepClient client = new TestLoadStepClient(
 						countDeleteConfig(), extensions, ctxConfigs, metricsManager);
 		final Map<String, Object> metadata = new HashMap<>();
@@ -3587,15 +3711,7 @@ class LoadStepClientBaseTest {
 			logger.removeAppender(appender);
 			appender.stop();
 		}
-
-		final var retainedFleet = metricsManager.getTerminalSteps().stream()
-						.filter(entry -> entry.distributed && client.loadStepId().equals(entry.stepId))
-						.findFirst()
-						.orElseThrow();
-		assertEquals(
-						MetricsConstants.DELETE_FAILURE_OUTCOME_COMPLETED_CLEANLY,
-						retainedFleet.deleteMetrics.failureOutcome(),
-						"close must update the retained fleet row after the controller decision");
+		return client;
 	}
 
 	@Test
@@ -3921,7 +4037,7 @@ class LoadStepClientBaseTest {
 			assertNotNull(client, "Client should not be null");
 
 			// Assert - Configuration access works
-			assertEquals("test-step-001", client.loadStepId(), "Step ID should match config");
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId(), "Step ID should match config");
 			assertEquals("test-load-step", client.getTypeName(), "Type name should match implementation");
 
 			// Assert - Initial state
@@ -3945,7 +4061,7 @@ class LoadStepClientBaseTest {
 
 			// Assert
 			assertNotNull(client);
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 
 		@Test
@@ -3956,7 +4072,7 @@ class LoadStepClientBaseTest {
 
 			// Assert
 			assertNotNull(client);
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 
 		@Test
@@ -3967,7 +4083,7 @@ class LoadStepClientBaseTest {
 
 			// Assert
 			assertNotNull(client);
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 	}
 
@@ -3985,7 +4101,7 @@ class LoadStepClientBaseTest {
 		@Test
 		@DisplayName("loadStepId() should return configured step ID")
 		void testLoadStepId() throws RemoteException {
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 		}
 
 		@Test
@@ -4016,7 +4132,7 @@ class LoadStepClientBaseTest {
 							config2, extensions, ctxConfigs, mockMetricsManager);
 
 			// Assert independence
-			assertEquals("test-step-001", client.loadStepId());
+			assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 			assertEquals("second-step", client2.loadStepId());
 			assertNotSame(client, client2);
 		}
@@ -4086,31 +4202,28 @@ class LoadStepClientBaseTest {
 		@DisplayName("Linear client accepts IEC item size and executes slice/aggregator init")
 		void testLinearClientStartAndAwait() throws Exception {
 			// Silence noisy INFO/ERROR logs produced during partial init in this integration smoke
-			Configurator.setLevel("com.dell.spt.base.logging.Messages", Level.WARN);
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.OFF);
-			// Use real extensions from classpath: LinearLoadStepExtension + DummyStorageDriverMockExtension
-			List<Extension> classpathExts = Extension.load(LoadStepClientBaseTest.class.getClassLoader());
-			Config cfg = TestConfigBuilder.config();
-			// Its artifacts stay under the test directory, so a rerun must not find them as stale.
-			cfg.val("load-step-id", "linear-client-test-" + java.util.UUID.randomUUID());
-			cfg.val("item-data-size", "10KiB");
-			cfg.val("item-output-file", ""); // avoid writing
-			// Ensure no remote nodes to avoid retries
-			cfg.val("load-step-node-addrs", java.util.Collections.emptyList());
-			cfg.val("item-data-input-compressibility", 0.0);
-			cfg.val("item-data-dedupable", false);
-			cfg.val("item-data-verify", false);
-			LinearLoadStepClient client = new LinearLoadStepClient(cfg, classpathExts, null, mockMetricsManager);
-			// This fixture configures no items, so it reaches its slice and fails there with the reason.
-			final var failure = assertThrows(RunTerminalException.class, client::start);
-			assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
-			// Stop/close regardless
-			assertDoesNotThrow(client::doStop);
-			assertDoesNotThrow(client::doShutdown);
-			assertDoesNotThrow(client::doClose);
-			// Restore default log levels for other tests
-			Configurator.setLevel("com.dell.spt.base.logging.Messages", Level.INFO);
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.ERROR);
+			try (var levels = LoggerLevels.set(Map.of(Loggers.MSG.getName(), Level.WARN, Loggers.ERR.getName(), Level.OFF))) {
+				// Use real extensions from classpath: LinearLoadStepExtension + DummyStorageDriverMockExtension
+				List<Extension> classpathExts = Extension.load(LoadStepClientBaseTest.class.getClassLoader());
+				Config cfg = TestConfigBuilder.config();
+				// Its artifacts stay under the test directory, so a rerun must not find them as stale.
+				cfg.val("load-step-id", "linear-client-test-" + java.util.UUID.randomUUID());
+				cfg.val("item-data-size", "10KiB");
+				cfg.val("item-output-file", ""); // avoid writing
+				// Ensure no remote nodes to avoid retries
+				cfg.val("load-step-node-addrs", java.util.Collections.emptyList());
+				cfg.val("item-data-input-compressibility", 0.0);
+				cfg.val("item-data-dedupable", false);
+				cfg.val("item-data-verify", false);
+				LinearLoadStepClient client = new LinearLoadStepClient(cfg, classpathExts, null, mockMetricsManager);
+				// This fixture configures no items, so it reaches its slice and fails there with the reason.
+				final var failure = assertThrows(RunTerminalException.class, client::start);
+				assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
+				// Stop/close regardless
+				assertDoesNotThrow(client::doStop);
+				assertDoesNotThrow(client::doShutdown);
+				assertDoesNotThrow(client::doClose);
+			}
 		}
 	}
 
@@ -4185,7 +4298,7 @@ class LoadStepClientBaseTest {
 
 			// Verify the copy has the new configuration
 			assertEquals("copied-step", copy.loadStepId());
-			assertEquals("test-step-001", originalClient.loadStepId(), "Original should be unchanged");
+			assertEquals(testConfig.stringVal("load-step-id"), originalClient.loadStepId(), "Original should be unchanged");
 		}
 
 		@Test
@@ -4404,7 +4517,7 @@ class LoadStepClientBaseTest {
 
 			// Basic functionality should work
 			assertDoesNotThrow(() -> {
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				assertEquals("test-load-step", client.getTypeName());
 			});
 		}
@@ -4422,7 +4535,7 @@ class LoadStepClientBaseTest {
 				// Results should be consistent
 				assertEquals(stepId1, stepId2);
 				assertEquals(typeName1, typeName2);
-				assertEquals("test-step-001", stepId1);
+				assertEquals(testConfig.stringVal("load-step-id"), stepId1);
 				assertEquals("test-load-step", typeName1);
 			});
 		}
@@ -4436,7 +4549,7 @@ class LoadStepClientBaseTest {
 				assertTrue(client.wasInitCalled());
 
 				// Then call other methods
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				assertEquals("test-load-step", client.getTypeName());
 			});
 		}
@@ -4461,7 +4574,7 @@ class LoadStepClientBaseTest {
 			assertNotSame(client, copy);
 			assertDoesNotThrow(() -> {
 				assertEquals("copied-after-init", copy.loadStepId());
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 			});
 		}
 
@@ -4595,11 +4708,11 @@ class LoadStepClientBaseTest {
 		void testMixedMethodCalls() {
 			assertDoesNotThrow(() -> {
 				client.init();
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				client.init();
 				assertEquals("test-load-step", client.getTypeName());
 				client.copyInstance(testConfig, ctxConfigs);
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				client.init();
 				assertEquals("test-load-step", client.getTypeName());
 			});
@@ -4619,7 +4732,7 @@ class LoadStepClientBaseTest {
 				}
 
 				// Client should still be functional
-				assertEquals("test-step-001", client.loadStepId());
+				assertEquals(testConfig.stringVal("load-step-id"), client.loadStepId());
 				assertEquals("test-load-step", client.getTypeName());
 			});
 		}
@@ -4632,7 +4745,7 @@ class LoadStepClientBaseTest {
 					String stepId = client.loadStepId();
 					String typeName = client.getTypeName();
 
-					assertEquals("test-step-001", stepId);
+					assertEquals(testConfig.stringVal("load-step-id"), stepId);
 					assertEquals("test-load-step", typeName);
 
 					if (i % 10 == 0) {
@@ -4682,7 +4795,7 @@ class LoadStepClientBaseTest {
 			Config config = TestConfigBuilder.config();
 
 			// Verify specific values match what we configured
-			assertEquals("test-step-001", config.stringVal("load-step-id"));
+			assertTrue(config.stringVal("load-step-id").startsWith("test-step-"));
 			assertEquals(false, config.boolVal("load-step-idAutoGenerated"));
 			assertEquals(100, config.intVal("load-batch-size"));
 			assertEquals("create", config.stringVal("load-op-type"));
@@ -4725,14 +4838,14 @@ class LoadStepClientBaseTest {
 			// This fixture's extension builds no local step, so its start fails, with the reason.
 			assertTrue(assertThrows(RunTerminalException.class, client::start).getCause().getMessage().contains("createLocal"));
 			assertDoesNotThrow(() -> client.doShutdown());
-			// It also has no real worker, so terminal evidence fails closed at collection.
-			assertThrows(IntegrityTerminalException.class, client::doClose);
+			// No slice started, so the close collects and publishes nothing, and does not fail.
+			assertDoesNotThrow(client::doClose);
 			assertDoesNotThrow(() -> client.doStop());
 
 			LinearLoadStepClient linearClient = new LinearLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
 			assertEquals("step failed to start; see the engine log", assertThrows(RunTerminalException.class, linearClient::start).getMessage());
 			assertDoesNotThrow(() -> linearClient.doShutdown());
-			assertThrows(IntegrityTerminalException.class, linearClient::doClose);
+			assertDoesNotThrow(linearClient::doClose);
 			assertDoesNotThrow(() -> linearClient.doStop());
 		}
 	}
