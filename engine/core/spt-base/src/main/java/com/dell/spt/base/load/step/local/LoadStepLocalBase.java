@@ -24,6 +24,7 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.EarlierRunFiles;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdInUseException;
@@ -1315,14 +1316,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * Refuses this slice, before it seeds or writes any of them, when an earlier step with the same id
 	 * left one of the {@link StepIdFiles} this slice would publish: the same files the Entry Node
 	 * tests before it starts any slice. A refused slice publishes nothing at close, so the earlier
-	 * step's files, its event-loop report among them, stay as they were.
+	 * step's files, its event-loop report among them, stay as they were. On a worker engine, an earlier
+	 * run's files were moved aside before the Entry Node created this slice (see {@link
+	 * EarlierRunFiles}); this check refuses any it finds, as on every engine.
 	 */
 	@Override
 	protected final void refuseStepIdInUse(final boolean nodes) {
 		startRefused = false;
 		final var paths = new ArrayList<Path>();
-		for (final var loggerName : StepIdFiles.sliceLoggerNames(
-						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs))) {
+		final var loggerNames = StepIdFiles.sliceLoggerNames(
+						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs));
+		for (final var loggerName : loggerNames) {
 			try {
 				paths.add(Path.of(FileManager.INSTANCE.logFileName(loggerName, loadStepId())));
 			} catch (final IOException | RuntimeException unknown) {
@@ -1337,6 +1341,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			startRefused = true;
 			throw refused;
 		}
+		// Where no list of open files tells, a later run's move aside of these files asks this.
+		EarlierRunFiles.noteSliceStart(loadStepId(), loggerNames);
 	}
 
 	/** Refused, or no start reached it: neither the start nor its wrapped part, which sets the worker id. */

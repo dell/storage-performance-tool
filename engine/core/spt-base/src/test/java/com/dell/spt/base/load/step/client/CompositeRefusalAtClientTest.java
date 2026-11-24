@@ -186,7 +186,7 @@ class CompositeRefusalAtClientTest {
 		final var worker = client.sliceStartFailure(new RuntimeException("remote", cause), 1, 2);
 		assertEquals("engine 2 of 2 did not start: " + REFUSAL, worker.getMessage());
 
-		final var barrier = client.barrierStartFailure(cause, "entry");
+		final var barrier = client.barrierStartFailure(cause, "entry", 0, 2);
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, barrier.category());
 		assertEquals("Step " + client.loadStepId() + " did not start: entry: " + REFUSAL, barrier.getMessage());
 
