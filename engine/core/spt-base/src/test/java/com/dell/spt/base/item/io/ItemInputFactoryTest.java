@@ -4,7 +4,9 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactoryImpl;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.file.BinFileInput;
 import com.github.akurilov.confuse.Config;
@@ -22,10 +24,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
 import java.nio.file.Path;
+import java.util.Map;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
-import org.apache.logging.log4j.core.config.Configurator;
 
 public class ItemInputFactoryTest {
 	private static Path TMP_DIR_PATH = null;
@@ -51,13 +53,10 @@ public class ItemInputFactoryTest {
 	@Test
 	void testCreateEmptyItemInput() throws InterruptedException {
 		// Suppress expected WARN from ItemInputFactory when pointing at a directory
-		Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.OFF);
-		try {
+		try (var levels = LoggerLevels.set(Map.of(Loggers.ERR.getName(), Level.OFF))) {
 			var mockDriver = DummyStorageDriverMock.create();
 			itemInput = ItemInputFactory.createItemInput(testConfig.configVal("item"), batchSize, mockDriver);
 			assertNull(itemInput);
-		} finally {
-			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.ERROR);
 		}
 	}
 

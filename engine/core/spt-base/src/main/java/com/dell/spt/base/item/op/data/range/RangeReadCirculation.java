@@ -322,6 +322,14 @@ public final class RangeReadCirculation {
 		}
 	}
 
+	/** Whether this attempt's own outcome is the committed terminal result, by its completion or at a deadline. */
+	public boolean isTerminalAttempt(final RangeReadAttempt attempt) {
+		synchronized (lifecycle) {
+			return attempt != null && terminalAttempt == attempt
+							&& lifecycle.state() == OperationLifecycleState.TERMINAL;
+		}
+	}
+
 	/** Seals retry creation before final logical publication or recovery. Idempotent by token. */
 	public boolean close(final RangeReadAttempt expected) {
 		synchronized (lifecycle) {

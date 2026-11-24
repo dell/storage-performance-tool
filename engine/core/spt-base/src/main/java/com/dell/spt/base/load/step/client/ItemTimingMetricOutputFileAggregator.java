@@ -15,7 +15,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -39,15 +39,16 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 
 	private final String loadStepId;
+	private final int sliceCount;
 	private final Path itemTimingMetricsOutputFilePath;
-	private final Map<FileManager, String> itemTimingMetricOutputFileSlices;
+	private final List<Map.Entry<FileManager, String>> remoteSlicesByIndex;
 
 	public ItemTimingMetricOutputFileAggregator(
 					final String loadStepId,
 					final List<FileManager> fileMgrs) {
 		this.loadStepId = loadStepId;
-		final var sliceCount = fileMgrs.size();
-		this.itemTimingMetricOutputFileSlices = new HashMap<>(sliceCount);
+		this.sliceCount = fileMgrs.size();
+		this.remoteSlicesByIndex = new ArrayList<>(Math.max(0, sliceCount - 1));
 		this.itemTimingMetricsOutputFilePath = Paths.get(System.getProperty("java.io.tmpdir"),
 						"spt", "timingMetrics_" + loadStepId);
 
@@ -55,17 +56,17 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 		if (fileMgrs.get(0) instanceof FileManagerService) {
 			throw new AssertionError("File manager @ index #0 shouldn't be a service");
 		}
-		itemTimingMetricOutputFileSlices.put(fileMgrs.get(0), itemTimingMetricsOutputFilePath.toString());
 
 		for (var i = 1; i < sliceCount; i++) {
 			final var fileMgr = fileMgrs.get(i);
 			if (fileMgr instanceof FileManagerService) {
 				try {
-					itemTimingMetricOutputFileSlices.put(fileMgr, itemTimingMetricsOutputFilePath.toString());
+					remoteSlicesByIndex.add(Map.entry(fileMgr, itemTimingMetricsOutputFilePath.toString()));
 					Loggers.MSG.debug(
 									"\"{}\": new tmp item output file \"{}\"", fileMgr, itemTimingMetricsOutputFilePath.toString());
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
+					remoteSlicesByIndex.add(null);
 					LogUtil.exception(
 									Level.ERROR,
 									e,
@@ -80,20 +81,20 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 	}
 
 	// each remote file is collected to a local file that has the same old name + the random number
-	private void collectToLocal() {
+	private void collectToLocal(final List<Map.Entry<FileManager, String>> remoteSlices) {
+		final var validRemoteSlices = remoteSlices.stream()
+						.filter(entry -> entry != null && entry.getKey() instanceof FileManagerService)
+						.toList();
 		final var byteCounter = new LongAdder();
 		final var executor = Executors.newScheduledThreadPool(
 						2, new LogContextThreadFactory("collectItemTimingMetricsOutputFileWorker", true));
 		// we need as many locks as there are slices except for entry node. Because we have a separate tmp file for each slice
-		final var finishLatch = new CountDownLatch(itemTimingMetricOutputFileSlices.size() - 1);
+		final var finishLatch = new CountDownLatch(validRemoteSlices.size());
 		FsUtil.createParentDirsIfNotExist(itemTimingMetricsOutputFilePath);
 		final Future<?> transferTask = executor.submit(
 						() -> {
-							itemTimingMetricOutputFileSlices
-											.entrySet()
+							validRemoteSlices
 											.parallelStream()
-											// don't transfer & delete local item output file
-											.filter(entry -> entry.getKey() instanceof FileManagerService)
 											.forEach(
 															entry -> {
 																final var fileMgr = entry.getKey();
@@ -199,9 +200,26 @@ public class ItemTimingMetricOutputFileAggregator implements AutoCloseable {
 	public final void close() {
 		Loggers.MSG.info("closing metrics aggregator");
 		try {
-			collectToLocal();
+			collectToLocal(remoteSlicesByIndex);
 		} finally {
-			itemTimingMetricOutputFileSlices.clear();
+			remoteSlicesByIndex.clear();
+		}
+	}
+
+	/** Collects remote timing metrics only from the first {@code startedSlices} slices whose start returned. */
+	void closeAfterStoppedStart(final int startedSlices) {
+		if (startedSlices < 0 || startedSlices > sliceCount) {
+			throw new IllegalArgumentException(
+							"started slices " + startedSlices + " not in 0.." + sliceCount);
+		}
+		try {
+			// A close repeated after the first emptied the list collects nothing again.
+			final int remoteStarted = Math.min(startedSlices - 1, remoteSlicesByIndex.size());
+			if (remoteStarted > 0) {
+				collectToLocal(remoteSlicesByIndex.subList(0, remoteStarted));
+			}
+		} finally {
+			remoteSlicesByIndex.clear();
 		}
 	}
 }

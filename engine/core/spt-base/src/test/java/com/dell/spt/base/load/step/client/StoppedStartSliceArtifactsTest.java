@@ -20,9 +20,9 @@ import static org.mockito.Mockito.when;
 import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
-import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
+import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -55,7 +55,11 @@ import org.mockito.MockedStatic;
 /**
  * A start that ends as a stop publishes the slice files of the slices whose start returned, and
  * nothing when none did: a slice refused at JVM exit, never reached, or cut partway through its
- * start is left out. A start that fails still needs every slice's files.
+ * start is left out. A start that fails after a slice started still needs every slice's files, the
+ * failed slice's and those never reached among them, unless the failed slice was refused for its
+ * step-id files: its folder holds another step's or run's file, so only the slices whose start
+ * returned are published, as after a stop. One that fails before any slice's start returned
+ * publishes nothing, as a stopped one.
  */
 class StoppedStartSliceArtifactsTest {
 
@@ -242,7 +246,8 @@ class StoppedStartSliceArtifactsTest {
 	}
 
 	@Test
-	void aStartThatFailsStillNeedsTheEntrySlicesFile() throws Exception {
+	void aStartThatFailsInItsFirstSlicePublishesNothing() throws Exception {
+		// A slice whose own start threw did not start: the step closes as one stopped before its first slice.
 		final LoadStep entry = mock(LoadStep.class);
 		doAnswer(call -> {
 			throw new IllegalStateException("the slice failed to start");
@@ -253,9 +258,31 @@ class StoppedStartSliceArtifactsTest {
 		assertFalse(startFailure instanceof InterruptedException, startFailure.toString());
 		assertFalse(Thread.currentThread().isInterrupted());
 
-		final var closeFailure = assertThrows(IntegrityTerminalException.class, client::close);
-		assertTrue(closeFailure.getMessage().contains("entry-node logger artifact is missing"),
-						closeFailure.getMessage());
+		assertDoesNotThrow(client::close);
+		assertTrue(client.isClosed());
+		assertFalse(Files.exists(canonical), "a lifecycle file was published for a step that started no slice");
+		assertEquals(List.of(), nodeSources());
+	}
+
+	@Test
+	void aStartRefusedAtTheSecondSliceForItsStepIdFilesMergesTheFirstSliceOnly() throws Exception {
+		// The other node refuses its slice at its start for a file in its folder from an earlier run.
+		final LoadStep entry = sliceWritingItsLifecycleRowAtClose("entry-worker");
+		final AtomicBoolean workerFileThere = new AtomicBoolean();
+		final LoadStep worker = mock(LoadStep.class);
+		doAnswer(call -> {
+			workerFileThere.set(true);
+			throw new StepIdInUseException("step", Path.of("log", "step", "operation.lifecycle.csv"));
+		}).when(worker).start();
+		final TestLoadStepClient client = twoSliceClient(entry, worker, workerFileThere);
+
+		final Throwable startFailure = assertThrows(Throwable.class, client::start);
+		assertFalse(startFailure instanceof InterruptedException, startFailure.toString());
+		assertFalse(Thread.currentThread().isInterrupted());
+
+		assertDoesNotThrow(client::close);
+		assertEquals(List.of("entry-worker"), workerIds(canonical), "the refused slice's file was merged");
+		assertEquals(List.of(CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 0)), nodeSources());
 	}
 
 	/**
@@ -273,6 +300,25 @@ class StoppedStartSliceArtifactsTest {
 			starter.interrupt();
 			throw new IllegalStateException("the node is going away");
 		}).when(worker).start();
+		final int port;
+		try (ServerSocket socket = new ServerSocket(0)) {
+			socket.setReuseAddress(true);
+			port = socket.getLocalPort();
+		}
+		final String nodeAddr = "127.0.0.1:" + port;
+		final Config config = config();
+		config.val("load-step-node-addrs", List.of(nodeAddr));
+		originalRmiHostname = System.getProperty(RMI_HOSTNAME);
+		System.setProperty(RMI_HOSTNAME, "127.0.0.1");
+		final TestLoadStepClient client = client(config, entry, worker);
+		node = new LoadStepManagerServiceImpl(port, List.of(factory), metricsMgr);
+		node.start();
+		return client.withNodeFileManagers(Map.of(nodeAddr, workerFiles(workerWrote)));
+	}
+
+	/** As {@link #twoSliceClient}, with the other node's slice {@code worker}; its file is there once {@code workerWrote}. */
+	private TestLoadStepClient twoSliceClient(
+					final LoadStep entry, final LoadStep worker, final AtomicBoolean workerWrote) throws Exception {
 		final int port;
 		try (ServerSocket socket = new ServerSocket(0)) {
 			socket.setReuseAddress(true);

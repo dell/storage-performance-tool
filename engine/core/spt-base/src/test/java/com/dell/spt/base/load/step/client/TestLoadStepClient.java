@@ -1,6 +1,7 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -10,6 +11,7 @@ import com.github.akurilov.confuse.Config;
 import java.rmi.RemoteException;
 import java.util.List;
 import java.util.Map;
+import org.mockito.Mockito;
 
 /**
  * Concrete test implementation of LoadStepClientBase for testing purposes.
@@ -24,6 +26,7 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 	private boolean copyInstanceCalled = false;
 	private int copyInstanceCallCount = 0;
 	private Map<String, FileManager> nodeFileManagers = null;
+	private Map<String, LoadStepManagerService> nodeStepManagers = null;
 
 	public TestLoadStepClient(
 					Config config,
@@ -53,6 +56,27 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 	@Override
 	FileManager resolveFileManager(final String nodeAddr) {
 		return nodeFileManagers == null ? super.resolveFileManager(nodeAddr) : nodeFileManagers.get(nodeAddr);
+	}
+
+	/** Gives the remote nodes these step managers, by node address, instead of resolving them. */
+	public TestLoadStepClient withNodeStepManagers(final Map<String, LoadStepManagerService> stepManagers) {
+		nodeStepManagers = Map.copyOf(stepManagers);
+		return this;
+	}
+
+	/**
+	 * The given step manager; with given file managers only, one of an older node, which does not
+	 * prepare a step's files, so that its files are refused as before.
+	 */
+	@Override
+	LoadStepManagerService resolveStepManager(final String nodeAddr) throws Exception {
+		if (nodeStepManagers != null) {
+			return nodeStepManagers.get(nodeAddr);
+		}
+		if (nodeFileManagers != null) {
+			return Mockito.mock(LoadStepManagerService.class, Mockito.CALLS_REAL_METHODS);
+		}
+		return super.resolveStepManager(nodeAddr);
 	}
 
 	@Override

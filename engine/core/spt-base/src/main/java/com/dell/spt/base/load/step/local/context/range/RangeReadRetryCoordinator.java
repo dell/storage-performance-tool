@@ -5,6 +5,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OperationRetryPolicy;
 import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadCirculation;
+import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
@@ -46,6 +47,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 	private final RangeReadMetrics metrics;
 	private final Scheduler scheduler;
 	private final BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish;
+	private final BiConsumer<RangeReadOperation<I>, RangeReadCirculation> settledPublish;
 	private final boolean enabled;
 	private final int retryLimit;
 	private final int capacity;
@@ -61,6 +63,19 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 					OperationLifecycleTracker<? super RangeReadOperation<I>> tracker,
 					RangeReadMetrics metrics, Scheduler scheduler,
 					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish) {
+		this(enabled, retryLimit, capacity, generator, tracker, metrics, scheduler, publish, publish);
+	}
+
+	/**
+	 * Settled publish delivers a retry this coordinator settles without a completion: at close, or
+	 * when it is refused, past its bound, or its scheduling or handoff fails. Completions use publish.
+	 */
+	public RangeReadRetryCoordinator(boolean enabled, int retryLimit, int capacity,
+					LoadGenerator<I, RangeReadOperation<I>> generator,
+					OperationLifecycleTracker<? super RangeReadOperation<I>> tracker,
+					RangeReadMetrics metrics, Scheduler scheduler,
+					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish,
+					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> settledPublish) {
 		if (retryLimit < 0 || capacity <= 0)
 			throw new IllegalArgumentException("Invalid range retry bounds");
 		this.enabled = enabled;
@@ -71,21 +86,41 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 		this.metrics = Objects.requireNonNull(metrics);
 		this.scheduler = Objects.requireNonNull(scheduler);
 		this.publish = Objects.requireNonNull(publish);
+		this.settledPublish = Objects.requireNonNull(settledPublish);
 		if (!tracker.isEnabled())
 			throw new IllegalArgumentException("Range retries require lifecycle tracking");
 	}
 
-	/** Sole attempt accounting/retry-decision entry point; stale or duplicate callbacks return false. */
+	/**
+	 * Sole attempt accounting/retry-decision entry point; stale or duplicate callbacks return false.
+	 * A callback whose attempt the drain deadline already committed (its response was decoded before
+	 * the callback ran) also returns false, after publishing that result once: the deadline leaves a
+	 * success's output to this route so that it never runs on the draining thread.
+	 */
 	public boolean completed(RangeReadOperation<I> operation, RangeReadCirculation circulation, RangeReadAttempt attempt) {
 		final RangeReadAttempt retry;
 		final int retryNumber;
+		final boolean owned;
+		boolean settledAtDeadline = false;
 		synchronized (circulation.lifecycle()) {
-			if (operation.circulation() != circulation
-							|| !tracker.hasOutstandingCustody(operation, circulation.lifecycle())
-							|| !metrics.recordAttempt(circulation, attempt))
-				return false;
-			retry = enabled && circulation.retryCount() < retryLimit ? circulation.beginAttempt(attempt) : null;
-			retryNumber = circulation.retryCount();
+			owned = operation.circulation() == circulation
+							&& tracker.hasOutstandingCustody(operation, circulation.lifecycle())
+							&& metrics.recordAttempt(circulation, attempt);
+			if (owned) {
+				retry = enabled && circulation.retryCount() < retryLimit ? circulation.beginAttempt(attempt) : null;
+				retryNumber = circulation.retryCount();
+			} else {
+				retry = null;
+				retryNumber = 0;
+				final var terminal = circulation.terminalOutcome();
+				settledAtDeadline = operation.circulation() == circulation && circulation.isTerminalAttempt(attempt)
+								&& terminal != null && terminal.status() == Operation.Status.SUCC;
+			}
+		}
+		if (!owned) {
+			if (settledAtDeadline)
+				publishTerminal(operation, circulation, settledPublish);
+			return false;
 		}
 		if (retry == null) {
 			try {
@@ -93,7 +128,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 			} catch (RuntimeException accountingFailure) {
 				recordFailure(accountingFailure);
 			} finally {
-				publishTerminal(operation, circulation);
+				publishTerminal(operation, circulation, publish);
 			}
 			return true;
 		}
@@ -170,11 +205,12 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 		} catch (RuntimeException accountingFailure) {
 			recordFailure(accountingFailure);
 		} finally {
-			publishTerminal(entry.operation, entry.circulation);
+			publishTerminal(entry.operation, entry.circulation, settledPublish);
 		}
 	}
 
-	private void publishTerminal(RangeReadOperation<I> operation, RangeReadCirculation circulation) {
+	private void publishTerminal(RangeReadOperation<I> operation, RangeReadCirculation circulation,
+					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> output) {
 		if (operation.circulation() == circulation
 						&& circulation.lifecycle().state() == OperationLifecycleState.TERMINAL) {
 			// A synchronous terminal callback releases its logical slot before optional output,
@@ -183,7 +219,7 @@ public final class RangeReadRetryCoordinator<I extends DataItem> implements Auto
 				pending.remove(circulation);
 			}
 			try {
-				publish.accept(operation, circulation);
+				output.accept(operation, circulation);
 			} catch (RuntimeException outputFailure) {
 				recordFailure(outputFailure);
 			}

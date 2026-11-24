@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.load.step.client.LoggerLevels;
 import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
@@ -17,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
@@ -35,8 +37,15 @@ class MainCliArgsLogMaskingTest {
 	private CapturingAppender appender;
 	private Level previousLevel;
 
+	/**
+	 * The root and Messages loggers at INFO for each test, and their own levels back after it: applying the
+	 * arguments sets both to the shipped log level.
+	 */
+	private LoggerLevels levels;
+
 	@BeforeEach
 	void attach() {
+		levels = LoggerLevels.set(Map.of(LogManager.ROOT_LOGGER_NAME, Level.INFO, Loggers.MSG.getName(), Level.INFO));
 		appender = new CapturingAppender();
 		appender.start();
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.CLI.getName());
@@ -48,9 +57,15 @@ class MainCliArgsLogMaskingTest {
 	@AfterEach
 	void detach() {
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.CLI.getName());
-		logger.setLevel(previousLevel);
-		logger.removeAppender(appender);
-		appender.stop();
+		try {
+			logger.setLevel(previousLevel);
+			logger.removeAppender(appender);
+			appender.stop();
+		} finally {
+			if (levels != null) {
+				levels.close();
+			}
+		}
 	}
 
 	/**
