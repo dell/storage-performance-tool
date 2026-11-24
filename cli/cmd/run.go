@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -153,6 +154,10 @@ type autoResultsOutcome struct {
 	// engine to stop the run. AutoTerminateStop says how that stop ended.
 	AutoTerminated    bool
 	AutoTerminateStop autoTerminateStopResult
+	// Interrupted marks a run whose tracking Ctrl-C or a cancelled parent context ended, other
+	// than at the auto-terminate deadline. It stays set when a later reconciliation clears
+	// TrackerErr.
+	Interrupted bool
 
 	// LiveCorruptionUnobserved marks a completed verification READ that the live step list never
 	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
@@ -1043,6 +1048,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			// owned run before deciding which artifacts and roles are applicable.
 			interruptedTracking := parentCtx.Err() != nil && outcome.TrackerErr != nil
 			outcome.AutoTerminated = interruptedTracking && autoTerminateRequested.Load()
+			outcome.Interrupted = interruptedTracking && !outcome.AutoTerminated
 			if outcome.AutoTerminated {
 				outcome.AutoTerminateStop = stopRunAtAutoTerminate()
 				if outcome.AutoTerminateStop == autoTerminateStopUnconfirmed && shutdownOn {
@@ -1345,7 +1351,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				writer = traceOutput
 			}
 		}
-		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer)
+		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer, summaryRunEnd(&outcome))
 		if err != nil {
 			outcome.SummaryErr = errors.Join(outcome.SummaryErr, err)
 		}
@@ -2310,7 +2316,9 @@ Available workload types:
   tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.
 
 DELETE is destructive. With no source flag it safely seeds a run-owned namespace, then deletes
-that frozen inventory. --items-file selects an explicit canonical manifest. Existing data is
+that frozen inventory. --items-file selects an explicit canonical manifest, or the items.csv an
+S3 write --save-items saved, for current-key deletes (--validate-inventory checks that its rows
+name real objects; --verify does not catch wrong keys). Existing data is
 eligible only with --delete-existing plus an exact --bucket and explicitly supplied --prefix;
 whole-bucket selection additionally requires --allow-empty-prefix. DELETE defaults to %d
 seeded %s objects, batches %d targets per logical request, and does not verify removal unless
@@ -2384,6 +2392,9 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if params.WorkloadType == WorkloadTypeDelete && params.SelectionOrder == scenario.SelectionOrderCanonical {
 			fmt.Println("DELETE selection order: canonical. Cross-tool comparisons may be affected by input ordering.")
 		}
+		if params.WorkloadType == WorkloadTypeDelete && params.DeleteSavedItems != nil {
+			fmt.Println(savedItemsSourceLine(params.DeleteSavedItems))
+		}
 		for _, notice := range integrityCostNotices(params) {
 			fmt.Println(notice)
 		}
@@ -2426,11 +2437,13 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			_ = os.Setenv(constants.EnvSptImage, strings.TrimSpace(sptImageFlag))
 		}
 
-		switch params.S3Driver {
-		case scenario.S3DriverRdma:
+		if params.S3Driver == scenario.S3DriverRdma && workloadType != WorkloadTypeMock && workloadType != WorkloadTypeTables {
 			_ = os.Setenv(constants.EnvRdmaEnabled, "true")
 			fmt.Println("RDMA mode enabled: using s3-rdma driver with device passthrough.")
-		case scenario.S3DriverAws:
+		} else {
+			_ = os.Unsetenv(constants.EnvRdmaEnabled)
+		}
+		if params.S3Driver == scenario.S3DriverAws {
 			fmt.Println("Using AWS SDK S3 driver (s3-aws).")
 		}
 
@@ -2896,7 +2909,7 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Stop the run N seconds after the CLI has connected to the hosts, covering engine start-up, launch and the run; exits 0 if the run was healthy up to the deadline and the stop is confirmed, while a DELETE or verification workload stopped there exits 1 because it did not complete (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read, a canonical manifest for read-verify, or for explicit-manifest DELETE a canonical manifest or an S3 write's saved items.csv (current-key deletes); mutually exclusive with --delete-existing")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
 	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification or guarded-prefix DELETE identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
@@ -3756,6 +3769,8 @@ func formatScenarioParams(params scenario.Params) string {
 			)
 		} else if strings.TrimSpace(params.ItemsFile) == "" {
 			lines = append(lines, "DELETE Source: seeded owned inventory")
+		} else if params.DeleteSavedItems != nil {
+			lines = append(lines, savedItemsSourceLine(params.DeleteSavedItems))
 		} else {
 			lines = append(lines, "DELETE Source: explicit canonical manifest")
 		}
@@ -3780,6 +3795,45 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// savedItemsSourceLine describes a DELETE --items-file read as a saved S3 items file: its format,
+// the rows converted and its distinct buckets.
+func savedItemsSourceLine(source *scenario.SavedItemsSource) string {
+	names := make([]string, 0, len(source.Buckets))
+	for _, bucket := range source.Buckets {
+		names = append(names, consoleBucketName(bucket))
+	}
+	buckets := strings.Join(names, ", ")
+	switch {
+	case source.MoreBuckets:
+		buckets += fmt.Sprintf(", ... (more than %d buckets)", source.BucketCount)
+	case source.BucketCount > len(source.Buckets):
+		buckets += fmt.Sprintf(", ... (%d buckets)", source.BucketCount)
+	}
+	rows := "rows"
+	if source.Rows == 1 {
+		rows = "row"
+	}
+	return fmt.Sprintf(
+		"DELETE Source: saved S3 items file (write --save-items), %d %s converted to current-key deletes; buckets: %s",
+		source.Rows, rows, buckets)
+}
+
+// maxConsoleBucketBytes bounds a bucket name from an items file on the console.
+const maxConsoleBucketBytes = 64
+
+// consoleBucketName quotes a bucket name read from a file, so control bytes cannot reach the
+// terminal, and cuts a long one at a rune boundary to maxConsoleBucketBytes, marked with "…".
+func consoleBucketName(bucket string) string {
+	if len(bucket) <= maxConsoleBucketBytes {
+		return fmt.Sprintf("%q", bucket)
+	}
+	cut := maxConsoleBucketBytes
+	for cut > 0 && !utf8.RuneStart(bucket[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%q…", bucket[:cut])
 }
 
 func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {

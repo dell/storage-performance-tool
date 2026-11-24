@@ -123,7 +123,8 @@ Start with a local mock workload, which requires no S3 endpoint:
 > workloads include DELETE), and standalone `delete` can remove selected objects.
 > Use a dedicated benchmark bucket; never use production data. For `write`,
 > `--prefix` groups generated keys under a literal prefix, before any shard directories.
-> Seeded DELETE owns a unique run namespace; `--items-file` and
+> Seeded DELETE owns a unique run namespace; `--items-file` (a canonical
+> manifest, or the `items.csv` an S3 write saved, for current-key deletes) and
 > `--delete-existing` target scopes you select. Review the [S3 DELETE safety
 > guide](cli/docs/S3_DELETE.md) before deleting existing data.
 

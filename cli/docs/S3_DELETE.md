@@ -52,7 +52,8 @@ stable auto-termination, or a public request-rate limit.
 
 ## Explicit canonical manifest
 
-`--items-file` selects an RFC 4180 CSV with this exact header:
+`--items-file` selects an RFC 4180 CSV with this exact header, or a saved S3 items file (see
+[Saved S3 items file](#saved-s3-items-file)):
 
 ```csv
 bucket,key,size,version_id
@@ -93,6 +94,61 @@ spt run delete \
   --object-count 1000 \
   --headless
 ```
+
+### Saved S3 items file
+
+`--items-file` also takes the `items.csv` that an S3 `spt run write --save-items` saved, as it is.
+A file whose first record is not the header above is read as such a file, with no header and one
+object per line:
+
+```text
+/benchmark-test/s0000009/9dpngcferyc9,cb00c2fdd62852c,4096,0/0
+```
+
+The CLI converts each row to the current-key manifest row `benchmark-test,s0000009/9dpngcferyc9,4096,`:
+the bucket is the first path segment and the key all the rest, verbatim, inner empty segments
+included. Everything after that is the canonical pipeline above: sort, de-duplication (a write and
+its later update collapse to one object), the conflicting-size check, the `--bucket` assertion, the
+multi-bucket rule, `--object-count` and the recorded counts and SHA-256. The file stages to the same
+bytes as the equivalent manifest. After staging the CLI prints `DELETE Source: saved S3 items file
+(write --save-items)` with the rows converted and the first few distinct buckets (quoted, each cut
+to 64 bytes) and their count.
+
+- **Current-key deletes only.** The file names no version. On a versioned bucket the data versions
+  stay and each DELETE adds a delete marker. Delete exact versions with a canonical manifest.
+- **From an S3 write only.** An `fs` or mock-driver row has no leading `/` and is refused, but an
+  absolute `fs` path such as `/var/tmp/...` reads as bucket `var`. Pass `--bucket`: it is a
+  recommended check, applied to every row. It must be the first path segment of the saved names,
+  not the write's `--bucket`: a write with `--bucket b/sub/` saves `/b/sub/...`, so pass
+  `--bucket b`.
+- **Wrong keys are not visible to the CLI.** Rows that an `s3-aws` write before 5.17.1 saved with a
+  bucket or path ending in `/` name keys that were never stored. `--validate-inventory` checks that
+  every selected key exists before the timed phase and stops the run if one does not. `--verify`
+  does not catch wrong keys: a HEAD of a selected key that answers 404 counts that key as verified
+  absent, not as deleted, whether or not the run removed anything.
+- **Rows the CLI refuses because the key may not be the stored one.** A `~` anywhere in the key: a
+  versioned Netty write names a version as `key~versionId`, and the version ID can hold `/`. A `%`
+  anywhere in the name: a Netty write can send a `%XX` as a URI escape, so the target stores the
+  decoded key (`r%41` stores `rA`) while DELETE addresses the literal `%` (a known 5.17.1 limit:
+  the `s3` driver sends a `%XX` in a key as written). A `+` anywhere in the name: a Netty write
+  sends it raw while DELETE encodes it as `%2B`, so a target that reads a raw `+` in a path as a
+  space stores another key. Convert such a file by hand to a canonical manifest of the stored
+  keys and versions.
+- **Several buckets** need `--delete-batch-size=1`.
+- **`--object-count`** caps after the canonical sort, not in file order.
+- Rows saved by a manifest-driven read of a key that starts with `/` lose that slash.
+
+One line that can't be mapped safely to one object refuses the whole file before anything starts,
+with exit 1 and no request sent. The error names the line number and the reason, never the row or
+its bucket or key, and names both accepted formats: a name that does not start with `/`, which
+includes a canonical file without its header; an empty bucket (`//k`); a missing or empty key
+(`/b`, `/b/`); a key that starts with `/` (`/b//k`); a `~` anywhere in the key; a `%` or `+` anywhere in
+the name; more than three commas, so a comma in the key; a quote in the name; a line over 1 MiB
+without its line end; a blank line; a bare CR; invalid UTF-8; or an offset, size or layer/mask that
+is not `<hex>`, `<nonnegative decimal>` or `<hex>/<hex>`. A row whose bucket is not `--bucket` is
+refused with its line number, and one object given two sizes with the numbers of both lines. Any
+layer/mask is accepted. A saved file given the canonical header is refused as above; removing the
+header line lets DELETE read it. `read-verify --items-file` takes canonical manifests only.
 
 Empty selections fail. `--items-file` is mutually exclusive with `--delete-existing` and
 `--prefix`, and it cannot use `--cleanup` because SPT did not create the selected objects.

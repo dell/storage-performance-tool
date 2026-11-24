@@ -79,6 +79,16 @@ Transparent retries retain the logical request's first send marker but replace e
 so a terminal failure
 without a completed response cannot reuse stale latency or duration samples.
 
+### Multipart Upload Timing
+
+A multipart upload records one `Duration` and `Latency` sample per part and one for the upload
+itself, as on the `s3` driver. The upload's sample is its completion request alone, including any
+retries and back-off the client makes for it, as for a standalone DELETE (see
+[Client Retries](#client-retries)); a completion that fails adds no sample. The op trace's row for
+the upload's parent and the per-item timing output cover the completion too; for a failed upload they cover its completion and the abort sent after it, or the abort alone when parts failed. The whole upload's
+time is the op trace's initiation row's start to its parent row's end. Through 5.17.0 the upload's
+sample ran from its initiation to its completion.
+
 ### Reads Split by the Part Size
 
 A READ of an object larger than `item.data.ranges.threshold` (`--part-size` on the CLI) is split

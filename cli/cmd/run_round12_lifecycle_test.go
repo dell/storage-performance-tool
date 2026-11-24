@@ -48,7 +48,7 @@ func TestAutoResultsSetupFailureIsArtifactOutcome(t *testing.T) {
 	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
 		return &fakeFetcher{output: output, manifest: &results.Manifest{}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer, summary.RunEnd) (*summary.RunSummary, error) { return nil, nil }
 
 	for _, test := range []struct {
 		name  string

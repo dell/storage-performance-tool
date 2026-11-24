@@ -822,6 +822,117 @@ aws:
 	}
 }
 
+// A weighted step's Config, in the shape the engine writes it (the base config, then one document
+// per sub-load), is saved with every document masked (weighted-config-fetch-first-document 01).
+func TestFetcher_KeepsEveryConfigDocument(t *testing.T) {
+	step := "replay-001-20261121.100000.000-weighted"
+	configArtifact := []byte(`---
+storage:
+  auth:
+    uid: BASEUID
+    secret: BASESECRET
+load:
+  step:
+    id: "` + step + `"
+---
+storage:
+  auth:
+    uid: SUB1UID
+    secret: SUB1SECRET
+load:
+  op:
+    weight: 50
+    limit:
+      count: 100
+item:
+  output:
+    path: "/bkt/wl"
+---
+storage:
+  auth:
+    uid: SUB2UID
+    secret: SUB2SECRET
+load:
+  op:
+    type: "read"
+    weight: 50
+item:
+  input:
+    file: "items.csv"
+`)
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
+			idx := map[string]any{
+				"step_id": step,
+				"items": []map[string]any{
+					{"logger": "metrics.FileTotal", "href": "/logs/" + step + "/metrics.FileTotal", "size": 5},
+					{"logger": "Config", "href": "/logs/" + step + "/Config", "size": len(configArtifact)},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(idx)
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Config":            func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(configArtifact) },
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	man, err := f.FetchArtifactsForSteps(ctx, []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+
+	configName := step + "." + constants.ResultsArtifactSuffixConfig
+	data, err := os.ReadFile(filepath.Join(out, configName))
+	if err != nil {
+		t.Fatalf("read sanitized config: %v", err)
+	}
+	got := string(data)
+	for _, leaked := range []string{"BASEUID", "BASESECRET", "SUB1UID", "SUB1SECRET", "SUB2UID", "SUB2SECRET"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("sanitized config leaked %q:\n%s", leaked, got)
+		}
+	}
+	if n := strings.Count(got, "\n---\n"); n != 2 {
+		t.Fatalf("sanitized config has %d document separators, want 2 (3 documents):\n%s", n, got)
+	}
+	for _, want := range []string{"weight: 50", "count: 100", `path: "/bkt/wl"`, `type: "read"`, `file: "items.csv"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sanitized config lost %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "***"); n != 6 {
+		t.Fatalf("sanitized config masked %d values, want 6:\n%s", n, got)
+	}
+
+	// index.json, written to disk and returned, records the size of the whole masked file.
+	manifestData, err := os.ReadFile(filepath.Join(out, constants.ResultsManifestFileName))
+	if err != nil {
+		t.Fatalf("read index.json: %v", err)
+	}
+	var persisted Manifest
+	if err := json.Unmarshal(manifestData, &persisted); err != nil {
+		t.Fatalf("parse index.json: %v", err)
+	}
+	for name, m := range map[string]*Manifest{"returned": man, "index.json": &persisted} {
+		var size int64 = -1
+		for _, sm := range m.Steps {
+			for _, file := range sm.Files {
+				if file.Name == configName {
+					size = file.Size
+				}
+			}
+		}
+		if size != int64(len(data)) {
+			t.Fatalf("%s manifest config size = %d, want the file's %d", name, size, len(data))
+		}
+	}
+}
+
 func TestFetcher_RetryOnServerError(t *testing.T) {
 	step := "mt-001-20250101.000000.000-create"
 	var count int32
