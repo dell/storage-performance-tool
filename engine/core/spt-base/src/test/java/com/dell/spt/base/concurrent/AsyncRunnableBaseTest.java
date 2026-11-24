@@ -266,4 +266,48 @@ class AsyncRunnableBaseTest {
 		t.join(2000);
 		assertTrue(awaited.get(), "await() should have returned after close()");
 	}
+
+	@Test
+	void afterCloseTransitionRunsOnceAfterTheStateIsClosedAndItsFailureLeavesItClosed() throws IOException {
+		final var failure = new IOException("after close");
+		final var calls = new java.util.concurrent.atomic.AtomicInteger();
+		final var stateSeen = new java.util.concurrent.atomic.AtomicReference<State>();
+		final var r = new TestRunnable() {
+			@Override
+			protected void afterCloseTransition() throws IOException {
+				calls.incrementAndGet();
+				stateSeen.set(state());
+				throw failure;
+			}
+		};
+		r.start();
+
+		assertSame(failure, assertThrows(IOException.class, r::close));
+
+		assertEquals(State.CLOSED, stateSeen.get());
+		assertTrue(r.isClosed());
+		r.close();
+		assertEquals(1, calls.get(), "a close of a closed object calls no hook");
+	}
+
+	@Test
+	void afterCloseTransitionIsNotCalledWhenTheCloseFails() {
+		final var calls = new java.util.concurrent.atomic.AtomicInteger();
+		final var r = new TestRunnable() {
+			@Override
+			protected void doClose() {
+				throw new IllegalStateException("close failed");
+			}
+
+			@Override
+			protected void afterCloseTransition() {
+				calls.incrementAndGet();
+			}
+		};
+
+		assertThrows(IllegalStateException.class, r::close);
+
+		assertFalse(r.isClosed());
+		assertEquals(0, calls.get());
+	}
 }

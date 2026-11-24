@@ -144,6 +144,38 @@ class DaemonBaseTest {
 	}
 
 	@Test
+	void aDaemonClosedByAFailingCloseLeavesTheRegistry() throws Exception {
+		final var failure = new IOException("after close");
+		final var d = new TestDaemon() {
+			@Override
+			protected void afterCloseTransition() throws IOException {
+				throw failure;
+			}
+		};
+		assertTrue(registered(d));
+
+		assertSame(failure, assertThrows(IOException.class, d::close));
+
+		assertTrue(d.isClosed());
+		assertFalse(registered(d));
+	}
+
+	@Test
+	void aDaemonWhoseCloseFailsStaysInTheRegistry() throws Exception {
+		final var d = new TestDaemon() {
+			@Override
+			protected void doClose() {
+				throw new IllegalStateException("close failed");
+			}
+		};
+
+		assertThrows(IllegalStateException.class, d::close);
+
+		assertFalse(d.isClosed());
+		assertTrue(registered(d), "closeAll still closes it");
+	}
+
+	@Test
 	void closeAllInterruptsAStartInProgressAndClosesTheDaemon() throws Exception {
 		final var daemon = new BlockedStartDaemon();
 		final var starter = daemon.startInNewThread();

@@ -16,8 +16,11 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.client.StepIdReuseAtStartTest;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.bucket.BucketContextReply;
 import com.dell.spt.base.metrics.bucket.BucketMeters;
@@ -29,12 +32,17 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import java.io.IOException;
 import java.lang.ref.WeakReference;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 class LoadStepBucketMetricsSetupTest {
@@ -121,6 +129,32 @@ class LoadStepBucketMetricsSetupTest {
 		return config;
 	}
 
+	/** The folders of the steps a test started; the step's close writes its lifecycle files there. */
+	private final List<Path> startedStepDirs = new ArrayList<>();
+
+	@AfterEach
+	void removeTheStartedStepsFolders() throws IOException {
+		for (final Path dir : startedStepDirs) {
+			StepIdReuseAtStartTest.removeFolder(dir);
+		}
+	}
+
+	/**
+	 * A started step publishes its lifecycle files when it is closed. Left open, the next
+	 * {@code DaemonBase.closeAll()} in the JVM publishes them, and a later step with that id is refused
+	 * as a reuse. So a started step gets its own id, the test closes it, and its folder is removed after
+	 * the test.
+	 */
+	private Config startedStepConfig(final String name) throws IOException {
+		final Config config = config(4);
+		final String stepId = "bucket-metrics-setup-" + name + "-" + UUID.randomUUID();
+		config.val("load-step-id", stepId);
+		startedStepDirs.add(Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), stepId))
+						.toAbsolutePath()
+						.getParent());
+		return config;
+	}
+
 	@Test
 	void shippedDefaultIsOnAndBothSpellingsReachOneSetting() {
 		final Config config = TestConfigBuilder.config();
@@ -191,26 +225,27 @@ class LoadStepBucketMetricsSetupTest {
 	 */
 	@Test
 	void aBarrierStepRegistersItsContextOnlyAtTheRelease() throws Exception {
-		final Config config = config(4);
+		final Config config = startedStepConfig("barrier");
 		final MetricsManager manager = mock(MetricsManager.class);
-		final var step = new SetupStep(config, manager);
-		final MetricsContext context = step.barrierContext(config, mock(LoadStepContext.class));
-		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
-		step.startContexts();
-		awaitState(step, PreparationStatus.State.READY);
-		verify(manager, never()).register(any());
+		try (var step = new SetupStep(config, manager)) {
+			final MetricsContext context = step.barrierContext(config, mock(LoadStepContext.class));
+			step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+			step.startContexts();
+			awaitState(step, PreparationStatus.State.READY);
+			verify(manager, never()).register(any());
 
-		assertTrue(step.releasePreparedAdmission(7));
-		verify(manager, times(1)).register(context);
+			assertTrue(step.releasePreparedAdmission(7));
+			verify(manager, times(1)).register(context);
 
-		// Another slice failing to release fences this one too, but this one opened, so it keeps its data.
-		step.fencePreparation(7);
-		step.closeWindows();
-		assertEquals(1, step.metersBuilt());
-		final BucketContextReply reply = onlyReply(step);
-		assertEquals(5, reply.wholeStep().size(), "4 members and the catch-all");
-		reply.wholeStep().forEach(record -> assertEquals(0L, record.succeeded(), record.bucket()));
-		assertEquals(BucketSteadyOutcome.Kind.NOT_REACHED, reply.steady().kind(), "no warm-up completed");
+			// Another slice failing to release fences this one too, but this one opened, so it keeps its data.
+			step.fencePreparation(7);
+			step.closeWindows();
+			assertEquals(1, step.metersBuilt());
+			final BucketContextReply reply = onlyReply(step);
+			assertEquals(5, reply.wholeStep().size(), "4 members and the catch-all");
+			reply.wholeStep().forEach(record -> assertEquals(0L, record.succeeded(), record.bucket()));
+			assertEquals(BucketSteadyOutcome.Kind.NOT_REACHED, reply.steady().kind(), "no warm-up completed");
+		}
 	}
 
 	/**
@@ -220,27 +255,28 @@ class LoadStepBucketMetricsSetupTest {
 	 */
 	@Test
 	void aFenceBeforeTheReleaseFreesTheBucketMeters() throws Exception {
-		final Config config = config(4);
+		final Config config = startedStepConfig("fence");
 		final MetricsManager manager = mock(MetricsManager.class);
-		final var step = new SetupStep(config, manager);
-		final LoadStepContextImpl<?, ?> stepContext = mock(LoadStepContextImpl.class);
-		step.barrierContext(config, stepContext);
-		final WeakReference<BucketMeters> meters = new WeakReference<>(step.bucketMeters().get(0));
-		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(1));
-		step.startContexts();
-		awaitState(step, PreparationStatus.State.FENCED);
-		verify(manager, never()).register(any());
-		verify(stepContext, timeout(20_000).atLeastOnce()).bucketRecorder(null);
+		try (var step = new SetupStep(config, manager)) {
+			final LoadStepContextImpl<?, ?> stepContext = mock(LoadStepContextImpl.class);
+			step.barrierContext(config, stepContext);
+			final WeakReference<BucketMeters> meters = new WeakReference<>(step.bucketMeters().get(0));
+			step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(1));
+			step.startContexts();
+			awaitState(step, PreparationStatus.State.FENCED);
+			verify(manager, never()).register(any());
+			verify(stepContext, timeout(20_000).atLeastOnce()).bucketRecorder(null);
 
-		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-		while (meters.get() != null) {
-			assertTrue(System.nanoTime() < deadline, "something still holds the fenced step's meters");
-			System.gc();
-			TimeUnit.MILLISECONDS.sleep(20);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+			while (meters.get() != null) {
+				assertTrue(System.nanoTime() < deadline, "something still holds the fenced step's meters");
+				System.gc();
+				TimeUnit.MILLISECONDS.sleep(20);
+			}
+			assertTrue(step.bucketMeters().isEmpty());
+			assertNull(assertTimeoutPreemptively(Duration.ofSeconds(4), () -> step.bucketMetrics(BucketMetricsRange.ALL)));
+			assertTimeoutPreemptively(Duration.ofSeconds(4), step::closeWindows, "no end pass to wait for");
 		}
-		assertTrue(step.bucketMeters().isEmpty());
-		assertNull(assertTimeoutPreemptively(Duration.ofSeconds(4), () -> step.bucketMetrics(BucketMetricsRange.ALL)));
-		assertTimeoutPreemptively(Duration.ofSeconds(4), step::closeWindows, "no end pass to wait for");
 	}
 
 	/** A fence that comes first leaves no later cleanup to rely on, so setup builds nothing at all. */

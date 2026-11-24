@@ -24,6 +24,7 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.EarlierRunFiles;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdInUseException;
@@ -184,7 +185,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 					final List<Extension> extensions,
 					final List<Config> contextConfigs,
 					final MetricsManager metricsManager) {
-		super(baseConfig, extensions, contextConfigs, metricsManager);
+		super(baseConfig, extensions, contextConfigs, metricsManager, true);
+		// Only now, with this class's fields set, may the exit hook close this step.
+		registerForCloseAll();
 	}
 
 	@Override
@@ -249,7 +252,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						reconciled);
 	}
 
-	/** A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at close. */
+	/**
+	 * A slice refused at JVM exit never ran, so, like one refused for its id, it publishes nothing at
+	 * close. Neither does one whose start never reached it, as when a stop cut the entry's start
+	 * after the slice was created.
+	 */
 	@Override
 	protected final void onStartRefusedAtJvmExit() {
 		startRefused = true;
@@ -855,7 +862,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		boolean countLimitConfigured = false;
 		boolean countLimitApplied = false;
 		try {
-			final long countLimit = this.config.longVal("load-op-limit-count");
+			// A mixed step counts against every sub-load over the base; other step types keep the base's
+			// count here, which the CLI's completion detection reads.
+			final Config countConfig = mixesOperations() ? effectiveConfig(originIndex) : this.config;
+			final long countLimit = countConfig.longVal("load-op-limit-count");
 			countLimitConfigured = true;
 			metricsCtx.metadata().put(MetricsConstants.METADATA_LIMIT_OP_COUNT, countLimit);
 			countLimitApplied = true;
@@ -1268,7 +1278,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * warns; they are evidence, not a step outcome.
 	 */
 	private void publishNicPaths() {
-		if (nicPathsPublished || startRefused) {
+		if (nicPathsPublished || publishesNothing()) {
 			return;
 		}
 		nicPathsPublished = true;
@@ -1306,14 +1316,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * Refuses this slice, before it seeds or writes any of them, when an earlier step with the same id
 	 * left one of the {@link StepIdFiles} this slice would publish: the same files the Entry Node
 	 * tests before it starts any slice. A refused slice publishes nothing at close, so the earlier
-	 * step's files, its event-loop report among them, stay as they were.
+	 * step's files, its event-loop report among them, stay as they were. On a worker engine, an earlier
+	 * run's files were moved aside before the Entry Node created this slice (see {@link
+	 * EarlierRunFiles}); this check refuses any it finds, as on every engine.
 	 */
 	@Override
 	protected final void refuseStepIdInUse(final boolean nodes) {
 		startRefused = false;
 		final var paths = new ArrayList<Path>();
-		for (final var loggerName : StepIdFiles.sliceLoggerNames(
-						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs))) {
+		final var loggerNames = StepIdFiles.sliceLoggerNames(
+						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs));
+		for (final var loggerName : loggerNames) {
 			try {
 				paths.add(Path.of(FileManager.INSTANCE.logFileName(loggerName, loadStepId())));
 			} catch (final IOException | RuntimeException unknown) {
@@ -1328,6 +1341,13 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			startRefused = true;
 			throw refused;
 		}
+		// Where no list of open files tells, a later run's move aside of these files asks this.
+		EarlierRunFiles.noteSliceStart(loadStepId(), loggerNames);
+	}
+
+	/** Refused, or no start reached it: neither the start nor its wrapped part, which sets the worker id. */
+	private boolean publishesNothing() {
+		return startRefused || (!startReached() && operationLifecycleWorkerId == null);
 	}
 
 	private boolean publishesOperationLifecycle() {
@@ -1362,7 +1382,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void publishOperationLifecycle() {
-		if (operationLifecyclePublished || startRefused || !publishesOperationLifecycle()) {
+		if (operationLifecyclePublished || publishesNothing() || !publishesOperationLifecycle()) {
 			return;
 		}
 		final var counters = new ArrayList<OperationLifecycleCounters>();

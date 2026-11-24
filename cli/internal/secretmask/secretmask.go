@@ -4,6 +4,8 @@ package secretmask
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"regexp"
 	"strings"
 
@@ -31,21 +33,53 @@ func Text(s string) string {
 	return out
 }
 
-// YAML masks sensitive fields in YAML documents, falling back to text masking if
-// the input is not valid YAML.
+// fallbackUID masks a config's storage.auth.uid line, which Text alone leaves
+// in clear because the key is only uid: in YAML.
+var fallbackUID = regexp.MustCompile(`(?im)^(\s*uid\s*:\s*)(.*)$`)
+
+// yamlFallback masks a YAML stream that does not parse as text.
+func yamlFallback(data []byte) string {
+	return fallbackUID.ReplaceAllString(Text(string(data)), "${1}"+masked)
+}
+
+// YAML masks sensitive fields in every document of a YAML stream and writes the
+// documents back in order (a weighted step's config.yaml holds the base config,
+// then one document per sub-load). It falls back to text masking of the whole
+// input if any document is not valid YAML.
 func YAML(data []byte) []byte {
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return []byte(Text(string(data)))
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	var docs []*yaml.Node
+	for {
+		var node yaml.Node
+		err := dec.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return []byte(yamlFallback(data))
+		}
+		maskYAMLNode(&node, nil)
+		docs = append(docs, &node)
 	}
-	maskYAMLNode(&node, nil)
 	var out bytes.Buffer
 	enc := yaml.NewEncoder(&out)
 	enc.SetIndent(2)
-	if err := enc.Encode(&node); err != nil {
-		return []byte(Text(string(data)))
+	if len(docs) == 0 {
+		var empty yaml.Node
+		if err := enc.Encode(&empty); err != nil {
+			_ = enc.Close()
+			return []byte(yamlFallback(data))
+		}
 	}
-	_ = enc.Close()
+	for _, doc := range docs {
+		if err := enc.Encode(doc); err != nil {
+			_ = enc.Close()
+			return []byte(yamlFallback(data))
+		}
+	}
+	if err := enc.Close(); err != nil {
+		return []byte(yamlFallback(data))
+	}
 	return out.Bytes()
 }
 
