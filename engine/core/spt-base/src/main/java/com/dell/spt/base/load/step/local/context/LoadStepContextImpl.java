@@ -989,6 +989,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						// TODO: possible change: remove dataItem.offset() to improve perf and increase variability
 						dataItem.offset(dataItem.offset() + rand.get().nextLong());
 					}
+					resetRecycledComposite(opResult);
 					generator.recycle(opResult);
 				}
 
@@ -1118,6 +1119,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								listShardMetricsRecorder.onRequeue(shardRef);
 							}
 						}
+						resetRecycledComposite(opResult);
 						generator.recycle(opResult);
 					}
 
@@ -1201,6 +1203,18 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} else {
 			generator.recycle(opResult);
 			counterResults.increment();
+		}
+	}
+
+	/**
+	 * A finished composite's result copy keeps its count of unsettled parts, 0, but not its parts or
+	 * its context (such as the upload ID): recycled as it is, it would reach the driver looking already
+	 * split and go straight to its completion. Reset it, as the whole-operation retry does, so that each
+	 * circulation is a new initiation, every part and a completion.
+	 */
+	private static void resetRecycledComposite(final Operation<?> opResult) {
+		if (opResult instanceof CompositeOperation<?> recycledComposite) {
+			recycledComposite.resetSubOperations();
 		}
 	}
 

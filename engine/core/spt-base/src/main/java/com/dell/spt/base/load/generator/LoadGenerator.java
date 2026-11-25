@@ -109,6 +109,9 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	/**
 	 * Enqueues the task for further recycling.
 	 *
+	 * <p>The default {@link #retry} calls this, on the shared retry timer for a delayed retry, so
+	 * it must not block (see {@link #retry}).
+	 *
 	 * @param op the task to recycle
 	 */
 	void recycle(final O op);
@@ -132,6 +135,11 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	 * here is not abandoned if the generator was otherwise about to consider itself finished
 	 * (see {@code LoadGeneratorImpl#isFinished()}).
 	 *
+	 * <p>A delayed retry calls this on the engine's shared retry timer, one thread for every step
+	 * in the JVM, so it must not block: no waiting for queue space, I/O or another thread's work,
+	 * only a short lock hold. While it blocks, no other step's delayed retry runs. The default
+	 * calls {@link #recycle}, which is then held to the same rule.
+	 *
 	 * @param op the operation to redispatch
 	 */
 	default void retry(final O op) {
@@ -143,6 +151,9 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	 * The coordinator owns retry policy, delay and attempt accounting before this handoff.
 	 * False means no queue ownership was accepted; a closed generator settles a valid pending
 	 * token's previous failure. Third-party generators must explicitly support this contract.
+	 *
+	 * <p>As with {@link #retry}, a delayed range retry calls this on the engine's shared retry
+	 * timer, so it must not block.
 	 */
 	default boolean retryRange(final O op, final RangeReadAttempt attempt) {
 		throw new UnsupportedOperationException("Retained range retry admission is unsupported");
