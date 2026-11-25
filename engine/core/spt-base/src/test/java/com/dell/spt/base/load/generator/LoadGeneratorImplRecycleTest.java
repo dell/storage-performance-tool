@@ -37,6 +37,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Characterization tests for the recycle-poll path in {@link LoadGeneratorImpl#doWork()}.
@@ -832,7 +834,107 @@ class LoadGeneratorImplRecycleTest {
 		}
 	}
 
+	/** The recycle pull stops at the count limit, however many operations are waiting to go out again. */
+	@ParameterizedTest
+	@CsvSource({
+			"32768, 3, 2",
+			"32768, 1001, 1000",
+			"4, 5, 4",
+			"1, 3, 2"
+	})
+	void recyclePullStopsAtTheCountLimit(final int batchSize, final long countLimit, final int circulating)
+					throws Exception {
+		final var capped = cappedGenerator(batchSize, countLimit, List.of());
+		try {
+			capped.doWork(); // exhaust item input
+			final var ops = newOps(circulating);
+			// Each pass sends at least one operation until the count, so a short count ends the loop.
+			for (var pass = 0; pass < countLimit + 20 && output.received.size() < countLimit; pass++) {
+				if (capped.isNothingToRecycle()) {
+					ops.forEach(capped::recycle); // the whole population comes back at once
+				}
+				capped.doWork();
+			}
+			assertEquals(countLimit, output.received.size());
+			assertEquals(countLimit, capped.generatedOpCount());
+		} finally {
+			capped.close();
+		}
+	}
+
+	/** Operations a throttle holds back stay inside the count: the pull counts them as generated. */
+	@Test
+	void throttledLeftoversStayWithinTheCountLimit() throws Exception {
+		final Throttle onePerPass = new Throttle() {
+			@Override
+			public boolean tryAcquire() {
+				return true;
+			}
+
+			@Override
+			public int tryAcquire(final int requested) {
+				return Math.min(1, requested);
+			}
+		};
+		final var capped = cappedGenerator(32768, 6, List.of(onePerPass));
+		try {
+			capped.doWork();
+			newOps(4).forEach(capped::recycle);
+			for (var pass = 0; pass < 20 && !capped.isStopped(); pass++) {
+				final var from = output.received.size();
+				capped.doWork();
+				output.received.subList(from, output.received.size()).forEach(capped::recycle);
+			}
+			assertEquals(6, output.received.size());
+			assertEquals(6, capped.generatedOpCount());
+		} finally {
+			capped.close();
+		}
+	}
+
+	/** At the count the generator stops, and what it did not pull is recovered as unattempted. */
+	@Test
+	void generatorFinishesAtTheCountLimitAndLeavesTheRestUnattempted() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperation<DataItem>>();
+		final var capped = cappedGenerator(32768, 3, List.of());
+		capped.operationLifecycle(tracker);
+		try {
+			capped.doWork();
+			final var ops = newOps(5);
+			ops.forEach(capped::recycle);
+			capped.doWork();
+			assertEquals(3, output.received.size());
+			assertFalse(capped.isStopped(), "the count is noticed on the next pass");
+
+			capped.doWork();
+			assertTrue(capped.isStopped());
+			assertEquals(3, capped.generatedOpCount());
+			final var recovered = capped.recoverBufferedOperations();
+			assertEquals(2, recovered.size());
+			for (final var expected : ops.subList(3, 5)) {
+				assertTrue(recovered.stream().anyMatch(actual -> actual == expected));
+			}
+			assertEquals(2, tracker.snapshot().unattempted());
+		} finally {
+			capped.close();
+		}
+	}
+
 	// --- helpers ---
+
+	private LoadGeneratorImpl<DataItem, DataOperation<DataItem>> cappedGenerator(
+					final int batchSize, final long countLimit, final List<Object> throttles) {
+		return new LoadGeneratorImpl<>(
+						itemInput, opsBuilder, throttles, output, batchSize, countLimit, 1_000_000, true, false);
+	}
+
+	private List<DataOperation<DataItem>> newOps(final int count) {
+		final var ops = new ArrayList<DataOperation<DataItem>>(count);
+		for (var i = 0; i < count; i++) {
+			ops.add(newOp("capped-" + i));
+		}
+		return ops;
+	}
 
 	private static <I> Input<I> fixedBatchInput(final String name, final List<I> items) throws Exception {
 		final var input = (Input<I>) mock(Input.class);

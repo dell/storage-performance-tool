@@ -194,6 +194,26 @@ class WeightedLoadStepClientCountSlicesTest {
 		assertEquals(List.of(), workerMgr.getTerminalSteps(), "the worker's slice never started");
 	}
 
+	/** A recycling sub-load stops at its count on each engine, so an odd count adds up exactly. */
+	@Test
+	void aRecyclingSubLoadDoesExactlyItsCountAcrossTheEngines() throws Exception {
+		config.val("load-op-limit-count", 0L);
+		config.val("load-op-limit-rate", 0);
+		client = new WeightedLoadStepClient(config, extensions(), null, entryMgr)
+						.append(Map.of(
+										"item", Map.of("input", Map.of("file", items("eight.csv", 8).toString())),
+										"load", Map.of(
+														"op", Map.of(
+																		"type", "update",
+																		"recycle", Map.of("mode", true),
+																		"limit", Map.of("count", 43L)))));
+		assertTimeoutPreemptively(RUN_TIMEOUT, client::run);
+
+		assertEquals(22, entry(entryMgr, false).successCount);
+		assertEquals(21, entry(workerMgr, false).successCount);
+		assertEquals(43, entry(entryMgr, true).successCount);
+	}
+
 	/** Each engine has its own weight cycle, and a finished sub-load must leave each of them. */
 	@Test
 	void aSubLoadThatFinishesFirstLeavesTheOtherToItsCountOnEveryEngine() {
