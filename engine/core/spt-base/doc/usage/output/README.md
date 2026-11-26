@@ -409,7 +409,7 @@ can be joined.
 | OpType           | The load operation type name: `NOOP`, `CREATE`, `READ`, `UPDATE`, `DELETE`, `LIST` or `STAT`
 | Status           | The load operation resulting status name, listed below
 | ReqTimeStart[us] | The load operation start timestamp in microseconds
-| Duration[us]     | The load operation total duration in microseconds
+| Duration[us]     | The load operation total duration in microseconds. Empty when the row has no start (the attempt failed before its request was sent).
 | RespLatency[us]  | The load operation response latency in microseconds
 | DataLatency[us]  | The load operation response data latency ("1st byte" of the response content) in microseconds
 | TransferSize     | The count of the bytes transferred within the load operation
