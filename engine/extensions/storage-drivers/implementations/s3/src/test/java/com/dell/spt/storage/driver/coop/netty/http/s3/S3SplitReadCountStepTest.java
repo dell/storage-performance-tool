@@ -248,7 +248,8 @@ final class S3SplitReadCountStepTest {
 	/**
 	 * The lifecycle accepted exactly the successful results in the step's trace and failed exactly the
 	 * others: a result output and then left unresolved, or ended without output, breaks one of them.
-	 * With the artifact's own reconciliation, the unresolved are the rest of what the step selected.
+	 * It checks neither {@code unattempted} nor {@code unresolved}: the artifact's reconciliation pins
+	 * only their sum, and no test checks {@code selected}.
 	 */
 	private void assertLifecycleEndsEveryResult() throws IOException, InterruptedException {
 		final var lifecycle = lifecycle();

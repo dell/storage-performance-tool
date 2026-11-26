@@ -66,12 +66,11 @@ import org.junit.jupiter.api.io.TempDir;
  * GET at its position in the object, whatever the item's offset in the data ring, which every test
  * makes nonzero. The read is counted once, when its last part ends, with its parts' bytes and a
  * duration from its initial pass to that end. A step's count is therefore the complete sets of
- * ranges the client completed, whenever the step ends, and only a read with a range unsent at the
- * stop can be unresolved. The step tests take the ranges completed from the client's own range
- * results, in the step's operation trace: a request the stub received is not one the client
- * completed. The step's {@code operation.lifecycle.csv} ends exactly the results in its trace,
- * successes and failures, so a result the step output, such as a read it counted, is never also left
- * unresolved.
+ * ranges the client completed, whenever the step ends. The step tests take the ranges completed
+ * from the client's own range results, in the step's operation trace: a request the stub received
+ * is not one the client completed. The step's {@code operation.lifecycle.csv} ends exactly the
+ * results in its trace, successes and failures, so a result the step output, such as a read it
+ * counted, is never also left unresolved.
  */
 @Timeout(value = 240, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3AwsCompositeReadTest {
@@ -383,7 +382,8 @@ final class S3AwsCompositeReadTest {
 	/**
 	 * The lifecycle accepted exactly the successful results in the step's trace and failed exactly the
 	 * others: a result output and then left unresolved, or ended without output, breaks one of them.
-	 * With the artifact's own reconciliation, the unresolved are the rest of what the step selected.
+	 * It checks neither {@code unattempted} nor {@code unresolved}: the artifact's reconciliation pins
+	 * only their sum, and no test checks {@code selected}.
 	 */
 	private void assertLifecycleEndsEveryResult() throws IOException, InterruptedException {
 		final var lifecycle = lifecycle();
