@@ -8,6 +8,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.github.akurilov.commons.collection.Range;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -458,6 +459,12 @@ public class FileIoHelperTest {
 		assertFixedRangesUpdate(0, 1024, 1536, 724 + 512, 7, "300-", "-512-");
 	}
 
+	/** A suffix range (-N) after an append also addresses the grown size: it writes bytes 336-1535. */
+	@Test
+	public void anAppendThenASuffixOverwriteLongerThanTheItemCountTheBytesWritten() throws Exception {
+		assertFixedRangesUpdate(0, 1024, 1536, 512 + 1200, "-512-", "-1200");
+	}
+
 	// A write that fails after a range of the list was written leaves the recorded size as it was; the retry (the driver
 	// resets the operation) writes the same ranges at the same offsets.
 
@@ -494,11 +501,28 @@ public class FileIoHelperTest {
 	/** Calling the helper again after it returned {@code true} changes nothing. */
 	@Test
 	public void aCallAfterTheUpdateIsDoneChangesNothing() throws Exception {
+		assertACallAfterTheUpdateIsDoneChangesNothing(1536, 512, "-512-");
+	}
+
+	/** The same after a last range that writes nothing (from offset 2000 of the grown 1,536 bytes). */
+	@Test
+	public void aCallAfterAnUpdateEndingInAnEmptyRangeIsDoneChangesNothing() throws Exception {
+		assertACallAfterTheUpdateIsDoneChangesNothing(1536, 512, "-512-", "2000-");
+	}
+
+	@Test
+	public void aCallAfterAnOverwriteIsDoneChangesNothing() throws Exception {
+		assertACallAfterTheUpdateIsDoneChangesNothing(1024, 400, "0-99", "-300");
+	}
+
+	private static void assertACallAfterTheUpdateIsDoneChangesNothing(
+					final long expectedSize, final long expectedOpBytes, final String... ranges) throws Exception {
 		final DataItemImpl item = new DataItemImpl("item", 0, 1024);
 		item.dataInput(new SeedDataInput(RING_SEED, RING_SIZE, 1, true));
-		final List<Range> fixed = List.of(new Range("-512-"));
+		final List<Range> fixed = rangesOf(ranges);
 		final Path dst = Files.createTempFile("fs-fixed-ranges-update-", ".bin");
 		try {
+			Files.write(dst, new byte[1024]);
 			final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, null, null, fixed, 0);
 			op.startRequest();
 			try (final FileChannel dstCh = FileChannel.open(dst, StandardOpenOption.WRITE)) {
@@ -507,10 +531,113 @@ public class FileIoHelperTest {
 					assertTrue(guard++ < 10_000, "the update makes progress");
 				}
 				assertTrue(FileIoHelper.invokeFixedRangesUpdate(item, op, dstCh, fixed), "still done");
+				assertTrue(FileIoHelper.invokeFixedRangesUpdate(item, op, dstCh, fixed), "still done");
 			}
-			assertEquals(1536, item.size(), "recorded size");
-			assertEquals(512, op.countBytesDone(), "the operation's byte count");
-			assertEquals(1536, Files.size(dst), "file length");
+			assertEquals(expectedSize, item.size(), "recorded size");
+			assertEquals(expectedOpBytes, op.countBytesDone(), "the operation's byte count");
+			assertEquals(expectedSize, Files.size(dst), "file length");
+		} finally {
+			Files.deleteIfExists(dst);
+		}
+	}
+
+	// A reversed closed range (N1 > N2, N1 - 1 included) fails the update once the walk reaches it, as the slice of
+	// its negative or zero size did before; the ranges before it stay written and counted and the recorded size is
+	// kept. A list whose range sizes add up to zero or less, a reversed range's size counted as N2 - N1 + 1 and a
+	// from-offset range's as the item size less N, is done at once and writes nothing, as before. Neither may loop.
+
+	@Test
+	@Timeout(10)
+	public void aReversedFirstRangeFailsTheUpdate() throws Exception {
+		assertFixedRangesUpdateFailsOnAReversedRange(1024, 0, "500-400", "0-199");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aReversedRangeBeforeAnAppendFailsTheUpdate() throws Exception {
+		assertFixedRangesUpdateFailsOnAReversedRange(1024, 0, "500-400", "-512-");
+	}
+
+	/** On the code before the fix this one never finished: the earlier range's negative size put the offset past the next. */
+	@Test
+	@Timeout(10)
+	public void aReversedRangeBeforeAShorterRangeFailsTheUpdate() throws Exception {
+		assertFixedRangesUpdateFailsOnAReversedRange(1024, 0, "500-300", "0-99", "-512-");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aReversedMiddleRangeFailsTheUpdateAfterTheEarlierRanges() throws Exception {
+		assertFixedRangesUpdateFailsOnAReversedRange(1024, 100, "0-99", "500-400", "-512-");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aReversedLastRangeFailsTheUpdateAfterAnAppend() throws Exception {
+		assertFixedRangesUpdateFailsOnAReversedRange(1536, 612, "0-99", "-512-", "500-400");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aClosedRangeEndingBeforeItsStartFailsTheUpdate() throws Exception {
+		assertFixedRangesUpdateFailsOnAReversedRange(1024, 0, "500-499", "0-99");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aListWithAReversedRangeSummingToNothingWritesNothing() throws Exception {
+		assertDoneInOneCallWritingNothing(1024, "500-300", "0-99");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aListEndingInAReversedRangeSummingToNothingWritesNothing() throws Exception {
+		assertDoneInOneCallWritingNothing(1024, "0-99", "500-300");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aListWithAReversedRangeAndAnAppendSummingToNothingWritesNothing() throws Exception {
+		assertDoneInOneCallWritingNothing(1024, "2000-", "500-400", "-512-");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aLoneReversedRangeWritesNothing() throws Exception {
+		assertDoneInOneCallWritingNothing(1024, "500-300");
+	}
+
+	@Test
+	@Timeout(10)
+	public void aLoneClosedRangeEndingBeforeItsStartWritesNothing() throws Exception {
+		assertDoneInOneCallWritingNothing(1024, "500-499");
+	}
+
+	/**
+	 * Updates a 1 KiB item until the helper throws {@link IllegalArgumentException}, and checks the file length, the
+	 * kept recorded size and the bytes counted before the reversed range.
+	 */
+	private static void assertFixedRangesUpdateFailsOnAReversedRange(
+					final long expectedFileLength, final long expectedOpBytes, final String... ranges) throws Exception {
+		final DataItemImpl item = new DataItemImpl("item", 0, 1024);
+		item.dataInput(new SeedDataInput(RING_SEED, RING_SIZE, 1, true));
+		final List<Range> fixed = rangesOf(ranges);
+		final Path dst = Files.createTempFile("fs-fixed-ranges-update-", ".bin");
+		try {
+			Files.write(dst, new byte[1024]);
+			final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, null, null, fixed, 0);
+			op.startRequest();
+			try (final FileChannel dstCh = FileChannel.open(dst, StandardOpenOption.WRITE)) {
+				assertThrows(IllegalArgumentException.class, () -> {
+					int guard = 0;
+					while (!FileIoHelper.invokeFixedRangesUpdate(item, op, dstCh, fixed)) {
+						assertTrue(guard++ < 10_000, "the update makes progress");
+					}
+				}, "the reversed range fails the update");
+			}
+			assertEquals(1024, item.size(), "a failed update leaves the recorded size");
+			assertEquals(expectedOpBytes, op.countBytesDone(), "the bytes written before the reversed range");
+			assertEquals(expectedFileLength, Files.size(dst), "file length");
 		} finally {
 			Files.deleteIfExists(dst);
 		}
@@ -526,10 +653,10 @@ public class FileIoHelperTest {
 		assertDoneInOneCallWritingNothing(1024, "2000-");
 	}
 
-	private static void assertDoneInOneCallWritingNothing(final long size, final String range) throws Exception {
+	private static void assertDoneInOneCallWritingNothing(final long size, final String... ranges) throws Exception {
 		final DataItemImpl item = new DataItemImpl("item", 0, size);
 		item.dataInput(new SeedDataInput(RING_SEED, RING_SIZE, 1, true));
-		final List<Range> fixed = List.of(new Range(range));
+		final List<Range> fixed = rangesOf(ranges);
 		final Path dst = Files.createTempFile("fs-fixed-ranges-update-", ".bin");
 		try {
 			Files.write(dst, new byte[(int) size]);
@@ -544,6 +671,14 @@ public class FileIoHelperTest {
 		} finally {
 			Files.deleteIfExists(dst);
 		}
+	}
+
+	private static List<Range> rangesOf(final String... ranges) {
+		final List<Range> fixed = new java.util.ArrayList<>();
+		for (final String r : ranges) {
+			fixed.add(new Range(r));
+		}
+		return fixed;
 	}
 
 	private static void assertFixedRangesUpdate(
@@ -578,10 +713,7 @@ public class FileIoHelperTest {
 		final SeedDataInput dataInput = new SeedDataInput(RING_SEED, RING_SIZE, 1, true);
 		final DataItemImpl item = new DataItemImpl("item", itemOffset, size);
 		item.dataInput(dataInput);
-		final List<Range> fixed = new java.util.ArrayList<>();
-		for (final String r : ranges) {
-			fixed.add(new Range(r));
-		}
+		final List<Range> fixed = rangesOf(ranges);
 
 		// Which file bytes the update writes, applying each range in order to the size grown by earlier appends.
 		final BitSet written = new BitSet();

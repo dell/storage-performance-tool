@@ -422,21 +422,26 @@ public interface FileIoHelper {
 		final int rangeCount = byteRanges.size();
 		final int currRangeIdx = op.currRangeIdx();
 		if (currRangeIdx > rangeCount) {
-			return true; // done before
+			return true; // done before, and the size grew
 		}
 		// the recorded size changes only once the whole update is done, so a retry after a failure writes the same ranges
 		final long baseItemSize = fileItem.size();
+		if (currRangeIdx == 0 && isReversedListSummingToNothing(byteRanges, baseItemSize)) {
+			return true;
+		}
 		// the size the current range sees: an N- or -N range after an append addresses the grown size
 		long sizeBefore = baseItemSize;
 		// the bytes of the ranges before the current one
 		long bytesBefore = 0;
 		long rangeBeg = 0;
 		long rangeSize = 0;
+		boolean currAppends = false;
 		for (int i = 0; i <= currRangeIdx && i < rangeCount; i++) {
 			final Range byteRange = byteRanges.get(i);
 			final long beg = byteRange.getBeg();
 			final long end = byteRange.getEnd();
 			final long size = byteRange.getSize();
+			currAppends = size != -1;
 			if (size == -1) {
 				// an overwrite keeps the recorded size, even when it reaches past the item's end
 				if (beg == -1) {
@@ -447,6 +452,9 @@ public interface FileIoHelper {
 					// from offset "beg"; nothing to write when it starts past the end
 					rangeBeg = beg;
 					rangeSize = Math.max(0, sizeBefore - beg);
+				} else if (end < beg) {
+					// a reversed range fails the update when it is reached, as its slice did before
+					throw new IllegalArgumentException("Byte range " + beg + "-" + end + " ends before it starts");
 				} else {
 					rangeBeg = beg;
 					rangeSize = end - beg + 1;
@@ -465,32 +473,63 @@ public interface FileIoHelper {
 			}
 		}
 
-		if (currRangeIdx < rangeCount) {
-			if (rangeSize > 0) {
-				// the count is cumulative: the part before the current range's offset is the earlier ranges' bytes
-				long rangeBytesDone = op.countBytesDone() - bytesBefore;
+		if (rangeSize > 0) {
+			// the count is cumulative: the part before the current range's offset is the earlier ranges' bytes
+			long rangeBytesDone = op.countBytesDone() - bytesBefore;
+			if (rangeBytesDone < rangeSize) {
 				final DataItem updatingRange = fileItem.slice(rangeBeg, rangeSize);
 				updatingRange.position(rangeBytesDone);
 				dstChannel.position(rangeBeg + rangeBytesDone);
 				rangeBytesDone += updatingRange.writeToFileChannel(dstChannel, rangeSize - rangeBytesDone);
 				op.countBytesDone(bytesBefore + rangeBytesDone);
-				if (rangeBytesDone == rangeSize) {
+				// the last range stays current once written: the next call finds its bytes counted and finishes
+				if (rangeBytesDone == rangeSize && currRangeIdx + 1 < rangeCount) {
 					op.currRangeIdx(currRangeIdx + 1);
 				}
 				return false;
 			}
-			// nothing to write: skip the range, and finish now when it is the last
-			if (currRangeIdx + 1 < rangeCount) {
-				op.currRangeIdx(currRangeIdx + 1);
-				return false;
-			}
+		} else if (currRangeIdx + 1 < rangeCount) {
+			// nothing to write: skip the range; the last one finishes now
+			op.currRangeIdx(currRangeIdx + 1);
+			return false;
 		}
 
-		if (sizeBefore != baseItemSize) {
-			fileItem.size(sizeBefore);
+		// the last range is written or has nothing to write: the update is done
+		final long sizeWhenDone = currAppends ? sizeBefore + rangeSize : sizeBefore;
+		if (sizeWhenDone != baseItemSize) {
+			fileItem.size(sizeWhenDone);
+			// a call after this one must not grow the size again
+			op.currRangeIdx(rangeCount + 1);
 		}
-		op.currRangeIdx(rangeCount + 1);
 		return true;
+	}
+
+	/**
+	 * Whether the list holds a reversed closed range (N1 &gt; N2) and its range sizes, each counted as
+	 * {@link DataOperation#markedRangesSize()} counts it against the item's size before the update, add up to zero or
+	 * less. Such an update has always been done at once, writing nothing; any other list with a reversed range fails
+	 * once it reaches that range.
+	 */
+	private static boolean isReversedListSummingToNothing(final List<Range> byteRanges, final long itemSize) {
+		boolean reversed = false;
+		long sumSize = 0;
+		for (int i = 0; i < byteRanges.size(); i++) {
+			final Range byteRange = byteRanges.get(i);
+			final long beg = byteRange.getBeg();
+			final long end = byteRange.getEnd();
+			final long size = byteRange.getSize();
+			if (size != -1) {
+				sumSize += size;
+			} else if (beg == -1) {
+				sumSize += end;
+			} else if (end == -1) {
+				sumSize += itemSize - beg;
+			} else {
+				reversed |= end < beg;
+				sumSize += end - beg + 1;
+			}
+		}
+		return reversed && sumSize <= 0;
 	}
 
 	static <I extends DataItem, O extends DataOperation<I>> boolean invokeOverwrite(
