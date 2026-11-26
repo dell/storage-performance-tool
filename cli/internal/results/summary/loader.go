@@ -97,6 +97,9 @@ type StepData struct {
 	UnresolvedOperations int64
 	// Limits is the step's own limits from its config.yaml; nil when that file is absent or unreadable.
 	Limits *StepLimits
+	// Lifecycle is the merged operation.lifecycle.csv of a MetricsSuppressed step, for the seed
+	// shortfall warning; nil for any other step or when the file is absent or unreadable.
+	Lifecycle *OperationLifecycle
 }
 
 // StepStatus indicates ingestion completeness for a step.
@@ -318,7 +321,13 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			}
 		}
 
-		step.UnresolvedOperations = loadUnresolvedOperations(runDir, sm)
+		lifecycle := loadOperationLifecycle(runDir, sm)
+		if lifecycle != nil {
+			step.UnresolvedOperations = lifecycle.Total.Unresolved
+			if step.MetricsSuppressed {
+				step.Lifecycle = lifecycle
+			}
+		}
 
 		deleteArtifactsExpected := params.DeleteArtifactsVersion > 0 &&
 			contains(deleteArtifactSteps, sm.StepID)
@@ -521,6 +530,7 @@ type metricsPersistProbe struct {
 type stepLimitsProbe struct {
 	Load struct {
 		Op struct {
+			Type  string `yaml:"type"`
 			Limit struct {
 				Count *int64 `yaml:"count"`
 				Fail  struct {
@@ -551,6 +561,8 @@ type StepLimits struct {
 	TimeSeconds float64
 	// SizeLimited is true when load.step.limit.size is set to anything but zero.
 	SizeLimited bool
+	// OpType is load.op.type in lower case, such as "create"; empty when not given.
+	OpType string
 }
 
 // stepConfig is what the summary reads from a step's fetched config.yaml.
@@ -622,6 +634,7 @@ func (p *stepLimitsProbe) limits() *StepLimits {
 		limits.TimeSeconds = seconds
 	}
 	limits.SizeLimited = engineSizeSet(p.Load.Step.Limit.Size)
+	limits.OpType = strings.ToLower(strings.TrimSpace(p.Load.Op.Type))
 	return limits
 }
 
