@@ -873,6 +873,135 @@ public class MetricsManagerImplTest {
 		}
 	}
 
+	@Test
+	void eachContextOfAStepKeepsItsOwnProgress() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> read = progressContext("step-mixed", OpType.READ, 1_000, 4_096_000);
+		FakeMetricsContext<AllMetricsSnapshot> create = progressContext("step-mixed", OpType.CREATE, 10, 40_960);
+		invokeRecordProgressSnapshot(read, read.snapshot);
+		invokeRecordProgressSnapshot(create, create.snapshot);
+
+		assertEquals(2, lastProgressEntries().size(), "one entry per context");
+		assertEquals(1_000L, mgr.getLastProgressSnapshot(read).orElseThrow().successCount);
+		assertEquals(10L, mgr.getLastProgressSnapshot(create).orElseThrow().successCount);
+		assertEquals(40_960L, mgr.getLastProgressSnapshot(create).orElseThrow().bytesTotal);
+	}
+
+	@Test
+	void contextsThatCompareEqualKeepSeparateProgress() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> first = new EqualFakeMetricsContext("step-equal");
+		FakeMetricsContext<AllMetricsSnapshot> second = new EqualFakeMetricsContext("step-equal");
+		first.snapshot = new CountingSnapshot(300, 0, 3_000, 10.0, 20.0, new FakeConcurrencySnapshot(1), 1_000L);
+		second.snapshot = new CountingSnapshot(7, 0, 70, 30.0, 40.0, new FakeConcurrencySnapshot(1), 1_000L);
+		assertEquals(first, second);
+		assertEquals(first.hashCode(), second.hashCode());
+		invokeRecordProgressSnapshot(first, first.snapshot);
+		invokeRecordProgressSnapshot(second, second.snapshot);
+
+		assertEquals(2, lastProgressEntries().size(), "contexts that compare equal must not share an entry");
+		assertEquals(300L, mgr.getLastProgressSnapshot(first).orElseThrow().successCount);
+		assertEquals(7L, mgr.getLastProgressSnapshot(second).orElseThrow().successCount);
+	}
+
+	@Test
+	void unregisteringOneContextKeepsTheProgressOfItsSiblings() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> read = progressContext("step-siblings", OpType.READ, 1_000, 4_096_000);
+		FakeMetricsContext<AllMetricsSnapshot> create = progressContext("step-siblings", OpType.CREATE, 10, 40_960);
+		mgr.register(read);
+		mgr.register(create);
+		invokeRecordProgressSnapshot(read, read.snapshot);
+		invokeRecordProgressSnapshot(create, create.snapshot);
+
+		mgr.unregister(create);
+
+		final Collection<TerminalStepEntry> entries = lastProgressEntries();
+		assertEquals(1, entries.size(), "the sibling's entry stays, the unregistered context's goes");
+		assertEquals(OpType.READ, entries.iterator().next().opType);
+		assertEquals(1_000L, entries.iterator().next().successCount);
+
+		mgr.unregister(read);
+		assertTrue(lastProgressEntries().isEmpty(), "unregister leaves no entry behind");
+	}
+
+	@Test
+	void closeClearsTheProgressCache() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-close", OpType.READ, 5, 5_120);
+		invokeRecordProgressSnapshot(ctx, ctx.snapshot);
+		assertEquals(1, lastProgressEntries().size());
+
+		mgr.close();
+
+		assertTrue(lastProgressEntries().isEmpty(), "close leaves no entry behind");
+	}
+
+	@Test
+	void stepLookupStillReturnsTheEntryOfASingleContextStep() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-single", OpType.CREATE, 42, 43_008);
+		invokeRecordProgressSnapshot(ctx, ctx.snapshot);
+
+		assertEquals(42L, mgr.getLastProgressSnapshot("step-single").orElseThrow().successCount);
+		assertEquals(42L, mgr.getLastProgressSnapshot("step-single", false).orElseThrow().successCount);
+		assertTrue(mgr.getLastProgressSnapshot("step-single", true).isEmpty(), "the node entry is not a fleet entry");
+		assertTrue(mgr.getLastProgressSnapshot("other-step").isEmpty());
+		assertTrue(mgr.getLastProgressSnapshot((String) null).isEmpty());
+		assertTrue(mgr.getLastProgressSnapshot((MetricsContext<?>) null).isEmpty());
+	}
+
+	@Test
+	void stepLookupOfAStepWithSeveralContextsReturnsNoSiblingsEntry() throws Exception {
+		FakeMetricsContext<AllMetricsSnapshot> read = progressContext("step-several", OpType.READ, 1_000, 4_096_000);
+		FakeMetricsContext<AllMetricsSnapshot> create = progressContext("step-several", OpType.CREATE, 10, 40_960);
+		invokeRecordProgressSnapshot(read, read.snapshot);
+		invokeRecordProgressSnapshot(create, create.snapshot);
+
+		assertTrue(
+						mgr.getLastProgressSnapshot("step-several").isEmpty(),
+						"no single entry stands for a step of several contexts");
+	}
+
+	private static FakeMetricsContext<AllMetricsSnapshot> progressContext(
+					final String stepId, final OpType opType, final long successCount, final long bytes) {
+		FakeMetricsContext<AllMetricsSnapshot> ctx = new OrderedFakeMetricsContext(stepId);
+		ctx.opType = opType;
+		ctx.snapshot = new CountingSnapshot(successCount, 0, bytes, 100.0, 110.0, new FakeConcurrencySnapshot(1), 2_000L);
+		return ctx;
+	}
+
+	/** Orders apart from the other contexts of its step, as the manager's set of contexts needs. */
+	private static final class OrderedFakeMetricsContext extends FakeMetricsContext<AllMetricsSnapshot> {
+		private static final java.util.concurrent.atomic.AtomicInteger SEQUENCE = new java.util.concurrent.atomic.AtomicInteger();
+		private final int order = SEQUENCE.incrementAndGet();
+
+		OrderedFakeMetricsContext(String id) {
+			super(id);
+		}
+
+		@Override
+		public int compareTo(MetricsContext<AllMetricsSnapshot> o) {
+			final int byStep = super.compareTo(o);
+			if (byStep != 0 || !(o instanceof OrderedFakeMetricsContext other)) {
+				return byStep;
+			}
+			return Integer.compare(order, other.order);
+		}
+	}
+
+	/** Compares equal to every other instance, as two contexts started in the same nanosecond tick could. */
+	private static final class EqualFakeMetricsContext extends FakeMetricsContext<AllMetricsSnapshot> {
+		EqualFakeMetricsContext(String id) {
+			super(id);
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			return o instanceof EqualFakeMetricsContext;
+		}
+
+		@Override
+		public int hashCode() {
+			return 42;
+		}
+	}
+
 	private void invokeRecordProgressSnapshot(MetricsContext<?> ctx, AllMetricsSnapshot snapshot) throws Exception {
 		Method record = MetricsManagerImpl.class.getDeclaredMethod("recordProgressSnapshot", MetricsContext.class, AllMetricsSnapshot.class);
 		record.setAccessible(true);

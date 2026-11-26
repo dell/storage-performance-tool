@@ -1,6 +1,7 @@
 package com.dell.spt.base.metrics;
 
 import com.dell.spt.base.concurrent.Task;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import java.util.List;
@@ -56,6 +57,21 @@ public interface MetricsManager extends Task {
 	/** Latest non-zero progress for a step that is still registered, keyed by role. */
 	default Optional<TerminalStepEntry> getLastProgressSnapshot(final String stepId, final boolean distributed) {
 		return Optional.empty();
+	}
+
+	/**
+	 * Latest non-zero progress of one metrics context that is still registered. A step with several
+	 * contexts (mixed, weighted and pipeline steps) has one entry per context, so each live row reads
+	 * its own. This default falls back to the step lookup of the context's scope, keeping an entry
+	 * only when its operation type is the context's.
+	 */
+	default Optional<TerminalStepEntry> getLastProgressSnapshot(final MetricsContext<?> metricsCtx) {
+		if (metricsCtx == null) {
+			return Optional.empty();
+		}
+		final OpType opType = metricsCtx.opType();
+		return getLastProgressSnapshot(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext)
+						.filter(entry -> entry.opType == null || entry.opType == opType);
 	}
 
 	/**

@@ -89,7 +89,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
-	private final Map<ProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
+	// Live progress per metrics context: a step with several contexts (mixed, weighted, pipeline)
+	// keeps one entry for each, so a live row never takes a sibling context's counts.
+	private final Map<ContextProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 	private static final List<Double> STANDARD_TIMING_QUANTILES = List.of(0.5, 0.9, 0.99, 0.999);
 
@@ -201,7 +203,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	public void register(final MetricsContext metricsCtx) {
 		try {
 			startIfNotStarted();
-			lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
+			removeProgress(metricsCtx);
 			allMetrics.add(metricsCtx);
 			if (metricsCtx instanceof DistributedMetricsContext<?> distributedMetricsCtx) {
 				distributedMetrics.put(
@@ -264,6 +266,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 					final boolean distributedEntry = metricsCtx instanceof DistributedMetricsContext;
 					final ProgressKey progressKey = ProgressKey.of(metricsCtx.loadStepId(), distributedEntry);
+					final ContextProgressKey contextProgressKey = ContextProgressKey.of(metricsCtx, distributedEntry);
 					recordProgressSnapshot(metricsCtx, snapshot);
 					TerminalStepEntry terminalEntry = null;
 
@@ -356,7 +359,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						final boolean failedDistributedRefresh = distributedEntry
 										&& ((DistributedMetricsContext<?>) metricsCtx).partial();
 						if (!failedDistributedRefresh) {
-							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
+							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(contextProgressKey);
 							if (lastProgressEntry != null) {
 								retainTerminal(progressKey, withFinalDriverStats(lastProgressEntry, snapshot, distributedEntry));
 							} else if (hasAllParts(snapshot)
@@ -367,10 +370,10 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							}
 						}
 					}
-					lastProgressByStepId.remove(progressKey);
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
 				} finally {
+					removeProgress(metricsCtx);
 					if (lockAcquired && outputLock.isHeldByCurrentThread()) {
 						outputLock.unlock();
 					}
@@ -576,7 +579,27 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		if (stepId == null) {
 			return Optional.empty();
 		}
-		return Optional.ofNullable(lastProgressByStepId.get(ProgressKey.of(stepId, distributed)));
+		// The entry of a step with one context of this scope. A step with several has one entry per
+		// context, and none of them stands for the step.
+		TerminalStepEntry match = null;
+		for (final Map.Entry<ContextProgressKey, TerminalStepEntry> e : lastProgressByStepId.entrySet()) {
+			if (e.getKey().distributed == distributed && stepId.equals(e.getValue().stepId)) {
+				if (match != null) {
+					return Optional.empty();
+				}
+				match = e.getValue();
+			}
+		}
+		return Optional.ofNullable(match);
+	}
+
+	@Override
+	public Optional<TerminalStepEntry> getLastProgressSnapshot(final MetricsContext<?> metricsCtx) {
+		if (metricsCtx == null) {
+			return Optional.empty();
+		}
+		return Optional.ofNullable(lastProgressByStepId.get(
+						ContextProgressKey.of(metricsCtx, metricsCtx instanceof DistributedMetricsContext)));
 	}
 
 	@Override
@@ -624,6 +647,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		allMetrics.forEach(MetricsContext::close);
 		allMetrics.clear();
 		distributedMetrics.clear();
+		lastProgressByStepId.clear();
+	}
+
+	private void removeProgress(final MetricsContext<?> metricsCtx) {
+		lastProgressByStepId.remove(ContextProgressKey.of(metricsCtx, false));
+		lastProgressByStepId.remove(ContextProgressKey.of(metricsCtx, true));
 	}
 
 	private void recordProgressSnapshot(final MetricsContext metricsCtx, final AllMetricsSnapshot snapshot) {
@@ -641,7 +670,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		}
 
 		final boolean distributedEntry = metricsCtx instanceof DistributedMetricsContext && snapshot instanceof DistributedAllMetricsSnapshot;
-		final ProgressKey progressKey = ProgressKey.of(metricsCtx.loadStepId(), distributedEntry);
+		final ContextProgressKey progressKey = ContextProgressKey.of(metricsCtx, distributedEntry);
 		final TerminalStepEntry existing = lastProgressByStepId.get(progressKey);
 		if (existing != null
 						&& existing.successCount >= successCount
@@ -825,6 +854,36 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		@Override
 		public int hashCode() {
 			return Objects.hash(stepId, distributed);
+		}
+	}
+
+	/**
+	 * Identifies one metrics context and scope in the live-progress cache. Contexts compare by
+	 * reference: {@code MetricsContextBase} equality compares a truncated start time, so two contexts
+	 * of a step can be equal.
+	 */
+	private static final class ContextProgressKey {
+		private final MetricsContext<?> context;
+		private final boolean distributed;
+
+		private ContextProgressKey(final MetricsContext<?> context, final boolean distributed) {
+			this.context = context;
+			this.distributed = distributed;
+		}
+
+		static ContextProgressKey of(final MetricsContext<?> context, final boolean distributed) {
+			return new ContextProgressKey(context, distributed);
+		}
+
+		@Override
+		public boolean equals(final Object o) {
+			return this == o
+							|| (o instanceof ContextProgressKey that && context == that.context && distributed == that.distributed);
+		}
+
+		@Override
+		public int hashCode() {
+			return 31 * System.identityHashCode(context) + Boolean.hashCode(distributed);
 		}
 	}
 
