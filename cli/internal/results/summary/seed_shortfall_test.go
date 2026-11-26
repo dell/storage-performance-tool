@@ -2,6 +2,7 @@ package summary
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,6 +39,11 @@ const (
 
 	seedStepID = "spt-001-20261126.120000.000-seed"
 )
+
+// multipartRow is one worker row with the given selected through terminal_results columns.
+func multipartRow(counts string) string {
+	return "1,1794733479500,mt-001-seed,w0,1,true," + counts + ",0,0,0"
+}
 
 func seedLifecycle(t *testing.T, rows ...string) *OperationLifecycle {
 	t.Helper()
@@ -104,6 +110,9 @@ func TestSeedShortfallWarningRule(t *testing.T) {
 	seed := func(limits *StepLimits, rows ...string) *StepData {
 		return &StepData{StepID: seedStepID, MetricsSuppressed: true, Limits: limits, Lifecycle: seedLifecycle(t, rows...)}
 	}
+	multipart := func(objects int64, rows ...string) *StepData {
+		return seed(&StepLimits{OpType: "create", OpCount: objects, FailCount: 100000, Multipart: true}, rows...)
+	}
 	const lifecycleSource = " (operation.lifecycle.csv)"
 	const later = "; later phases used only the objects written"
 	cases := []struct {
@@ -118,7 +127,9 @@ func TestSeedShortfallWarningRule(t *testing.T) {
 		{"failed PUTs under the default limit", RunEndCompleted, seed(seedLimits(100000, false), seedTenthRow), true,
 			"Seed: wrote 2250 of 2500 objects (250 failed, 0 not attempted)" + later + lifecycleSource},
 		{"every PUT failed, on a failed run", RunEndFailed, seed(seedLimits(20, false), seedAllFailedRow), true,
-			"Seed: wrote 0 of 2500 objects (28 failed, 2472 not attempted) and stopped at its failure limit (load.op.limit.fail.count 20)" + later + lifecycleSource},
+			"Seed: wrote 0 of 2500 objects (28 failed, 2472 not attempted) and stopped at its failure limit (load.op.limit.fail.count 20)" + lifecycleSource},
+		{"every PUT failed under the default limit", RunEndFailed, seed(seedLimits(100000, false), "1,1,s,w0,1,true,2500,0,2500,0,0,2500,0,0,0"), true,
+			"Seed: wrote 0 of 2500 objects (2500 failed, 0 not attempted)" + lifecycleSource},
 		{"seed is the last step", RunEndCompleted, seed(seedLimits(20, false), seedCutRow), false,
 			"Seed: wrote 27 of 2500 objects (28 failed, 2445 not attempted) and stopped at its failure limit (load.op.limit.fail.count 20)" + lifecycleSource},
 		{"failures at the limit", RunEndCompleted, seed(seedLimits(28, false), seedCutRow), true,
@@ -146,6 +157,66 @@ func TestSeedShortfallWarningRule(t *testing.T) {
 			"Seed: wrote 27 of 2500 objects (28 failed, 2445 not attempted) and stopped at its failure limit (load.op.limit.fail.count 20)" + later + lifecycleSource},
 		{"rate on, nothing left unattempted", RunEndCompleted, seed(seedLimits(100000, true), seedTenthRow), true,
 			"Seed: wrote 2250 of 2500 objects (250 failed, 0 not attempted)" + later + lifecycleSource},
+		{"rate on, run end unknown", RunEndUnknown, seed(seedLimits(100000, true), seedRateRow), true,
+			"Seed: wrote 88 of 2500 objects (263 failed, 2149 not attempted)" + later + lifecycleSource},
+		{"count cause, run end unknown", RunEndUnknown, seed(seedLimits(20, true), seedCutRow), true,
+			"Seed: wrote 27 of 2500 objects (28 failed, 2445 not attempted) and stopped at its failure limit (load.op.limit.fail.count 20)" + later + lifecycleSource},
+		// A single node past its limit that still ran every operation did not stop short.
+		{"past the limit with nothing left", RunEndCompleted, seed(seedLimits(20, false), "1,1,s,w0,1,true,2500,2470,30,0,0,2500,0,0,0"), true,
+			"Seed: wrote 2470 of 2500 objects (30 failed, 0 not attempted)" + later + lifecycleSource},
+		// Fail count 20 over two nodes (10/10): slice 0 failed exactly its share and ran everything.
+		{"exact share, nothing left", RunEndCompleted, seed(seedLimits(10, false),
+			"1,1,s,w0,1,true,250,240,10,0,0,250,0,0,0", "1,1,s,w1,1,true,250,250,0,0,0,250,0,0,0"), true,
+			"Seed: wrote 490 of 500 objects (10 failed, 0 not attempted)" + later + lifecycleSource},
+		// Slice 0 always holds the config's share; only later slices can hold less.
+		{"slice 0 at its share, stopped short", RunEndCompleted, seed(seedLimits(10, true),
+			"1,1,s,w0,1,true,250,200,10,40,0,210,0,0,0", "1,1,s,w1,1,true,250,250,0,0,0,250,0,0,0"), true,
+			"Seed: wrote 450 of 500 objects (10 failed, 40 not attempted) with the failure-rate limit on (load.op.limit.fail.rate), which stops a step when failures outpace successes" + later + lifecycleSource},
+		// Fail count 100 over three nodes splits 34/34/32: the last node stops at 33.
+		{"three nodes, last slice stops below the config share", RunEndCompleted, seed(seedLimits(34, false),
+			"1,1,s,w0,1,true,834,834,0,0,0,834,0,0,0", "1,1,s,w1,1,true,833,833,0,0,0,833,0,0,0", "1,1,s,w2,1,true,833,100,33,700,0,133,0,0,0"), true,
+			"Seed: wrote 1767 of 2500 objects (33 failed, 700 not attempted) and stopped at a node's failure limit (load.op.limit.fail.count of up to 34 per node)" + later + lifecycleSource},
+		// Slice 1 of three always holds 34, so 33 or 34 failures there are not its limit.
+		{"three nodes, middle slice at its share", RunEndCompleted, seed(seedLimits(34, false),
+			"1,1,s,w0,1,true,834,834,0,0,0,834,0,0,0", "1,1,s,w1,1,true,833,100,34,699,0,134,0,0,0", "1,1,s,w2,1,true,833,833,0,0,0,833,0,0,0"), true,
+			"Seed: wrote 1767 of 2500 objects (34 failed, 699 not attempted)" + later + lifecycleSource},
+		// Fail count 10 over four nodes splits 3/3/3/1: the last node stops at 2.
+		{"four nodes, last slice stops at 2", RunEndCompleted, seed(seedLimits(3, false),
+			"1,1,s,w0,1,true,625,625,0,0,0,625,0,0,0", "1,1,s,w1,1,true,625,625,0,0,0,625,0,0,0",
+			"1,1,s,w2,1,true,625,625,0,0,0,625,0,0,0", "1,1,s,w3,1,true,625,10,2,613,0,12,0,0,0"), true,
+			"Seed: wrote 1885 of 2500 objects (2 failed, 613 not attempted) and stopped at a node's failure limit (load.op.limit.fail.count of up to 3 per node)" + later + lifecycleSource},
+		// Slice 2 of four always holds 3.
+		{"four nodes, third slice at its share", RunEndCompleted, seed(seedLimits(3, false),
+			"1,1,s,w0,1,true,625,625,0,0,0,625,0,0,0", "1,1,s,w1,1,true,625,625,0,0,0,625,0,0,0",
+			"1,1,s,w2,1,true,625,10,3,612,0,13,0,0,0", "1,1,s,w3,1,true,625,625,0,0,0,625,0,0,0"), true,
+			"Seed: wrote 1885 of 2500 objects (3 failed, 612 not attempted)" + later + lifecycleSource},
+		// Fail count 20 over six nodes splits 4/4/4/4/4/0: the last slice has no limit.
+		{"six nodes, unlimited slice ran everything", RunEndCompleted, seed(seedLimits(4, false),
+			"1,1,s,w0,1,true,100,100,0,0,0,100,0,0,0", "1,1,s,w1,1,true,100,100,0,0,0,100,0,0,0",
+			"1,1,s,w2,1,true,100,100,0,0,0,100,0,0,0", "1,1,s,w3,1,true,100,100,0,0,0,100,0,0,0",
+			"1,1,s,w4,1,true,100,100,0,0,0,100,0,0,0", "1,1,s,w5,1,true,100,0,100,0,0,100,0,0,0"), true,
+			"Seed: wrote 500 of 600 objects (100 failed, 0 not attempted)" + later + lifecycleSource},
+		// A share of 1 over two nodes (fail count 1 or 2): slice 1 holds 0 (no limit) or 1.
+		{"share of 1, slice 1 at 1", RunEndCompleted, seed(seedLimits(1, false),
+			"1,1,s,w0,1,true,250,250,0,0,0,250,0,0,0", "1,1,s,w1,1,true,250,200,1,49,0,201,0,0,0"), true,
+			"Seed: wrote 450 of 500 objects (1 failed, 49 not attempted)" + later + lifecycleSource},
+		{"share of 1, slice 1 past it", RunEndCompleted, seed(seedLimits(1, false),
+			"1,1,s,w0,1,true,250,250,0,0,0,250,0,0,0", "1,1,s,w1,1,true,250,200,2,48,0,202,0,0,0"), true,
+			"Seed: wrote 450 of 500 objects (2 failed, 48 not attempted) and stopped at a node's failure limit (load.op.limit.fail.count of up to 1 per node)" + later + lifecycleSource},
+		// Multipart seeds measured in fetched results: selected counts every request of an upload,
+		// not objects, so there is no warning (16 objects asked, none written, in the last row).
+		{"multipart seed, 2500 objects in 16 KiB parts", RunEndCompleted, multipart(2500, multipartRow("15000,15000,0,0,0,15000")), true, ""},
+		{"multipart seed, 2500 objects in 5 MiB parts", RunEndCompleted, multipart(2500, multipartRow("12500,12500,0,0,0,12500")), true, ""},
+		{"multipart seed, 16 objects in 8 MiB parts", RunEndCompleted, multipart(16, multipartRow("112,112,0,0,0,112")), true, ""},
+		{"multipart seed whose every upload failed", RunEndCompleted, multipart(16, multipartRow("160,144,16,0,0,160")), true, ""},
+		{"multipart seed whose every upload failed, on a failed run", RunEndFailed, multipart(16, multipartRow("160,144,16,0,0,160")), true, ""},
+		// Stopped before it selected more requests than objects: only the threshold tells.
+		{"multipart seed interrupted early", RunEndInterrupted, multipart(2500, multipartRow("1000,900,50,50,0,950")), true, ""},
+		// More requests than objects on a row, without a multipart threshold in config.yaml.
+		{"more selected than the object count", RunEndCompleted, seed(&StepLimits{OpType: "create", OpCount: 16, FailCount: 100000},
+			multipartRow("160,144,16,0,0,160")), true, ""},
+		{"a node with more selected than the config share", RunEndCompleted, seed(&StepLimits{OpType: "create", OpCount: 8, FailCount: 100000},
+			"1,1,s,w0,1,true,8,8,0,0,0,8,0,0,0", "1,1,s,w1,1,true,80,72,8,0,0,80,0,0,0"), true, ""},
 		{"time-limited create", RunEndCompleted, &StepData{MetricsSuppressed: true,
 			Limits: &StepLimits{OpType: "create", TimeSeconds: 2}, Lifecycle: seedLifecycle(t, timeLimitedCreateRow)}, true, ""},
 		{"count and time limits", RunEndCompleted, &StepData{MetricsSuppressed: true,
@@ -174,6 +245,12 @@ func TestSeedShortfallWarningRule(t *testing.T) {
 // seedRun writes a two-step read run, a seed and the read phase, into dir and loads it.
 func seedRun(t *testing.T, dir string, seedConfig []byte, lifecycle string) *RunData {
 	t.Helper()
+	return seedRunOrdered(t, dir, seedConfig, lifecycle, false)
+}
+
+// seedRunOrdered is seedRun with the seed after the read phase when seedLast is set.
+func seedRunOrdered(t *testing.T, dir string, seedConfig []byte, lifecycle string, seedLast bool) *RunData {
+	t.Helper()
 	write := func(name, content string) {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
@@ -193,14 +270,20 @@ func seedRun(t *testing.T, dir string, seedConfig []byte, lifecycle string) *Run
 	}
 	metricsName := lifecycleStep + "." + constants.ResultsArtifactSuffixMetricsTotal
 	write(metricsName, sampleMetricsCSV([]string{lifecycleOKRow}))
-	writeManifest(t, dir, &results.Manifest{OutputDir: dir, Steps: []results.StepManifest{
+	steps := []results.StepManifest{
 		{StepID: seedStepID, Files: seedFiles},
 		{StepID: lifecycleStep, Files: []results.FileStatus{{Name: metricsName, Status: fileStatusOK}}},
-	}})
+	}
+	expected := []string{seedStepID, lifecycleStep}
+	if seedLast {
+		slices.Reverse(steps)
+		slices.Reverse(expected)
+	}
+	writeManifest(t, dir, &results.Manifest{OutputDir: dir, Steps: steps})
 	writeParams(t, dir, &RunParams{
 		GeneratedAt:     time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC),
 		ScenarioParams:  ScenarioParams{WorkloadType: "read", ObjectSize: "100MiB"},
-		ExpectedStepIDs: []string{seedStepID, lifecycleStep},
+		ExpectedStepIDs: expected,
 	})
 	data, err := NewLoader().Load(context.Background(), dir)
 	if err != nil {
@@ -253,6 +336,40 @@ func TestAggregateSeedShortfallWarning(t *testing.T) {
 		summary.Warnings = slices.DeleteFunc(summary.Warnings, func(w string) bool { return w == want })
 		assertSameLifecycleOutputs(t, summary, baseline)
 	})
+	t.Run("seed after the last phase", func(t *testing.T) {
+		t.Parallel()
+		data := seedRunOrdered(t, t.TempDir(), config, lifecycleHeader+"\n"+seedCutRow+"\n", true)
+		const last = "Seed: wrote 27 of 2500 objects (28 failed, 2445 not attempted) and stopped at its failure limit (load.op.limit.fail.count 20) (operation.lifecycle.csv)"
+		if lines := seedWarnings(aggregateLifecycleRun(t, data)); len(lines) != 1 || lines[0] != last {
+			t.Fatalf("seed warnings = %q, want %q", lines, last)
+		}
+	})
+	// A multipart seed from a fetched result (mcli-poc comparison/results/batch7-20261114/
+	// multipart-cleanup-abort-wait/results/cand-d0/mt-20261115.090439.504): 16 objects of 8 MiB in
+	// 1 MiB parts, every completion failed with 400, items.csv empty. Its lifecycle row counts the
+	// requests of each upload (160 selected, 144 accepted), not objects, so there is no warning.
+	t.Run("multipart seed from a fetched result", func(t *testing.T) {
+		t.Parallel()
+		multipartConfig, err := os.ReadFile(filepath.Join("testdata", "multipart_seed_step.config.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lifecycle, err := os.ReadFile(filepath.Join("testdata", "multipart_seed_step.operation.lifecycle.csv"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := seedRun(t, t.TempDir(), multipartConfig, string(lifecycle))
+		step := data.Steps[seedStepID]
+		if step.Limits == nil || *step.Limits != (StepLimits{OpType: "create", OpCount: 16, FailCount: 100000, Multipart: true}) {
+			t.Errorf("seed limits = %+v", step.Limits)
+		}
+		if step.Lifecycle == nil || step.Lifecycle.Total != (LifecycleCounts{Selected: 160, Accepted: 144, Failed: 16}) {
+			t.Fatalf("seed lifecycle = %+v", step.Lifecycle)
+		}
+		if lines := seedWarnings(aggregateLifecycleRun(t, data)); len(lines) != 0 {
+			t.Fatalf("seed warnings = %q", lines)
+		}
+	})
 	for name, data := range map[string]func() *RunData{
 		"full seed":         func() *RunData { return seedRun(t, t.TempDir(), config, lifecycleHeader+"\n"+seedFullRow+"\n") },
 		"no lifecycle file": func() *RunData { return seedRun(t, t.TempDir(), config, "") },
@@ -265,5 +382,71 @@ func TestAggregateSeedShortfallWarning(t *testing.T) {
 				t.Fatalf("seed warnings = %q", lines)
 			}
 		})
+	}
+}
+
+// engineSliceLongValue is ConfigSliceUtil.sliceLongValue: ceil(total / slices) to each slice
+// while more than that remains, then the rest, then 0.
+func engineSliceLongValue(total int64, slices int) []int64 {
+	perSlice := (total + int64(slices) - 1) / int64(slices)
+	shares := make([]int64, slices)
+	remaining := total
+	for i := range shares {
+		if remaining > perSlice {
+			shares[i] = perSlice
+			remaining -= perSlice
+		} else {
+			shares[i] = remaining
+			remaining = 0
+		}
+	}
+	return shares
+}
+
+func TestSeedSliceFailShare(t *testing.T) {
+	t.Parallel()
+	for total, want := range map[int64][]int64{
+		20: {10, 10}, 21: {11, 10}, 100: {34, 34, 32}, 10: {3, 3, 3, 1}, 9: {3, 3, 3, 0}, 20 * 3: {20, 20, 20},
+	} {
+		if got := engineSliceLongValue(total, len(want)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("engine split of %d over %d = %v, want %v", total, len(want), got, want)
+		}
+	}
+	if got := engineSliceLongValue(20, 6); !reflect.DeepEqual(got, []int64{4, 4, 4, 4, 4, 0}) {
+		t.Fatalf("engine split of 20 over 6 = %v", got)
+	}
+	// Every total with the same slice 0 share is possible; a slice's limit is its smallest share
+	// above 0 among them (0 is no limit).
+	for slices := 1; slices <= 6; slices++ {
+		smallest := map[int64][]int64{}
+		for total := int64(1); total <= 200; total++ {
+			shares := engineSliceLongValue(total, slices)
+			got, ok := smallest[shares[0]]
+			if !ok {
+				got = make([]int64, slices)
+				smallest[shares[0]] = got
+			}
+			for i, share := range shares {
+				if share > 0 && (got[i] == 0 || share < got[i]) {
+					got[i] = share
+				}
+			}
+		}
+		for share, want := range smallest {
+			if share*int64(slices) > 200 {
+				continue // not every total with this share was enumerated
+			}
+			for i := range slices {
+				if got := seedSliceFailShare(share, slices, i); got != want[i] {
+					t.Errorf("share %d over %d slices, slice %d: %d, want %d", share, slices, i, got, want[i])
+				}
+			}
+		}
+	}
+	if got := seedSliceFailShare(math.MaxInt64, 3, 1); got != math.MaxInt64 {
+		t.Errorf("overflowing share = %d", got)
+	}
+	if got := seedSliceFailShare(math.MaxInt64, 3, 2); got != math.MaxInt64-2 {
+		t.Errorf("last slice of the largest share = %d", got)
 	}
 }

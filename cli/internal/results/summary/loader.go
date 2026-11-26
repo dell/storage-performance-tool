@@ -528,6 +528,13 @@ type metricsPersistProbe struct {
 
 // stepLimitsProbe reads the step's own limits for the failure-limit warning.
 type stepLimitsProbe struct {
+	Item struct {
+		Data struct {
+			Ranges struct {
+				Threshold any `yaml:"threshold"`
+			} `yaml:"ranges"`
+		} `yaml:"data"`
+	} `yaml:"item"`
 	Load struct {
 		Op struct {
 			Type  string `yaml:"type"`
@@ -563,6 +570,10 @@ type StepLimits struct {
 	SizeLimited bool
 	// OpType is load.op.type in lower case, such as "create"; empty when not given.
 	OpType string
+	// Multipart is true when item.data.ranges.threshold is set to anything but zero, as the
+	// engine's multipartEnabled reads it: the step's operation.lifecycle.csv then counts every
+	// request of an upload, not objects.
+	Multipart bool
 }
 
 // stepConfig is what the summary reads from a step's fetched config.yaml.
@@ -635,6 +646,8 @@ func (p *stepLimitsProbe) limits() *StepLimits {
 	}
 	limits.SizeLimited = engineSizeSet(p.Load.Step.Limit.Size)
 	limits.OpType = strings.ToLower(strings.TrimSpace(p.Load.Op.Type))
+	// A size, in any unit, read as load.step.limit.size is: a value it can't read counts as set.
+	limits.Multipart = engineSizeSet(p.Item.Data.Ranges.Threshold)
 	return limits
 }
 
