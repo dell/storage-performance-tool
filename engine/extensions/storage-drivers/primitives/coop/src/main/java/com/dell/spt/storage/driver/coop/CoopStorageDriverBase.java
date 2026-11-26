@@ -1516,8 +1516,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * Wake the dispatch task. Called when new ops are available (put) or when
 	 * a completion frees capacity (handleCompleted). Lock-free so transport
 	 * event loops never contend on {@code dispatchLock}: the task re-checks its
-	 * wait condition before parking and an unpark permit is sticky, so delivery
-	 * is guaranteed without holding a lock across the signal.
+	 * wait condition before parking and the signal stays set until the task
+	 * waits, so delivery is guaranteed without holding a lock across the signal.
 	 */
 	private void signalDispatch() {
 		final var task = this.opDispatchTask;

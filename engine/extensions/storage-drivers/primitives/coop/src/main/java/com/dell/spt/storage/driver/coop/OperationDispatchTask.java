@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.Queue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.LockSupport;
@@ -67,6 +68,12 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final Queue<O> deferredMpuQueue;
 	private volatile List<SubmittingOperation<O>> submittingOperations = List.of();
 	private volatile Thread dispatchThread;
+	/**
+	 * Set by {@link #unpark()}, cleared by {@link #awaitDispatchSignal()}. It carries a wake-up the
+	 * thread's own park permit cannot: any lock the task contends between its checks and its park
+	 * may consume that permit.
+	 */
+	private final AtomicBoolean signaled = new AtomicBoolean(false);
 	private volatile int backlog;
 	/** Continuations of dispatched composites the task held, unsent, when it stopped; see {@link #doStop()}. */
 	private final List<O> stoppedContinuations = new ArrayList<>();
@@ -109,27 +116,36 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Wakes the dispatch thread if it is parked in {@link #awaitDispatchSignal()}. Lock-free:
-	 * an unpark permit is sticky, so a producer that changes state and then calls this after
-	 * the task checked that state (but before it parked) still wakes the task. Safe to call
-	 * from any thread, including transport event loops.
+	 * Wakes the dispatch thread if it is parked in {@link #awaitDispatchSignal()}, or makes its next
+	 * wait return at once. Lock-free and safe to call from any thread, including transport event
+	 * loops. A producer that changes state and then calls this after the task checked that state
+	 * still wakes the task: the signal is a flag the task clears only as it waits, not the thread's
+	 * park permit alone, which a lock the task contends before it parks (an {@code ArrayBlockingQueue}
+	 * a producer holds) can consume. Only the call that sets the flag unparks the thread, so a burst
+	 * of completions costs one unpark.
 	 */
 	void unpark() {
-		final var thread = this.dispatchThread;
-		if (thread != null) {
-			LockSupport.unpark(thread);
+		if (!signaled.get() && signaled.compareAndSet(false, true)) {
+			final var thread = this.dispatchThread;
+			if (thread != null) {
+				LockSupport.unpark(thread);
+			}
 		}
 	}
 
 	/**
-	 * Parks the dispatch thread until a producer calls {@link #unpark()}. Callers re-check
-	 * their wait condition immediately before calling this; a stale permit only causes one
-	 * spurious iteration. Mirrors {@code Condition.await()} by throwing when interrupted so
-	 * {@link #stop()} still terminates the work loop promptly.
+	 * Returns at once when a producer called {@link #unpark()} since the last wait; otherwise parks
+	 * the dispatch thread until one does. Callers re-check their wait condition before calling this,
+	 * and the loop re-checks it after: a signal for state the task already saw, or a spurious
+	 * return from the park, only costs one more iteration. Mirrors {@code Condition.await()} by
+	 * throwing when interrupted so {@link #stop()} still terminates the work loop promptly.
 	 */
 	private void awaitDispatchSignal() throws InterruptedException {
 		publishBacklog();
-		LockSupport.park(this);
+		if (!signaled.getAndSet(false)) {
+			LockSupport.park(this);
+			signaled.set(false);
+		}
 		if (Thread.currentThread().isInterrupted()) {
 			throw new InterruptedException();
 		}
@@ -197,14 +213,24 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						drainIncomingOperations(Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
 					}
 				} else if (tempInOps.isEmpty() && !deferredMpuQueue.isEmpty()) {
-					// We might have no actionable work (MPU permits are exhausted, or deferred queue is full and inOpQueue is blocked).
-					boolean childEmpty = childOpQueue.isEmpty();
-					boolean inEmpty = inOpQueue.isEmpty();
-					boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
-
-					if (childEmpty && (inEmpty || !canDrainIn)) {
+					// We might have no actionable work: no MPU object permit for the deferred head, and
+					// no child, and the input can't be taken (the deferred queue is full, the input queue
+					// is empty, or direct dispatch has no transport capacity, so the incoming drains take
+					// nothing). The child queue is checked first: with a child queued the task never
+					// waits, and a driver's capacity check may schedule work of its own.
+					if (childOpQueue.isEmpty()
+									&& (deferredMpuQueue.size() >= deferredQueueCapacity
+													|| (storageDriver.directDispatchEnabled()
+																	&& !storageDriver.hasAvailableDispatchCapacity())
+													|| inOpQueue.isEmpty())) {
 						if (!storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
 							awaitDispatchSignal();
+							// Deferred inits go before new ones: a permit freed while waiting belongs to
+							// the oldest deferred upload, not to an init the drains below would take.
+							while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
+											&& storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
+								buff.add(deferredMpuQueue.poll());
+							}
 						} else {
 							// We acquired a permit just now, we can process a deferred op
 							if (buff.size() < batchSize && !deferredMpuQueue.isEmpty()) {
@@ -274,7 +300,7 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				// prevents a lost-signal race: a completion may release a permit
 				// AND call signalDispatch() between submit() returning false and
 				// this point.  Either the permit is already visible here (skip the
-				// wait and retry) or the unpark permit is already set (park returns
+				// wait and retry) or the signal is already set (the wait returns
 				// immediately), so the wake-up cannot be lost.
 				if (!submitted && !storageDriver.hasAvailableDispatchCapacity()) {
 					awaitDispatchSignal();
@@ -414,6 +440,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		synchronized (stoppedContinuations) {
 			stoppedContinuations.clear();
 		}
+		// A signal for the earlier cycle is spent: the new thread checks the queues before it waits.
+		signaled.set(false);
 		super.restart();
 	}
 
