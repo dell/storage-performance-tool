@@ -83,6 +83,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		private OperationLifecycleState state = OperationLifecycleState.NEW;
 		private long circulation;
 		private long explicitDispatchCirculation = -1;
+		private boolean driverCreated;
 	}
 
 	/** Opaque proof that one exact queued circulation was eligible for dispatch. */
@@ -108,6 +109,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private final Consumer<O> dispatchPublicationObserver;
 	private volatile Consumer<O> dispatchObserver;
 	private volatile Consumer<O> terminalObserver;
+	private volatile Consumer<O> unattemptedObserver;
 	private final Set<IdentityKey<O>> outstanding = ConcurrentHashMap.newKeySet();
 	private final ReferenceQueue<O> compatibilityReferences = new ReferenceQueue<>();
 	private final Map<WeakIdentityKey<O>, CompatibilityState> compatibilityStates = new HashMap<>();
@@ -194,6 +196,21 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		dispatchObserver = observer;
 	}
 
+	/**
+	 * Installs a callback which runs once for each operation that leaves generator or driver
+	 * custody as unattempted, after the transition is recorded. An operation the tracker never
+	 * held, such as one the driver refused at admission, does not reach it, nor does one the driver
+	 * created itself and queued through {@link #driverCreatedQueued}. Not installed on, and
+	 * never called by, the disabled tracker. The observer must be bounded, non-blocking, and
+	 * non-throwing. The tracker keeps one observer, as for its other observers: a later call
+	 * replaces it, and {@code null} removes it.
+	 */
+	public void unattemptedObserver(final Consumer<O> observer) {
+		if (enabled) {
+			unattemptedObserver = observer;
+		}
+	}
+
 	/** Clears completed-run counters before a representative lifecycle restart. */
 	public void reset() {
 		if (!enabled) {
@@ -244,6 +261,40 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		}
 		if (!transition(op, op.startNextLifecycle(), OperationLifecycleState.DRIVER_QUEUED)) {
 			return false;
+		}
+		outstanding.add(identityKey(op));
+		return true;
+	}
+
+	/**
+	 * Records driver queue ownership, as {@link #driverQueued} does, of an operation the driver
+	 * created itself and no generator dispatched: a cooperative driver's child operation, such as a
+	 * part or an extension's ordinary child, but not a composite's own finalization. Its end as
+	 * unattempted does not reach the {@link #unattemptedObserver}, which then sees only operations a
+	 * generator handed to the driver. The mark lasts for this pass of the operation.
+	 */
+	public boolean driverCreatedQueued(final O op) {
+		if (!enabled) {
+			return true;
+		}
+		if (dispatchDeadlineReached()) {
+			return false;
+		}
+		final var lifecycle = op.startNextLifecycle();
+		if (lifecycle.isTracked()) {
+			synchronized (lifecycle) {
+				if (!transition(op, lifecycle, OperationLifecycleState.DRIVER_QUEUED)) {
+					return false;
+				}
+				lifecycle.markDriverCreated();
+			}
+		} else {
+			synchronized (compatibilityStates) {
+				if (!transition(op, lifecycle, OperationLifecycleState.DRIVER_QUEUED)) {
+					return false;
+				}
+				compatibilityState(op).driverCreated = true;
+			}
 		}
 		outstanding.add(identityKey(op));
 		return true;
@@ -654,15 +705,37 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!enabled) {
 			return true;
 		}
-		if (!transition(op, lifecycle(op), OperationLifecycleState.UNATTEMPTED)) {
+		final var lifecycle = lifecycle(op);
+		if (!transition(op, lifecycle, OperationLifecycleState.UNATTEMPTED)) {
 			return false;
 		}
-		outstanding.remove(identityKey(op));
+		final boolean heldInCustody = outstanding.remove(identityKey(op));
 		unattempted.increment();
 		synchronized (unattemptedOperations) {
 			unattemptedOperations.add(op);
 		}
+		if (heldInCustody) {
+			final var observer = unattemptedObserver;
+			if (observer != null && !isDriverCreated(op, lifecycle)) {
+				observer.accept(op);
+			}
+		}
 		return true;
+	}
+
+	/**
+	 * Whether {@code op}'s current pass entered custody through {@link #driverCreatedQueued}. The
+	 * caller passes the lifecycle its own transition used, so a concurrent requeue that swaps in a new
+	 * lifecycle can't change the answer.
+	 */
+	private boolean isDriverCreated(final O op, final OperationLifecycle lifecycle) {
+		if (lifecycle.isTracked()) {
+			return lifecycle.isDriverCreated();
+		}
+		synchronized (compatibilityStates) {
+			final var compatibilityState = compatibilityState(op);
+			return compatibilityState != null && compatibilityState.driverCreated;
+		}
 	}
 
 	/** Records a dispatched or completing operation which outlived the bounded drain. */
@@ -951,6 +1024,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 				// lifecycle-aware implementations retain per-attempt stale-callback protection.
 				compatibilityState.state = next;
 				compatibilityState.circulation++;
+				compatibilityState.driverCreated = false;
 				selected.increment();
 				return true;
 			}
@@ -963,6 +1037,10 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 								new WeakIdentityKey<>(op, compatibilityReferences), compatibilityState);
 			}
 			compatibilityState.state = next;
+			if (next == OperationLifecycleState.GENERATOR_BUFFERED || next == OperationLifecycleState.DRIVER_QUEUED) {
+				// A new circulation: driverCreatedQueued marks it again when the driver created it.
+				compatibilityState.driverCreated = false;
+			}
 			if (current == OperationLifecycleState.NEW) {
 				selected.increment();
 			}

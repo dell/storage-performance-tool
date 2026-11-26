@@ -6,7 +6,9 @@ import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -17,7 +19,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 final class FinalCountsMetricsManager extends MetricsManagerImpl {
 
 	/** One operation type's successful and failed operations when the step unregistered its context. */
-	record FinalCount(String stepId, OpType opType, long done) {}
+	record FinalCount(String stepId, OpType opType, long done, long concurrencyLast) {}
 
 	private final List<FinalCount> finalCounts = new CopyOnWriteArrayList<>();
 
@@ -35,7 +37,8 @@ final class FinalCountsMetricsManager extends MetricsManagerImpl {
 		finalCounts.add(new FinalCount(
 						metricsCtx.loadStepId(),
 						metricsCtx.opType(),
-						snapshot.successSnapshot().count() + snapshot.failsSnapshot().count()));
+						snapshot.successSnapshot().count() + snapshot.failsSnapshot().count(),
+						snapshot.concurrencySnapshot().last()));
 	}
 
 	/** Successful and failed operations of every operation type of the step. */
@@ -44,6 +47,17 @@ final class FinalCountsMetricsManager extends MetricsManagerImpl {
 						.filter(count -> stepId.equals(count.stepId()))
 						.mapToLong(FinalCount::done)
 						.sum();
+	}
+
+	/** The final current concurrency of each operation type of the step, as its last total row reports it. */
+	Map<OpType, Long> finalConcurrency(final String stepId) {
+		final Map<OpType, Long> concurrency = new EnumMap<>(OpType.class);
+		for (final FinalCount count : finalCounts) {
+			if (stepId.equals(count.stepId())) {
+				concurrency.merge(count.opType(), count.concurrencyLast(), Long::sum);
+			}
+		}
+		return concurrency;
 	}
 
 	/** Successful and failed operations of one operation type of the step. */

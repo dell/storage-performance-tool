@@ -771,7 +771,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private boolean enqueueChildOp(final O childOp, final O permitOwner, final String failureContext) {
 		if (admissionLock == null) {
 			if (!claimCompositeParentOwnership(childOp, permitOwner)
-							|| !claimChildQueueOwnership(childOp)) {
+							|| !claimChildQueueOwnership(childOp, permitOwner)) {
 				return false;
 			}
 			return tryEnqueueChildOp(childOp)
@@ -783,13 +783,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				return false;
 			}
 			if (!admissionOpen) {
-				claimChildQueueOwnership(childOp);
+				claimChildQueueOwnership(childOp, permitOwner);
 				operationLifecycle().unattempted(childOp);
 				settleRefusedCompositeParent(childOp, permitOwner);
 				safeReleaseMpuObjectPermit(permitOwner);
 				return false;
 			}
-			if (!claimChildQueueOwnership(childOp)) {
+			if (!claimChildQueueOwnership(childOp, permitOwner)) {
 				return false;
 			}
 			if (tryEnqueueChildOp(childOp)) {
@@ -832,7 +832,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 				if (!admissionOpen) {
 					for (final O childOp : childOps) {
-						claimChildQueueOwnership(childOp);
+						claimChildQueueOwnership(childOp, permitOwner);
 						operationLifecycle().unattempted(childOp);
 					}
 					settleRefusedCompositeParent(childOps.get(0), permitOwner);
@@ -882,7 +882,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		final var claimed = new ArrayList<O>(childOps.size());
 		var allClaimed = true;
 		for (final O childOp : childOps) {
-			if (claimChildQueueOwnership(childOp)) {
+			if (claimChildQueueOwnership(childOp, permitOwner)) {
 				claimed.add(childOp);
 			} else {
 				allClaimed = false;
@@ -952,13 +952,25 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return true;
 	}
 
-	private boolean claimChildQueueOwnership(final O childOp) {
+	private boolean claimChildQueueOwnership(final O childOp, final O permitOwner) {
 		final var lifecycle = operationLifecycle();
 		return !lifecycle.isEnabled()
 						|| lifecycle.stateOf(childOp) == OperationLifecycleState.DRIVER_QUEUED
 						|| (childOp instanceof CompositeOperation
 										&& lifecycle.stateOf(childOp) == OperationLifecycleState.DISPATCHED)
-						|| lifecycle.driverQueued(childOp);
+						|| queueChild(lifecycle, childOp, permitOwner);
+	}
+
+	/**
+	 * Takes queue custody of {@code childOp}. A composite's own finalization or abort is the
+	 * operation its load generator dispatched; any other child, a part or an extension's ordinary
+	 * child, the driver created, and the tracker records it so (see
+	 * {@link OperationLifecycleTracker#driverCreatedQueued}).
+	 */
+	private boolean queueChild(final OperationLifecycleTracker<O> lifecycle, final O childOp, final O permitOwner) {
+		return compositeParent(childOp, permitOwner) == childOp
+						? lifecycle.driverQueued(childOp)
+						: lifecycle.driverCreatedQueued(childOp);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1108,7 +1120,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		if (admissionLock == null) {
 			try {
 				if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
-					operationLifecycle().driverQueued(childOp);
+					queueChild(operationLifecycle(), childOp, permitOwner);
 					signalDispatch();
 					return ChildEnqueue.QUEUED;
 				}

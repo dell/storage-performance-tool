@@ -99,12 +99,14 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * How this driver publishes a composite operation's results. A count-limited {@code mixed} step
-	 * reads it once, at setup, and caps its dispatch at its count only on a driver that declares
-	 * {@link CompositeResults#IN_PARTS} or {@link CompositeResults#ONE_RESULT}. The default is
-	 * {@link CompositeResults#UNDECLARED}, which keeps such a step as it was before: no cap, so it
-	 * can run past its count. A driver that wraps another, and wants the cap, returns the wrapped
-	 * driver's value.
+	 * How this driver publishes a composite operation's results. Every {@code mixed} step reads it
+	 * once, at setup: on a driver that declares {@link CompositeResults#IN_PARTS} or
+	 * {@link CompositeResults#ONE_RESULT} it retires a composite operation once, counts out an
+	 * operation the driver accepted but never sent, and, when count-limited, caps its dispatch at its
+	 * count. The default is {@link CompositeResults#UNDECLARED}, which keeps such a step as it was
+	 * before: every result retires an operation, nothing is counted out at the stop, and there is no
+	 * cap, so a count-limited step can run past its count. A driver that wraps another returns the
+	 * wrapped driver's value.
 	 */
 	default CompositeResults compositeResults() {
 		return CompositeResults.UNDECLARED;

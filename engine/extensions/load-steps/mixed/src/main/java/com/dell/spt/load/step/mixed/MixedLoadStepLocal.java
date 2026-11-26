@@ -21,7 +21,9 @@ import com.dell.spt.base.item.naming.ItemNameInputFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.step.local.ContextInitResources;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -379,6 +381,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		final MixedLoadGenerator generator = new MixedLoadGenerator(
 						ServiceTaskExecutor.TASK_EXECUTOR, schedule, pool, builders,
 						driver, concurrencyLimit, newItemInput, capped ? countLimit : 0);
+		generator.compositeResults(compositeResults);
 		pending.hold(generator);
 		this.mixedGenerator = generator;
 
@@ -419,40 +422,74 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		// ── 14b. Wrap the driver result output to release generator permits ──
 		// The LoadStepContextImpl constructor sets itself as the driver's
 		// operationResultOutput.  We replace it with a thin wrapper that
-		// releases one MixedLoadGenerator concurrency permit for every
-		// completed operation (regardless of status), then delegates to the
-		// original step context.  This prevents the generator from flooding
-		// the driver's input queue.
-		final Output resultOutput = new Output() {
-			@Override
-			public boolean put(final Object op) {
-				generator.onOperationCompleted((Operation) op);
-				generator.releasePermit();
-				return stepCtx.put((Operation) op);
-			}
+		// retires each operation the generator dispatched, counting it out of
+		// flight and releasing one MixedLoadGenerator concurrency permit, then
+		// delegates every result to the original step context unchanged.
+		// This prevents the generator from flooding the driver's input queue.
+		// On a driver that declares its composite results the wrapper retires an
+		// operation once, at its last result (see endsOperation); on any other
+		// driver it retires one at every result, as before. Chosen here, once.
+		final boolean compositeResultsDeclared = compositeResults == CompositeResults.IN_PARTS
+						|| compositeResults == CompositeResults.ONE_RESULT;
+		final Output resultOutput = !compositeResultsDeclared
+						? new Output() {
+							@Override
+							public boolean put(final Object op) {
+								generator.onOperationCompleted((Operation) op);
+								generator.releasePermit();
+								return stepCtx.put((Operation) op);
+							}
 
-			@Override
-			public int put(final List ops, final int from, final int to) {
-				for (int i = from; i < to; i++) {
-					generator.onOperationCompleted((Operation) ops.get(i));
-					generator.releasePermit();
-				}
-				return stepCtx.put((List) ops, from, to);
-			}
+							@Override
+							public int put(final List ops, final int from, final int to) {
+								for (int i = from; i < to; i++) {
+									generator.onOperationCompleted((Operation) ops.get(i));
+									generator.releasePermit();
+								}
+								return stepCtx.put((List) ops, from, to);
+							}
 
-			@Override
-			public int put(final List ops) {
-				return put(ops, 0, ops.size());
-			}
+							@Override
+							public int put(final List ops) {
+								return put(ops, 0, ops.size());
+							}
 
-			@Override
-			public Input getInput() {
-				return stepCtx.getInput();
-			}
+							@Override
+							public Input getInput() {
+								return stepCtx.getInput();
+							}
 
-			@Override
-			public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
-		};
+							@Override
+							public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
+						}
+						: new Output() {
+							@Override
+							public boolean put(final Object op) {
+								retire(generator, (Operation) op, compositeResults);
+								return stepCtx.put((Operation) op);
+							}
+
+							@Override
+							public int put(final List ops, final int from, final int to) {
+								for (int i = from; i < to; i++) {
+									retire(generator, (Operation) ops.get(i), compositeResults);
+								}
+								return stepCtx.put((List) ops, from, to);
+							}
+
+							@Override
+							public int put(final List ops) {
+								return put(ops, 0, ops.size());
+							}
+
+							@Override
+							public Input getInput() {
+								return stepCtx.getInput();
+							}
+
+							@Override
+							public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
+						};
 		// A capped step also counts each final result the step context does not count, so the step
 		// can end once every operation it dispatched has ended. A step with no count limit (0, or
 		// Long.MAX_VALUE), or on a driver that does not declare its composite results, keeps the
@@ -535,6 +572,78 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 				LogUtil.exception(Level.ERROR, e, "Failed to initialize timing metrics for mixed generator");
 			}
 		}
+	}
+
+	/**
+	 * Retires {@code op} on the generator, counting it out of flight and releasing its concurrency
+	 * permit, when {@code op} is the last result of an operation the generator dispatched; see
+	 * {@link #endsOperation}. Both of the result wrapper's {@code put} methods call it, once per
+	 * result, before the step context sees the result.
+	 */
+	static void retire(final MixedLoadGenerator generator, final Operation op, final CompositeResults compositeResults) {
+		if (endsOperation(op, compositeResults)) {
+			generator.onOperationCompleted(op);
+			generator.releasePermit();
+		}
+	}
+
+	/**
+	 * Whether {@code op} is the last result of an operation the generator dispatched, which then
+	 * leaves the generator's in-flight count and returns its permit. How the step tells depends on
+	 * how the driver says it publishes composite results ({@code compositeResults}, read once at
+	 * setup).
+	 *
+	 * <p>On a driver that does not say ({@link CompositeResults#UNDECLARED}, the interface default,
+	 * for example a driver that wraps a cooperative one), every result ends its operation, as
+	 * before: the step cannot tell a composite's first result from its last there. The step's result
+	 * wrapper on such a driver retires every result without asking this.
+	 *
+	 * <p>On a driver that declares it, a part's result never ends one: the driver creates parts, and
+	 * the generator never counted one in. An ordinary operation's result does, whatever its status:
+	 * the step context, not this, decides whether a result is counted, and an {@code INTERRUPTED}
+	 * result, which it does not count, still ends its operation. On a driver that publishes a
+	 * composite as one result ({@link CompositeResults#ONE_RESULT}, the dummy driver), each composite
+	 * result ends its operation.
+	 *
+	 * <p>On a driver that publishes a composite (multipart) operation in parts
+	 * ({@link CompositeResults#IN_PARTS}, every cooperative driver), the composite has several
+	 * results: its first pass (a multipart upload's initiation, or a split read's kickoff), each part
+	 * attempt, and its finalization. Only the finalization, or a result after which the driver sends
+	 * nothing more for it, ends it. A successful, unfinished CREATE or READ composite has parts to
+	 * come. Every other composite result ends it: a finished one
+	 * ({@link CompositeOperation#allSubOperationsDone()}), and an unfinished one whose status is not
+	 * {@code SUCC}, a failure, {@code INTERRUPTED} or {@code PENDING}, after which the cooperative
+	 * base expands nothing. That is wider than the clause {@code LoadStepContextImpl.put} uses to
+	 * count a result: it counts an unfinished composite only when it failed, but an unfinished
+	 * {@code INTERRUPTED} one still ends its operation here. A composite of another type has one
+	 * result. An ordinary operation the driver created itself, such as an extension's child queued
+	 * through the cooperative base's {@code enqueueChildOperation}, the generator never counted in
+	 * either, so its result ends nothing: the tracker marks such an operation's lifecycle, which its
+	 * result shares ({@link com.dell.spt.base.load.lifecycle.OperationLifecycle#isDriverCreated()}).
+	 * An operation implementation that does not track its lifecycle carries no such mark, so its
+	 * result ends an operation as before.
+	 *
+	 * <p>A known limit: an upload's abort that a driver leaves an unfinished success, with a part
+	 * still in flight, looks like an initiation, and the cooperative base never finalizes that
+	 * upload, so it keeps its permit and its in-flight count to the step's end. The {@code s3} and
+	 * {@code s3-aws} drivers end an abort with the failure of the part that caused it, which retires
+	 * it; the cooperative mock and {@code fs} do not.
+	 */
+	static boolean endsOperation(final Operation<?> op, final CompositeResults compositeResults) {
+		if (compositeResults == CompositeResults.IN_PARTS) {
+			if (op instanceof PartialOperation) {
+				return false;
+			}
+			if (op instanceof CompositeOperation<?> composite) {
+				if (composite.allSubOperationsDone() || op.status() != Operation.Status.SUCC) {
+					return true;
+				}
+				final OpType type = op.type();
+				return type != OpType.CREATE && type != OpType.READ;
+			}
+			return !op.lifecycle().isDriverCreated();
+		}
+		return compositeResults != CompositeResults.ONE_RESULT || !(op instanceof PartialOperation);
 	}
 
 	// ── Helpers ────────────────────────────────────────────────────────────────

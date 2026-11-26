@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -944,6 +945,46 @@ public class NioStorageDriverBaseTest {
 							() -> drv.operationLifecycle().snapshot().inFlight() == 0,
 							"dispatched operation should become terminal");
 			assertEquals(OperationLifecycleState.TERMINAL, dispatched.lifecycle().state());
+		} finally {
+			drv.releaseInvokes();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	/**
+	 * An operation waits in the worker's buffer behind a blocking one. The stop closes admission and
+	 * the worker then settles it as unattempted itself, so queue recovery never returns it. The
+	 * tracker's unattempted observer still sees it, once; the dispatched one it never sees.
+	 */
+	@Test
+	void anOperationTheWorkerSettlesAfterTheStopReachesTheUnattemptedObserverOnce() throws Exception {
+		final var drv = newBlockingDriver(buildStorageConfig(2, 1));
+		final var lifecycle = drv.operationLifecycle();
+		final List<Operation<DataItemImpl>> observed = new CopyOnWriteArrayList<>();
+		lifecycle.unattemptedObserver(observed::add);
+		final var dispatched = newCreateOp("dispatched", 256);
+		final var queued = newCreateOp("worker-queued", 256);
+		try {
+			drv.start();
+			assertTrue(drv.put(dispatched));
+			assertTrue(drv.awaitInvokeEntered(2_000), "the worker is inside a blocking invocation");
+			assertTrue(drv.put(queued));
+			awaitOperationsInWorkerBuffers(drv, 1);
+
+			drv.closeAdmission();
+			drv.releaseInvokes();
+			// The observer runs after the transition is recorded, so wait for it as well as for the state.
+			awaitLifecycle(drv,
+							() -> queued.lifecycle().state() == OperationLifecycleState.UNATTEMPTED && !observed.isEmpty(),
+							"the worker settles the queued operation after the stop");
+
+			assertTrue(drv.recoverQueuedOperations().isEmpty(), "recovery never sees the settled operation");
+			awaitLifecycle(drv, () -> lifecycle.snapshot().inFlight() == 0, "the dispatched operation ends");
+			assertEquals(OperationLifecycleState.TERMINAL, dispatched.lifecycle().state());
+			assertEquals(List.of(queued), observed);
 		} finally {
 			drv.releaseInvokes();
 			if (drv.isStarted()) {

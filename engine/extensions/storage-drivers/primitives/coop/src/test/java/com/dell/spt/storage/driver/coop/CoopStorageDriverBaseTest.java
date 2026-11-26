@@ -35,6 +35,7 @@ import java.util.NoSuchElementException;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
@@ -1612,6 +1613,90 @@ class CoopStorageDriverBaseTest {
 			assertTrue(driver.enqueueChildOperation(child, child, "extension child"));
 			assertEquals(OperationLifecycleState.DRIVER_QUEUED, child.lifecycle().state());
 			assertTrue(childQueueOf(driver).contains(child));
+		} finally {
+			driver.close();
+		}
+	}
+
+	/**
+	 * The unattempted observer, which a load generator uses to count out what it dispatched, sees
+	 * a composite the stop settles, but none of the children the driver created for it: its parts
+	 * and an extension's ordinary child, whatever their permit owner.
+	 */
+	@Test
+	@SuppressWarnings("unchecked")
+	void childrenTheDriverCreatedLeaveCustodyUnobservedAndTheirCompositeObserved() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"driver-created-children-step", dataInput, storageConfig, false, 4);
+		final List<Operation<Item>> observed = new CopyOnWriteArrayList<>();
+		driver.operationLifecycle().unattemptedObserver(observed::add);
+		final var parent = newCompositeParent("observed-composite", 2048, 1024);
+		final Operation<Item> parentOp = (Operation<Item>) (Operation<?>) parent;
+		final List<Operation<Item>> parts = (List<Operation<Item>>) (List<?>) parent.subOperations();
+		final Operation<Item> flatChild = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("flat-child", 0, 1), null, "/bucket", null);
+		final Operation<Item> ownChild = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("own-child", 0, 1), null, "/bucket", null);
+		try {
+			assertTrue(driver.operationLifecycle().driverQueued(parentOp));
+			assertTrue(driver.operationLifecycle().dispatched(parentOp));
+			assertTrue(driver.operationLifecycle().completionStarted(parentOp));
+			assertTrue(driver.operationLifecycle().terminal(parentOp));
+			assertTrue(driver.enqueueChildOperations(parts, parentOp, "part operation"));
+			assertTrue(driver.enqueueChildOperation(flatChild, parentOp, "extension child"));
+			assertTrue(driver.enqueueChildOperation(ownChild, ownChild, "extension child"));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, parent.lifecycle().state());
+
+			driver.closeAdmission();
+			driver.recoverQueuedOperations();
+
+			assertEquals(OperationLifecycleState.UNATTEMPTED, flatChild.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, ownChild.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, parent.lifecycle().state());
+			assertTrue(parts.stream().allMatch(part -> part.lifecycle().state() == OperationLifecycleState.UNATTEMPTED));
+			assertEquals(List.of(parentOp), observed, "only the composite reaches the observer");
+		} finally {
+			driver.close();
+		}
+	}
+
+	/**
+	 * A child the driver created, whose pass ended, and that the driver queues again as its own
+	 * permit owner, as the base's part retry does, stays driver-created: the stop that takes it back
+	 * unsent does not reach the unattempted observer, which counts out only generator work.
+	 */
+	@Test
+	void aDriverCreatedChildRequeuedAsItsOwnPermitOwnerStaysDriverCreated() throws Exception {
+		final var storageConfig = storageConfigForMultipartLimits(0, 0, 1);
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new CoopStorageDriverMock<Item, Operation<Item>>(
+						"requeued-own-owner-step", dataInput, storageConfig, false, 4);
+		final List<Operation<Item>> observed = new CopyOnWriteArrayList<>();
+		driver.operationLifecycle().unattemptedObserver(observed::add);
+		final Operation<Item> owner = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("owner", 0, 1), null, "/bucket", null);
+		final Operation<Item> child = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("child", 0, 1), null, "/bucket", null);
+		try {
+			final var lifecycle = driver.operationLifecycle();
+			assertTrue(driver.enqueueChildOperation(child, owner, "extension child"));
+			assertTrue(child.lifecycle().isDriverCreated(), "precondition: a new child is the driver's");
+			assertTrue(lifecycle.dispatched(child));
+			assertTrue(lifecycle.completionStarted(child));
+			assertTrue(lifecycle.terminal(child));
+			assertTrue(driver.enqueueChildOperation(child, child, "extension retry"));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, child.lifecycle().state());
+			assertTrue(child.lifecycle().isDriverCreated(), "the retried child is still the driver's");
+
+			driver.closeAdmission();
+			driver.recoverQueuedOperations();
+
+			assertEquals(OperationLifecycleState.UNATTEMPTED, child.lifecycle().state());
+			assertEquals(List.of(), observed, "the driver's own child does not reach the observer");
 		} finally {
 			driver.close();
 		}
