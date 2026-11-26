@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -41,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
+import org.apache.logging.log4j.Level;
 
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
@@ -228,9 +230,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			Thread.currentThread().interrupt();
 			return accepted;
 		}
-		Loggers.ERR.warn(
+		LogUtil.trace(Loggers.ERR, Level.WARN, t,
 						"{}: an operation failed to prepare after part of its batch was queued; it is offered again",
-						stepId, t);
+						stepId);
 		return accepted;
 	}
 
