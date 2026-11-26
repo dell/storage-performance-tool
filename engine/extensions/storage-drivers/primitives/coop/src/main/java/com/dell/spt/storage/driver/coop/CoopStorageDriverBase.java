@@ -172,24 +172,31 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			throwUnchecked(new EOFException());
 		}
 		var i = from;
-		while (i < to && isStarted()) {
-			if (inOpQueue.remainingCapacity() == 0) {
-				break;
-			}
-			final O nextOp = ops.get(i);
-			if (!prepare(nextOp)) {
-				break;
-			}
-			admissionLock.lock();
-			try {
-				if (admissionOpen && offerIncomingOperation(nextOp)) {
-					i++;
-				} else {
+		try {
+			while (i < to && isStarted()) {
+				if (inOpQueue.remainingCapacity() == 0) {
 					break;
 				}
-			} finally {
-				admissionLock.unlock();
+				final O nextOp = ops.get(i);
+				if (!prepare(nextOp)) {
+					break;
+				}
+				admissionLock.lock();
+				try {
+					if (admissionOpen && offerIncomingOperation(nextOp)) {
+						i++;
+					} else {
+						break;
+					}
+				} finally {
+					admissionLock.unlock();
+				}
 			}
+		} catch (final Throwable t) {
+			if (i == from) {
+				throw t;
+			}
+			keepAcceptedPrefix(t);
 		}
 		final var n = i - from;
 		scheduledOpCount.add(n);
@@ -199,26 +206,47 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return n;
 	}
 
+	/**
+	 * A failure preparing a later operation of a batch must not hide the operations this call has
+	 * already queued: the caller would offer them again. The call reports the accepted prefix; the
+	 * failing operation is first in the caller's next call, which then reports the failure itself.
+	 */
+	private void keepAcceptedPrefix(final Throwable t) {
+		if (t instanceof InterruptedException) {
+			Thread.currentThread().interrupt();
+		}
+		Loggers.ERR.warn(
+						"{}: an operation failed to prepare after part of its batch was queued; it is offered again: {}",
+						stepId, t.toString());
+	}
+
 	@Override
 	public final int put(final List<O> ops) {
 		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
 		var n = 0;
-		for (final var nextOp : ops) {
-			if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
-				break;
-			}
-			admissionLock.lock();
-			try {
-				if (admissionOpen && offerIncomingOperation(nextOp)) {
-					n++;
-				} else {
+		try {
+			for (final var nextOp : ops) {
+				if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
 					break;
 				}
-			} finally {
-				admissionLock.unlock();
+				admissionLock.lock();
+				try {
+					if (admissionOpen && offerIncomingOperation(nextOp)) {
+						n++;
+					} else {
+						break;
+					}
+				} finally {
+					admissionLock.unlock();
+				}
 			}
+		} catch (final Throwable t) {
+			if (n == 0) {
+				throw t;
+			}
+			keepAcceptedPrefix(t);
 		}
 		scheduledOpCount.add(n);
 		if (n > 0) {

@@ -573,6 +573,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				terminalFailure.compareAndSet(null, terminal);
 				throw terminal;
 			}
+			if (t instanceof Error) {
+				throw failOnError(t);
+			}
 			LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: unexpected failure", name);
 		} finally {
 			if (isFinished()) {
@@ -901,6 +904,21 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						IntegrityTerminalException.Category.EXECUTION,
 						"Operation assembly failed after recovering retained work",
 						assemblyFailure);
+	}
+
+	/**
+	 * An {@link Error} is not retried: retrying could hide it for the rest of the step. The step
+	 * fails with a public message that names only the error's class; the error goes to the log.
+	 */
+	private IntegrityTerminalException failOnError(final Throwable error) {
+		outputFinishFlag = true;
+		LogUtil.trace(Loggers.ERR, Level.ERROR, error, "{}: stopped on an unexpected error", name);
+		final var terminal = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Load generator stopped on an unexpected " + error.getClass().getName(),
+						error);
+		terminalFailure.compareAndSet(null, terminal);
+		return terminal;
 	}
 
 	private AssertionError contractFailure(final String message) {

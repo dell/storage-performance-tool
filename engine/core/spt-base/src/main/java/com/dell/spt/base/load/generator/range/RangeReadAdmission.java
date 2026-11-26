@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import java.io.EOFException;
@@ -232,6 +233,15 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 					break;
 				}
 				throwUnchecked(failure);
+			} catch (Error failure) {
+				// The caller would offer the accepted prefix again; the failing operation is first
+				// in its next call, which reports the error itself.
+				if (accepted == 0) {
+					throw failure;
+				}
+				Loggers.ERR.warn("Range admission: an operation failed after part of its batch was accepted;"
+								+ " it is offered again: {}", failure.toString());
+				break;
 			}
 			accepted++;
 		}

@@ -297,6 +297,32 @@ class RangeReadAdmissionTest {
 	}
 
 	@Test
+	void anErrorAfterAnAcceptedOperationReturnsTheAcceptedPrefix() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var first = builder.buildOp(item("a", 2));
+		var second = builder.buildOp(item("b", 2));
+		tracker.generatorBuffered(first);
+		tracker.generatorBuffered(second);
+		when(driver.put(first)).thenAnswer(call -> tracker.driverQueued(first));
+		when(driver.put(second))
+						.thenThrow(new LinkageError("attempted duplicate class definition"))
+						.thenThrow(new LinkageError("attempted duplicate class definition"))
+						.thenAnswer(call -> tracker.driverQueued(second));
+		assertEquals(1, admission.put(List.of(first, second)));
+		assertThrows(LinkageError.class, () -> admission.put(List.of(second)));
+		assertEquals(1, admission.put(List.of(second)));
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(first));
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(second));
+		verify(driver, times(1)).put(first);
+		tracker.unattempted(first);
+		tracker.unattempted(second);
+		assertTrue(tracker.counters().reconciled());
+	}
+
+	@Test
 	void localPacingSurvivesNanoTimeWrapAndDisabledTrackingFailsClosed() {
 		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
