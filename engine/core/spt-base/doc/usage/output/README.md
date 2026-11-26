@@ -408,7 +408,7 @@ can be joined.
 | ItemPath         | `/<bucket>/<key>` for a data operation, with one slash between the bucket and the key, as in the `s3` driver's request path. That holds for a step that reads its items from a `bucket,key,size,version_id` manifest too, and a CREATE from a manifest names the output path it wrote to, not the manifest's bucket. A LIST row holds the listed prefix. The path ends at its first comma, since fields are not quoted.
 | OpType           | The load operation type name: `NOOP`, `CREATE`, `READ`, `UPDATE`, `DELETE`, `LIST` or `STAT`
 | Status           | The load operation resulting status name, listed below
-| ReqTimeStart[us] | The load operation start timestamp in microseconds
+| ReqTimeStart[us] | The load operation start timestamp in microseconds. Empty when the attempt failed before its request was sent.
 | Duration[us]     | The load operation total duration in microseconds. Empty when the row has no start (the attempt failed before its request was sent).
 | RespLatency[us]  | The load operation response latency in microseconds
 | DataLatency[us]  | The load operation response data latency ("1st byte" of the response content) in microseconds
