@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -85,6 +86,44 @@ class RetryDelaySchedulerTest {
 	}
 
 	@Test
+	void aTaskThatChangesTheContextLeavesTheNextTaskOfItsProducerItsOwn() throws Exception {
+		final var changed = new CompletableFuture<Void>();
+		final var next = new CompletableFuture<String>();
+		ThreadContext.put(LOG_KEY, "producer-step");
+		try {
+			runSoon(() -> {
+				ThreadContext.put(LOG_KEY, "unrelated-step");
+				changed.complete(null);
+			});
+			changed.get(10, TimeUnit.SECONDS);
+			// The same producer context again, so its snapshot equals the first task's.
+			runSoon(() -> next.complete(ThreadContext.get(LOG_KEY)));
+			assertEquals("producer-step", next.get(10, TimeUnit.SECONDS));
+		} finally {
+			ThreadContext.remove(LOG_KEY);
+		}
+	}
+
+	@Test
+	void anEmptyProducerContextLeavesNoKeyBehind() throws Exception {
+		final var saved = ThreadContext.getImmutableContext();
+		ThreadContext.clearMap();
+		try {
+			final var changed = new CompletableFuture<Void>();
+			final var next = new CompletableFuture<String>();
+			runSoon(() -> {
+				ThreadContext.put(LOG_KEY, "left-by-a-task");
+				changed.complete(null);
+			});
+			changed.get(10, TimeUnit.SECONDS);
+			runSoon(() -> next.complete(ThreadContext.get(LOG_KEY)));
+			assertNull(next.get(10, TimeUnit.SECONDS), "a task from an empty context must see no key");
+		} finally {
+			ThreadContext.putAll(saved);
+		}
+	}
+
+	@Test
 	void cancelledTaskNeverRunsAndLeavesTheQueue() throws Exception {
 		final var ran = new AtomicBoolean();
 		final List<Future<?>> futures = new ArrayList<>();
@@ -102,15 +141,18 @@ class RetryDelaySchedulerTest {
 
 	@Test
 	void failedTaskGoesToItsFutureAndTheThreadCarriesOn() throws Exception {
+		final var before = new CompletableFuture<Thread>();
+		runSoon(() -> before.complete(Thread.currentThread()));
+		final var timerThread = before.get(10, TimeUnit.SECONDS);
 		final var failure = new IllegalStateException("task failure");
 		final var failed = RetryDelayScheduler.schedule(1, () -> {
 			throw failure;
 		});
 		final var thrown = assertThrows(ExecutionException.class, () -> failed.get(10, TimeUnit.SECONDS));
 		assertInstanceOf(IllegalStateException.class, thrown.getCause());
-		final var next = new CompletableFuture<String>();
-		runSoon(() -> next.complete(Thread.currentThread().getName()));
-		assertEquals(RetryDelayScheduler.THREAD_NAME, next.get(10, TimeUnit.SECONDS));
+		final var after = new CompletableFuture<Thread>();
+		runSoon(() -> after.complete(Thread.currentThread()));
+		assertSame(timerThread, after.get(10, TimeUnit.SECONDS), "the failure must not replace the thread");
 	}
 
 	private static void runSoon(final Runnable task) {

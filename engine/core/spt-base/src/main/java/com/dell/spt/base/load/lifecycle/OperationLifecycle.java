@@ -16,6 +16,10 @@ public final class OperationLifecycle {
 	private final boolean tracked;
 	private final AtomicReference<OperationLifecycleState> state = new AtomicReference<>(OperationLifecycleState.NEW);
 	private boolean explicitDispatch;
+	// Whether the driver created the operation of this pass, see
+	// OperationLifecycleTracker.driverCreatedQueued. Written once, under this lifecycle's monitor,
+	// before the operation enters the driver's queue; read without it by isDriverCreated.
+	private volatile boolean driverCreated;
 
 	/** Creates an independently tracked lifecycle in the {@link OperationLifecycleState#NEW} state. */
 	public OperationLifecycle() {
@@ -93,6 +97,21 @@ public final class OperationLifecycle {
 		return (current == OperationLifecycleState.DRIVER_QUEUED
 						|| current == OperationLifecycleState.DISPATCHED)
 						&& state.compareAndSet(current, OperationLifecycleState.TERMINAL);
+	}
+
+	void markDriverCreated() {
+		driverCreated = true;
+	}
+
+	/**
+	 * Whether the operation of this pass entered the driver's queue as one the driver created
+	 * itself, through {@link OperationLifecycleTracker#driverCreatedQueued}, rather than one a load
+	 * generator dispatched. A result snapshot shares its operation's lifecycle, so a result output
+	 * can tell from it whether a generator dispatched the operation. Always {@code false} for the
+	 * {@link #untracked()} marker, whose compatibility state the tracker keeps apart.
+	 */
+	public boolean isDriverCreated() {
+		return driverCreated;
 	}
 
 	boolean unattempted() {

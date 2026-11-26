@@ -2,6 +2,8 @@ package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
+import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
@@ -11,14 +13,17 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import com.github.akurilov.commons.system.SizeInBytes;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -45,6 +50,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
@@ -956,8 +962,10 @@ class MixedLoadGeneratorTest {
 		final MixedLoadGenerator gen = new MixedLoadGenerator(
 						executor, schedule, pool, builders, noopOutput(), 1, mockNewItemSupplier());
 
-		assertThrows(AssertionError.class, gen::doWork,
+		final var failure = assertThrows(IntegrityTerminalException.class, gen::doWork,
 						"precondition: builder must fail with Error to exercise throwable path");
+		assertTrue(failure.getCause() instanceof AssertionError);
+		assertSame(failure, gen.terminalFailure());
 		assertEquals(1, availablePermits(gen),
 						"generator must release permit even when builder throws Error");
 	}
@@ -1009,6 +1017,7 @@ class MixedLoadGeneratorTest {
 			assertTrue(gen.isStopped());
 			assertEquals(4, availablePermits(gen), "the refused operation's permit is released");
 			assertEquals(List.of(), log.errorsContaining("MixedLoadGenerator"));
+			assertNull(gen.terminalFailure());
 		}
 	}
 
@@ -1023,7 +1032,29 @@ class MixedLoadGeneratorTest {
 			final List<String> errors = log.errorsContaining("MixedLoadGenerator error in doWork");
 			assertEquals(1, errors.size(), errors.toString());
 			assertTrue(errors.get(0).contains("synthetic driver failure"), errors.toString());
+			final var failure = gen.terminalFailure();
+			assertNotNull(failure, "a stopped generator fails the step");
+			assertEquals("Mixed load generator stopped on an unexpected java.io.IOException", failure.getMessage());
 		}
+	}
+
+	@Test
+	@DisplayName("An Error from the driver fails the step")
+	void aDriverErrorFailsTheStep() throws Exception {
+		final var error = new LinkageError("attempted duplicate class definition");
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				throw error;
+			}
+		};
+		final MixedLoadGenerator gen = startReadCreateGenerator(driver, mockNewItemSupplier());
+		assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
+		final var failure = gen.terminalFailure();
+		assertNotNull(failure);
+		assertEquals("Mixed load generator stopped on an unexpected java.lang.LinkageError", failure.getMessage());
+		assertSame(error, failure.getCause());
+		assertEquals(4, availablePermits(gen), "the refused operation's permit is released");
 	}
 
 	@Test
@@ -1067,6 +1098,7 @@ class MixedLoadGeneratorTest {
 			assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
 			final List<String> errors = log.errorsContaining("MixedLoadGenerator error in doWork");
 			assertEquals(1, errors.size(), errors.toString());
+			assertNull(gen.terminalFailure());
 		}
 	}
 
@@ -1240,6 +1272,231 @@ class MixedLoadGeneratorTest {
 			assertEquals(0, refusedGen.inFlightCount(type), "refused " + type);
 			assertEquals(0, failedGen.inFlightCount(type), "failed " + type);
 		}
+	}
+
+	@Test
+	@DisplayName("Operations the driver held unsent count out once at stop; refused and sent ones are not counted out")
+	@Timeout(30)
+	void heldOperationsCountOutWhenUnattemptedAndRefusedOrSentOnesDoNot() throws Exception {
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		for (int i = 0; i < 100; i++) {
+			pool.addDeleteItem(new ItemImpl("to-delete-" + i));
+		}
+		final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+		final List<Operation> held = new ArrayList<>();
+		final List<Operation> refused = new ArrayList<>();
+		final AtomicInteger puts = new AtomicInteger();
+		// A cooperative driver's admission: every third operation is refused and the tracker never
+		// holds it; the others are queued in the driver's custody.
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				if (puts.incrementAndGet() % 3 == 0) {
+					refused.add(op);
+					return false;
+				}
+				assertTrue(lifecycle.driverQueued(op));
+				held.add(op);
+				return true;
+			}
+		};
+		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, driver, 1_000);
+		gen.compositeResults(CompositeResults.IN_PARTS);
+		gen.operationLifecycle(lifecycle);
+		dispatch(gen, 300);
+		// The schedule is shuffled, so the sent operations are chosen by type: four of each.
+		final List<OpType> types = List.of(OpType.READ, OpType.CREATE, OpType.DELETE);
+		final List<Operation> sent = new ArrayList<>();
+		for (final OpType type : types) {
+			held.stream().filter(op -> op.type() == type).limit(4).forEach(sent::add);
+		}
+		for (final Operation op : sent) {
+			assertTrue(lifecycle.dispatched(op));
+		}
+		for (final OpType type : types) {
+			assertEquals(count(held, type), gen.inFlightCount(type), "precondition: held " + type);
+		}
+
+		// The stop: what the driver held unsent becomes unattempted, by recovery or by the driver.
+		for (final Operation op : held) {
+			if (sent.stream().noneMatch(sentOp -> sentOp == op)) {
+				assertTrue(lifecycle.unattempted(op));
+			}
+		}
+		// An operation the driver refused was counted out at the refusal, not again here.
+		for (final Operation op : refused) {
+			lifecycle.unattempted(op);
+		}
+		// One still dispatched at the drain deadline stays counted.
+		assertEquals(sent.size(), lifecycle.expireTerminalDeadline());
+
+		assertTrue(lifecycle.counters().unattempted() > 0, "precondition: operations were unattempted");
+		assertFalse(refused.isEmpty(), "precondition: operations were refused");
+		for (final OpType type : types) {
+			assertTrue(count(sent, type) > 0, "precondition: a sent " + type);
+			assertEquals(count(sent, type), gen.inFlightCount(type), type + " still counted");
+		}
+	}
+
+	@Test
+	@DisplayName("An unsent composite counts out once at stop, its parts never, and one its last result retired not again")
+	@Timeout(30)
+	void anUnattemptedCompositeCountsOutOnceAndItsPartsNever() throws Exception {
+		try (final DataInput dataInput = DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4KB"), 4, false)) {
+			final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+			final List<Operation> held = new ArrayList<>();
+			final Output<Operation> driver = new AcceptingOutput() {
+				@Override
+				public boolean put(final Operation op) {
+					assertTrue(lifecycle.driverQueued(op));
+					held.add(op);
+					return true;
+				}
+			};
+			final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+			weights.put(OpType.READ, 50);
+			weights.put(OpType.CREATE, 50);
+			final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+			builders.put(OpType.READ, testBuilder(OpType.READ, null));
+			builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null, item -> {
+				final DataItemImpl dataItem = new DataItemImpl(item.name(), 0, 2048);
+				dataItem.dataInput(dataInput);
+				return (Operation) new CompositeDataOperationImpl<>(0, OpType.CREATE, dataItem, null, "/bucket", null, null, 0, 1024);
+			}));
+			final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
+							new PoolItemInput<>(makeItems(10)), builders, driver, 1_000, mockNewItemSupplier());
+			gen.compositeResults(CompositeResults.IN_PARTS);
+			gen.operationLifecycle(lifecycle);
+			dispatch(gen, 40);
+			final List<Operation> composites = held.stream().filter(op -> op instanceof CompositeOperation).toList();
+			assertTrue(composites.size() >= 3, "precondition: composites were dispatched");
+			final int creates = composites.size();
+			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "precondition");
+
+			// The first composite started: its parts were queued, then taken back unsent. A part is
+			// never counted out, whether the driver queued it as its own (as the cooperative base
+			// does) or not.
+			final CompositeOperation started = (CompositeOperation) composites.get(0);
+			assertTrue(lifecycle.dispatched(started));
+			final List<?> parts = started.subOperations();
+			for (int i = 0; i < parts.size(); i++) {
+				final Operation part = (Operation) parts.get(i);
+				assertTrue(part instanceof PartialOperation);
+				assertTrue(i % 2 == 0 ? lifecycle.driverCreatedQueued(part) : lifecycle.driverQueued(part));
+				assertTrue(lifecycle.unattempted(part));
+			}
+			assertEquals(creates, gen.inFlightCount(OpType.CREATE), "unattempted parts change nothing");
+
+			// The second never started and published no result: it counts out once.
+			final Operation neverStarted = composites.get(1);
+			assertTrue(lifecycle.unattempted(neverStarted));
+			assertFalse(lifecycle.unattempted(neverStarted));
+			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "an unsent composite counted out once");
+
+			// The third published its first result, which the result wrapper does not retire, and was
+			// queued again for its parts: taken back unsent, it counts out once.
+			final Operation kickedOff = composites.get(2);
+			kickedOff.status(Operation.Status.SUCC);
+			assertFalse(MixedLoadStepLocal.endsOperation(kickedOff, CompositeResults.IN_PARTS), "its first result does not end it");
+			MixedLoadStepLocal.retire(gen, kickedOff, CompositeResults.IN_PARTS);
+			assertEquals(creates - 1, gen.inFlightCount(OpType.CREATE), "its first result retired nothing");
+			assertTrue(lifecycle.dispatched(kickedOff));
+			assertTrue(lifecycle.completionStarted(kickedOff));
+			assertTrue(lifecycle.terminal(kickedOff, Operation.Status.SUCC));
+			assertTrue(lifecycle.driverQueued(kickedOff));
+			assertTrue(lifecycle.unattempted(kickedOff));
+			assertEquals(creates - 2, gen.inFlightCount(OpType.CREATE), "counted out once, at the stop");
+
+			// A composite whose last result retired it is terminal: the stop does not settle it, so it
+			// does not count out again.
+			if (composites.size() > 3) {
+				final Operation finished = composites.get(3);
+				assertTrue(lifecycle.dispatched(finished));
+				assertTrue(lifecycle.completionStarted(finished));
+				finished.status(Operation.Status.RESP_FAIL_CLIENT);
+				MixedLoadStepLocal.retire(gen, finished, CompositeResults.IN_PARTS);
+				assertTrue(lifecycle.terminal(finished, Operation.Status.RESP_FAIL_CLIENT));
+				assertFalse(lifecycle.unattempted(finished));
+				assertEquals(creates - 3, gen.inFlightCount(OpType.CREATE), "retired once, by its last result");
+			}
+		}
+	}
+
+	@Test
+	@DisplayName("An operation the driver created and queued itself does not count out when it is unattempted")
+	@Timeout(30)
+	void aDriverCreatedOperationDoesNotCountOutWhenUnattempted() throws Exception {
+		final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+		final List<Operation> held = new ArrayList<>();
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				assertTrue(lifecycle.driverQueued(op));
+				held.add(op);
+				return true;
+			}
+		};
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.STAT, 50);
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.STAT, testBuilder(OpType.STAT, null));
+		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
+						new PoolItemInput<>(makeItems(10)), builders, driver, 1_000, mockNewItemSupplier());
+		gen.compositeResults(CompositeResults.IN_PARTS);
+		gen.operationLifecycle(lifecycle);
+		dispatch(gen, 20);
+		final List<Operation> reads = held.stream().filter(op -> op.type() == OpType.READ).toList();
+		final int count = reads.size();
+		assertTrue(count >= 2, "precondition: READs were dispatched");
+		assertEquals(count, gen.inFlightCount(OpType.READ), "precondition");
+
+		// An ordinary READ the driver made itself, as an extension's child of a composite: the
+		// generator never counted it in, so leaving custody unsent must not count anything out.
+		final Operation child = new OperationImpl<>(0, OpType.READ, new ItemImpl("child"), null, "/bucket", null);
+		assertTrue(lifecycle.driverCreatedQueued(child));
+		assertTrue(lifecycle.unattempted(child));
+		assertEquals(count, gen.inFlightCount(OpType.READ), "the driver's own READ counted nothing out");
+
+		// The generator's own unsent READ still counts out.
+		assertTrue(lifecycle.unattempted(reads.get(0)));
+		assertEquals(count - 1, gen.inFlightCount(OpType.READ), "the generator's unsent READ counted out");
+	}
+
+	@Test
+	@DisplayName("On a driver that does not declare its composite results nothing counts out when unattempted")
+	@Timeout(30)
+	void anUndeclaredDriverCountsNothingOutWhenUnattempted() throws Exception {
+		final OperationLifecycleTracker lifecycle = new OperationLifecycleTracker();
+		final List<Operation> held = new ArrayList<>();
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				assertTrue(lifecycle.driverQueued(op));
+				held.add(op);
+				return true;
+			}
+		};
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		for (int i = 0; i < 20; i++) {
+			pool.addDeleteItem(new ItemImpl("to-delete-" + i));
+		}
+		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, driver, 1_000);
+		gen.compositeResults(CompositeResults.UNDECLARED);
+		gen.operationLifecycle(lifecycle);
+		dispatch(gen, 20);
+		final Operation read = held.stream().filter(op -> op.type() == OpType.READ).findFirst().orElseThrow();
+		final int count = gen.inFlightCount(OpType.READ);
+
+		// As before, an operation held unsent is not counted out at the stop: an undeclared driver
+		// keeps the earlier accounting, in which every result retires an operation.
+		assertTrue(lifecycle.unattempted(read));
+		assertEquals(count, gen.inFlightCount(OpType.READ), "an unsent READ stays counted, as before");
+	}
+
+	private static long count(final List<Operation> ops, final OpType type) {
+		return ops.stream().filter(op -> op.type() == type).count();
 	}
 
 	@Test
@@ -1425,6 +1682,13 @@ class MixedLoadGeneratorTest {
 	/** Creates a builder that records the op type when buildOp is called. */
 	private static OperationsBuilder<Item, Operation<Item>> testBuilder(
 					final OpType opType, final ConcurrentLinkedQueue<OpType> tracker) {
+		return testBuilder(opType, tracker, item -> new OperationImpl<>(0, opType, item, null, null, null));
+	}
+
+	/** Creates a builder that records the op type when buildOp is called, and builds with {@code factory}. */
+	private static OperationsBuilder<Item, Operation<Item>> testBuilder(
+					final OpType opType, final ConcurrentLinkedQueue<OpType> tracker,
+					final Function<Item, Operation<Item>> factory) {
 		return new OperationsBuilder<>() {
 			private OpType type = opType;
 
@@ -1474,7 +1738,7 @@ class MixedLoadGeneratorTest {
 				if (tracker != null) {
 					tracker.add(opType);
 				}
-				return new OperationImpl<>(0, opType, item, null, null, null);
+				return factory.apply(item);
 			}
 
 			@Override

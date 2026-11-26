@@ -13,7 +13,7 @@ import (
 )
 
 // fakeAbortResolve simulates a detected port conflict where the user chooses Abort.
-func fakeAbortResolve(ctx context.Context, port string, forceMode bool) (*portcheck.ResolutionResult, error) {
+func fakeAbortResolve(_ context.Context, _ string, _ portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 	return &portcheck.ResolutionResult{
 		Strategy:   portcheck.StrategyAbort,
 		Success:    false,
@@ -43,9 +43,9 @@ func TestAbortDoesNotPrintUsage(t *testing.T) {
 	// Swap the resolver with our fake abort and restore afterward.
 	prevResolver := resolvePortConflictFunc
 	resolverCalls := 0
-	resolvePortConflictFunc = func(ctx context.Context, port string, forceMode bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(ctx context.Context, port string, opts portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		resolverCalls++
-		return fakeAbortResolve(ctx, port, forceMode)
+		return fakeAbortResolve(ctx, port, opts)
 	}
 	t.Cleanup(func() { resolvePortConflictFunc = prevResolver })
 
@@ -97,7 +97,7 @@ func TestAbortDoesNotPrintUsage(t *testing.T) {
 func TestCheckPortConflictsReportsUnattendedAbort(t *testing.T) {
 	const message = "port 9999 is held by an SPT engine (run 41, state RUNNING); it was left running."
 	prevResolver := resolvePortConflictFunc
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{
 			Strategy: portcheck.StrategyAbort,
 			Message:  message,
@@ -109,7 +109,7 @@ func TestCheckPortConflictsReportsUnattendedAbort(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().Bool("force", false, "")
 	cmd.Flags().Int(flagAPIPort, 9999, "")
-	err := checkPortConflicts(cmd)
+	err := checkPortConflicts(cmd, true)
 	if err == nil || err.Error() != message {
 		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
 	}
@@ -119,7 +119,7 @@ func TestCheckPortConflictsReportsUnattendedAbort(t *testing.T) {
 // an operator spends at the prompt against the engine's shutdown.
 func TestCheckPortConflictsSetsNoOverallDeadline(t *testing.T) {
 	prevResolver := resolvePortConflictFunc
-	resolvePortConflictFunc = func(ctx context.Context, _ string, _ bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(ctx context.Context, _ string, _ portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		if deadline, ok := ctx.Deadline(); ok {
 			t.Errorf("resolver context has deadline %v", deadline)
 		}
@@ -130,7 +130,7 @@ func TestCheckPortConflictsSetsNoOverallDeadline(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().Bool("force", false, "")
 	cmd.Flags().Int(flagAPIPort, 9999, "")
-	if err := checkPortConflicts(cmd); err != nil {
+	if err := checkPortConflicts(cmd, true); err != nil {
 		t.Fatalf("checkPortConflicts() error = %v", err)
 	}
 }
@@ -140,7 +140,7 @@ func TestCheckPortConflictsSetsNoOverallDeadline(t *testing.T) {
 func TestCheckPortConflictsReportsAnInterruptedRetry(t *testing.T) {
 	const message = "Interrupted while rechecking port 23999: context canceled"
 	prevResolver := resolvePortConflictFunc
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{
 			Strategy: portcheck.StrategyRetry,
 			Message:  message,
@@ -152,7 +152,7 @@ func TestCheckPortConflictsReportsAnInterruptedRetry(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().Bool("force", false, "")
 	cmd.Flags().Int(flagAPIPort, 23999, "")
-	err := checkPortConflicts(cmd)
+	err := checkPortConflicts(cmd, true)
 	if err == nil || err.Error() != message {
 		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
 	}
@@ -164,7 +164,7 @@ func TestCheckPortConflictsReportsAnInterruptedRetry(t *testing.T) {
 func TestCheckPortConflictsReportsAnInterruptionAtThePrompt(t *testing.T) {
 	const message = "Interrupted while waiting for an answer about port 23999: context canceled"
 	prevResolver := resolvePortConflictFunc
-	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+	resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 		return &portcheck.ResolutionResult{
 			Strategy: portcheck.StrategyRetry,
 			Message:  message,
@@ -176,7 +176,7 @@ func TestCheckPortConflictsReportsAnInterruptionAtThePrompt(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().Bool("force", false, "")
 	cmd.Flags().Int(flagAPIPort, 23999, "")
-	err := checkPortConflicts(cmd)
+	err := checkPortConflicts(cmd, true)
 	if err == nil || err.Error() != message {
 		t.Fatalf("checkPortConflicts() error = %v, want %q", err, message)
 	}

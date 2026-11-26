@@ -116,7 +116,7 @@ func TestReplayCommandExitsOneWhenItsOnlyStepFailsTerminally(t *testing.T) {
 	for _, route := range routes {
 		t.Run(route.name, func(t *testing.T) {
 			t.Cleanup(installReplayEngineInfoSeams(t))
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
 			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }

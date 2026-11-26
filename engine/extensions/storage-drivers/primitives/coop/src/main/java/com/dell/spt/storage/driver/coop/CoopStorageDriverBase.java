@@ -8,6 +8,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
@@ -19,6 +20,7 @@ import com.dell.spt.base.item.op.partial.data.PartialDataOperationFailureMark;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -42,6 +44,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
+import org.apache.logging.log4j.Level;
 
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
@@ -174,24 +177,31 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			throwUnchecked(new EOFException());
 		}
 		var i = from;
-		while (i < to && isStarted()) {
-			if (inOpQueue.remainingCapacity() == 0) {
-				break;
-			}
-			final O nextOp = ops.get(i);
-			if (!prepare(nextOp)) {
-				break;
-			}
-			admissionLock.lock();
-			try {
-				if (admissionOpen && offerIncomingOperation(nextOp)) {
-					i++;
-				} else {
+		try {
+			while (i < to && isStarted()) {
+				if (inOpQueue.remainingCapacity() == 0) {
 					break;
 				}
-			} finally {
-				admissionLock.unlock();
+				final O nextOp = ops.get(i);
+				if (!prepare(nextOp)) {
+					break;
+				}
+				admissionLock.lock();
+				try {
+					if (admissionOpen && offerIncomingOperation(nextOp)) {
+						i++;
+					} else {
+						break;
+					}
+				} finally {
+					admissionLock.unlock();
+				}
 			}
+		} catch (final Throwable t) {
+			if (i == from) {
+				throw t;
+			}
+			return keepAcceptedPrefix(i - from, t);
 		}
 		final var n = i - from;
 		scheduledOpCount.add(n);
@@ -201,26 +211,60 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return n;
 	}
 
+	/**
+	 * A failure preparing a later operation of a batch must not hide the operations this call has
+	 * already queued: the caller would offer them again. The call reports the accepted prefix; the
+	 * failing operation is first in the caller's next call, which then reports the failure itself.
+	 * An {@link Error} or a terminal failure is thrown once the prefix is counted and dispatched: it
+	 * ends the step.
+	 */
+	private int keepAcceptedPrefix(final int accepted, final Throwable t) {
+		scheduledOpCount.add(accepted);
+		signalDispatch();
+		if (t instanceof Error error) {
+			throw error;
+		}
+		final var terminal = IntegrityTerminalException.find(t);
+		if (terminal != null) {
+			throw terminal;
+		}
+		if (t instanceof InterruptedException) {
+			Thread.currentThread().interrupt();
+			return accepted;
+		}
+		LogUtil.trace(Loggers.ERR, Level.WARN, t,
+						"{}: an operation failed to prepare after part of its batch was queued; it is offered again",
+						stepId);
+		return accepted;
+	}
+
 	@Override
 	public final int put(final List<O> ops) {
 		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
 		var n = 0;
-		for (final var nextOp : ops) {
-			if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
-				break;
-			}
-			admissionLock.lock();
-			try {
-				if (admissionOpen && offerIncomingOperation(nextOp)) {
-					n++;
-				} else {
+		try {
+			for (final var nextOp : ops) {
+				if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
 					break;
 				}
-			} finally {
-				admissionLock.unlock();
+				admissionLock.lock();
+				try {
+					if (admissionOpen && offerIncomingOperation(nextOp)) {
+						n++;
+					} else {
+						break;
+					}
+				} finally {
+					admissionLock.unlock();
+				}
 			}
+		} catch (final Throwable t) {
+			if (n == 0) {
+				throw t;
+			}
+			return keepAcceptedPrefix(n, t);
 		}
 		scheduledOpCount.add(n);
 		if (n > 0) {
@@ -730,7 +774,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private boolean enqueueChildOp(final O childOp, final O permitOwner, final String failureContext) {
 		if (admissionLock == null) {
 			if (!claimCompositeParentOwnership(childOp, permitOwner)
-							|| !claimChildQueueOwnership(childOp)) {
+							|| !claimChildQueueOwnership(childOp, permitOwner)) {
 				return false;
 			}
 			return tryEnqueueChildOp(childOp)
@@ -742,13 +786,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				return false;
 			}
 			if (!admissionOpen) {
-				claimChildQueueOwnership(childOp);
+				claimChildQueueOwnership(childOp, permitOwner);
 				operationLifecycle().unattempted(childOp);
 				settleRefusedCompositeParent(childOp, permitOwner);
 				safeReleaseMpuObjectPermit(permitOwner);
 				return false;
 			}
-			if (!claimChildQueueOwnership(childOp)) {
+			if (!claimChildQueueOwnership(childOp, permitOwner)) {
 				return false;
 			}
 			if (tryEnqueueChildOp(childOp)) {
@@ -791,7 +835,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 				if (!admissionOpen) {
 					for (final O childOp : childOps) {
-						claimChildQueueOwnership(childOp);
+						claimChildQueueOwnership(childOp, permitOwner);
 						operationLifecycle().unattempted(childOp);
 					}
 					settleRefusedCompositeParent(childOps.get(0), permitOwner);
@@ -841,7 +885,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		final var claimed = new ArrayList<O>(childOps.size());
 		var allClaimed = true;
 		for (final O childOp : childOps) {
-			if (claimChildQueueOwnership(childOp)) {
+			if (claimChildQueueOwnership(childOp, permitOwner)) {
 				claimed.add(childOp);
 			} else {
 				allClaimed = false;
@@ -911,13 +955,25 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return true;
 	}
 
-	private boolean claimChildQueueOwnership(final O childOp) {
+	private boolean claimChildQueueOwnership(final O childOp, final O permitOwner) {
 		final var lifecycle = operationLifecycle();
 		return !lifecycle.isEnabled()
 						|| lifecycle.stateOf(childOp) == OperationLifecycleState.DRIVER_QUEUED
 						|| (childOp instanceof CompositeOperation
 										&& lifecycle.stateOf(childOp) == OperationLifecycleState.DISPATCHED)
-						|| lifecycle.driverQueued(childOp);
+						|| queueChild(lifecycle, childOp, permitOwner);
+	}
+
+	/**
+	 * Takes queue custody of {@code childOp}. A composite's own finalization or abort is the
+	 * operation its load generator dispatched; any other child, a part or an extension's ordinary
+	 * child, the driver created, and the tracker records it so (see
+	 * {@link OperationLifecycleTracker#driverCreatedQueued}).
+	 */
+	private boolean queueChild(final OperationLifecycleTracker<O> lifecycle, final O childOp, final O permitOwner) {
+		return compositeParent(childOp, permitOwner) == childOp
+						? lifecycle.driverQueued(childOp)
+						: lifecycle.driverCreatedQueued(childOp);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1067,7 +1123,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		if (admissionLock == null) {
 			try {
 				if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
-					operationLifecycle().driverQueued(childOp);
+					queueChild(operationLifecycle(), childOp, permitOwner);
 					signalDispatch();
 					return ChildEnqueue.QUEUED;
 				}
@@ -1726,7 +1782,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/**
 	 * Settles a recovered queue entry. Return true only when it became unattempted and should
 	 * enter the legacy recovery output. Retained retries instead settle their known failure
-	 * and return false; no result output or transport action may run here. Called at most once
+	 * and return false; the hook may publish that settled failure, once and on the calling thread,
+	 * but no success output or transport action may run here. Direct dispatch calls this hook
+	 * under {@code admissionLock}, so a hook that publishes must run only with direct dispatch off,
+	 * as range drivers do, or move the publication outside that lock. Called at most once
 	 * per queued operation in each recovery call, and not for a queued composite that recovery
 	 * settles through one of its recovered parts. An operation this hook leaves queued can be
 	 * visited again by a later recovery call, so the hook must be safe to repeat.

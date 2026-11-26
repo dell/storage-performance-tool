@@ -217,6 +217,33 @@ class OperationDispatchTaskTest {
 		assertEquals(1, lifecycle.snapshot().unattempted());
 	}
 
+	/**
+	 * An entry an extension writes straight into the protected child queue is one the driver
+	 * created: the dispatcher takes custody of it as such, so a mixed step's stop does not count it
+	 * out of the generator's in-flight count when it is taken back unsent.
+	 */
+	@Test
+	void legacyChildQueueOperationIsHeldAsDriverCreated() throws Exception {
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("legacy-child", 0, 1),
+						null, "/bucket", null);
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		final List<Operation<Item>> observed = new ArrayList<>();
+		lifecycle.unattemptedObserver(observed::add);
+		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
+		// Declined without a wait for a signal: the operation stays held, never sent.
+		when(driverMock.submit(op)).thenReturn(false);
+		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(true);
+		childOpQueue.add(op);
+
+		task.doWork();
+
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, lifecycle.stateOf(op));
+		assertTrue(op.lifecycle().isDriverCreated(), "held as the driver's own operation");
+		assertTrue(lifecycle.unattempted(op));
+		assertEquals(List.of(), observed, "the observer does not see the driver's own operation");
+	}
+
 	@Test
 	void successfulLegacyBatchSubmitCrossingDeadlineBecomesUnresolved() throws Exception {
 		final Operation<Item> first = new OperationImpl<>(

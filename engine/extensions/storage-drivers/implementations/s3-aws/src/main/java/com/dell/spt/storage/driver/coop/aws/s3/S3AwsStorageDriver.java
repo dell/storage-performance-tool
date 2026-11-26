@@ -484,6 +484,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return resolved;
 	}
 
+	/**
+	 * {@link #executeCompositeOperation} calls {@code startRequest()} for a multipart upload's
+	 * completion or abort, so the parent's result is that request, as on the Netty drivers, not
+	 * the whole upload from its initiation.
+	 */
+	@Override
+	protected boolean timesUploadFinalization() {
+		return true;
+	}
+
 	@Override
 	protected void invokeNio(final O op) {
 		final CompositeDataOperation mpuOp = op instanceof CompositeDataOperation
@@ -1181,12 +1191,19 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private CompletableFuture<Void> executeCompositeOperation(final CompositeDataOperation op) {
 		if (op.type() == OpType.CREATE) {
 			// Check if this is an abort request
+			// The completion or abort is a request of its own: the parent's timing was reset before it
+			// was queued (see timesUploadFinalization()), and the worker stamps only a PENDING operation's
+			// request, so it is stamped here. The client sends it within this call, any retries included.
 			if (op.get(KEY_MPU_ABORT) != null) {
+				op.startRequest();
+				op.finishRequest();
 				return abortMultipartUpload(op);
 			}
 
 			// Check if all sub-operations are done (complete the upload)
 			if (op.allSubOperationsDone()) {
+				op.startRequest();
+				op.finishRequest();
 				return completeMultipartUpload(op);
 			}
 

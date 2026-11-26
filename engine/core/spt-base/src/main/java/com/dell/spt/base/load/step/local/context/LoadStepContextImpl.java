@@ -371,6 +371,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final String immutableListRootPrefix,
 					final Config explicitItemConfig,
 					final DeleteArtifactRecorderFactory deleteArtifactRecorderFactory) {
+		// Registered at the end, once its fields are set: a constructor that throws leaves nothing registered.
+		super(true);
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
@@ -543,6 +545,39 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			closeDeleteVerificationStorage();
 			throw failure;
 		}
+		warnIfSizeLimitCannotStop(configSizeLimit.get(), standaloneDelete.enabled());
+		registerForCloseAll();
+	}
+
+	/**
+	 * Warns once, at construction, when this load has a size limit but its primary metrics
+	 * context counts operations that transfer no body: such a load is never stopped by the size
+	 * limit, which counts transferred bytes. A mixed step's primary context is its first enabled
+	 * type, so it warns only when that type is bodyless.
+	 */
+	private void warnIfSizeLimitCannotStop(final long configuredSizeLimit, final boolean standaloneDeleteFlag) {
+		if (configuredSizeLimit <= 0) {
+			return;
+		}
+		final OpType bodylessType;
+		if (standaloneDeleteFlag) {
+			bodylessType = OpType.DELETE;
+		} else {
+			final OpType primaryType = metricsCtx == null ? null : metricsCtx.opType();
+			bodylessType = OpType.DELETE.equals(primaryType) || OpType.STAT.equals(primaryType)
+							|| OpType.NOOP.equals(primaryType)
+											? primaryType
+											: null;
+		}
+		if (bodylessType != null) {
+			Loggers.ERR.warn(
+							"{}: load.step.limit.size counts transferred bytes, and {} operations transfer none, so this"
+											+ " load is not stopped by the size limit of {}; it ends at its count limit, the"
+											+ " step's time limit, or the end of its items",
+							id,
+							bodylessType,
+							BinarySizeFormat.formatFixedSize(configuredSizeLimit));
+		}
 	}
 
 	/**
@@ -620,9 +655,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		if (rangeRuntime != null) {
+			// Read order matters with recycling: the result count first, the generated count last,
+			// custody, pending results and the recycle queue between them (the order of the generic
+			// recycle dry check). A result published and its successor generated during this check
+			// then raise the generated count past the earlier result count, so the check fails.
+			final long resultCount = counterResults.sum();
 			return generator.isItemInputFinished() && !operationLifecycle.hasOutstandingOperations()
-							&& !rangeRuntime.hasPendingResults() && counterResults.sum() >= generator.generatedOpCount()
-							&& (!recycleFlag || generator.isNothingToRecycle());
+							&& !rangeRuntime.hasPendingResults()
+							&& (!recycleFlag || generator.isNothingToRecycle())
+							&& resultCount >= generator.generatedOpCount();
 		}
 		if (listPathWorkload) {
 			// LIST continuations can leave the recycle queue before generated/active
@@ -948,6 +989,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						// TODO: possible change: remove dataItem.offset() to improve perf and increase variability
 						dataItem.offset(dataItem.offset() + rand.get().nextLong());
 					}
+					resetRecycledComposite(opResult);
 					generator.recycle(opResult);
 				}
 
@@ -1077,6 +1119,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								listShardMetricsRecorder.onRequeue(shardRef);
 							}
 						}
+						resetRecycledComposite(opResult);
 						generator.recycle(opResult);
 					}
 
@@ -1160,6 +1203,18 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} else {
 			generator.recycle(opResult);
 			counterResults.increment();
+		}
+	}
+
+	/**
+	 * A finished composite's result copy keeps its count of unsettled parts, 0, but not its parts or
+	 * its context (such as the upload ID): recycled as it is, it would reach the driver looking already
+	 * split and go straight to its completion. Reset it, as the whole-operation retry does, so that each
+	 * circulation is a new initiation, every part and a completion.
+	 */
+	private static void resetRecycledComposite(final Operation<?> opResult) {
+		if (opResult instanceof CompositeOperation<?> recycledComposite) {
+			recycledComposite.resetSubOperations();
 		}
 	}
 
@@ -1805,8 +1860,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	/** Range-only optional output; generic output swallows some rejections and cannot be reused. */
 	private void outputRangeResult(final O op) {
 		try {
-			if (tracePersistFlag)
-				Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+			if (tracePersistFlag) {
+				// A settled range result may be published from a generator or pool thread.
+				try (final Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, id)) {
+					Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+				}
+			}
 			if (op.status() != Status.SUCC)
 				return;
 			if (opsResultsOutput != null && !opsResultsOutput.put(op))
@@ -2504,8 +2563,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// historical active-concurrency wait behavior.
 				awaitOutstanding(() -> activeOpCount() != 0, deadlineNanos);
 			}
-			if (rangeRuntime != null)
+			if (rangeRuntime != null) {
+				if (!waitOpFinishBeforeStop) {
+					// Without the in-flight wait, a range result settled before the stop, or a success the
+					// deadline settled whose transport callback is still queued, may still be on its way
+					// to output; deliver it within the same bound instead of failing it.
+					awaitOutstanding(rangeRuntime::hasPendingResults, deadlineNanos);
+				}
 				rangeRuntime.finishResults();
+			}
 			operationDrainComplete.set(true);
 			if (rangeRuntime != null && rangeRuntime.failure() != null)
 				throw rangeRuntime.failure();

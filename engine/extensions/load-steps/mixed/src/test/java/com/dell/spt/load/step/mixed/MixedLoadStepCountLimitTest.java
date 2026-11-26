@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Supplier;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
@@ -170,6 +171,112 @@ class MixedLoadStepCountLimitTest {
 						"the step installed its result output without the capped wrapper: " + drivers.resultOutput.get());
 		assertEquals(1, infos.size(), "the step's INFO lines about the undeclared driver: " + infos);
 		assertTrue(infos.get(0).contains("count limit 50"), infos.get(0));
+	}
+
+	/**
+	 * A mixed step does not apply {@code load.op.limit.rate}, and says so once in its errors log at
+	 * its start. The warning changes nothing else: a count of 50 at a rate of 10 still runs exactly
+	 * 50 operations, unpaced, so well within the 5 s that a paced step would take.
+	 */
+	@Test
+	void aRateLimitIsWarnedOnceAndNotApplied() throws Exception {
+		final String stepId = newStepId("rate");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 50L);
+		config.val("load-op-limit-rate", 10.0);
+
+		final List<String> warnings = new ArrayList<>();
+		final long elapsedMillis = runCapturingRateWarnings(
+						() -> new MixedLoadStepClient(config, extensions(), null, metrics), warnings);
+
+		assertEquals(1, warnings.size(), "the step's rate limit warnings: " + warnings);
+		assertEquals(
+						stepId + ": a mixed step does not apply load.op.limit.rate; the rate limit of 10.0 operations"
+										+ " per second is ignored, and the step runs its operations without a rate limit",
+						warnings.get(0));
+		assertEquals(50, drivers.accepted.sum(), "operations the driver accepted");
+		assertEquals(50, counted(stepId), "operations the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	@Test
+	void noRateLimitIsNotWarned() throws Exception {
+		final String stepId = newStepId("no-rate");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 20L);
+
+		final List<String> warnings = new ArrayList<>();
+		runCapturingRateWarnings(() -> new MixedLoadStepClient(config, extensions(), null, metrics), warnings);
+
+		assertEquals(List.of(), warnings, "the step's rate limit warnings");
+		assertEquals(20, drivers.accepted.sum(), "operations the driver accepted");
+	}
+
+	/** A step that fails its start runs nothing, so it is not warned about a rate limit. */
+	@Test
+	void aStepThatFailsItsStartIsNotWarned() throws Exception {
+		final String stepId = newStepId("rate-failed-start");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 20L);
+		config.val("load-op-limit-rate", 10.0);
+		config.val("load-op-weights-get", 100);
+		config.val("load-op-weights-put", 0);
+		config.val("load-op-weights-delete", 0);
+		config.val("load-op-weights-stat", 0);
+
+		final List<String> warnings = new ArrayList<>();
+		RuntimeException startFailure = null;
+		metrics = new FinalCountsMetricsManager();
+		try (ErrorLogCapture log = new ErrorLogCapture()) {
+			try {
+				new MixedLoadStepClient(config, extensions(), null, metrics).run();
+			} catch (final RuntimeException e) {
+				startFailure = e;
+			}
+			warnings.addAll(log.messagesContaining("does not apply load.op.limit.rate", Level.WARN));
+		}
+
+		assertEquals(List.of(), warnings, "the rate limit warnings of a step that failed its start: " + startFailure);
+		assertEquals(0, drivers.accepted.sum(), "operations the driver accepted");
+	}
+
+	/** A rate only in the last appended context is the step's rate, so it is warned. */
+	@Test
+	void aRateInTheLastAppendedContextIsWarned() throws Exception {
+		final String stepId = newStepId("rate-last-context");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 20L);
+
+		final List<String> warnings = new ArrayList<>();
+		runCapturingRateWarnings(
+						() -> new MixedLoadStepClient(config, extensions(), null, metrics)
+										.append(Map.of("load-op-weights-get", 45))
+										.append(Map.of("load", Map.of("op", Map.of("limit", Map.of("rate", 20.0))))),
+						warnings);
+
+		assertEquals(1, warnings.size(), "the step's rate limit warnings: " + warnings);
+		assertTrue(warnings.get(0).contains("the rate limit of 20.0 operations per second"), warnings.get(0));
+	}
+
+	/**
+	 * The step takes each value from its last context: a rate of 5 in an earlier context is
+	 * replaced by the last context's rate of 0, which a context appended with no rate copies from
+	 * the base, so the step has no rate and nothing is warned.
+	 */
+	@Test
+	void aRateOverriddenByTheLastAppendedContextIsNotWarned() throws Exception {
+		final String stepId = newStepId("rate-earlier-context");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 20L);
+
+		final List<String> warnings = new ArrayList<>();
+		runCapturingRateWarnings(
+						() -> new MixedLoadStepClient(config, extensions(), null, metrics)
+										.append(Map.of("load", Map.of("op", Map.of("limit", Map.of("rate", 5.0)))))
+										.append(Map.of("load-op-weights-get", 45)),
+						warnings);
+
+		assertEquals(List.of(), warnings, "the step's rate limit warnings");
 	}
 
 	@Test
@@ -463,6 +570,23 @@ class MixedLoadStepCountLimitTest {
 		final long start = System.nanoTime();
 		new MixedLoadStepClient(config, extensions(), null, metrics).run();
 		return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+	}
+
+	/**
+	 * Runs the step that {@code client} builds and adds the rate limit warnings its errors log got
+	 * to {@code warnings}; returns the run's time in milliseconds.
+	 */
+	private long runCapturingRateWarnings(
+					final Supplier<MixedLoadStepClient> client, final List<String> warnings)
+					throws InterruptedException {
+		metrics = new FinalCountsMetricsManager();
+		try (ErrorLogCapture log = new ErrorLogCapture()) {
+			final long start = System.nanoTime();
+			client.get().run();
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+			warnings.addAll(log.messagesContaining("does not apply load.op.limit.rate", Level.WARN));
+			return elapsedMillis;
+		}
 	}
 
 	/** Successful and failed operations of every operation type of the step. */

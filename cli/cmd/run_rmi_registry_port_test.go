@@ -102,7 +102,7 @@ func TestRunCmdRMIRegistryPortReachesEveryRoute(t *testing.T) {
 				startMultiHostHeadlessRunFunc = previousRemote
 			})
 			var portCalls, connectCalls, localCalls, remoteCalls int
-			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+			resolvePortConflictFunc = func(context.Context, string, portcheck.ResolveOptions) (*portcheck.ResolutionResult, error) {
 				portCalls++
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}

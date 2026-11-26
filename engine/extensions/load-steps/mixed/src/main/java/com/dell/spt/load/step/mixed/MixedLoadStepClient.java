@@ -44,7 +44,10 @@ import java.util.stream.Stream;
 public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepClient>
 				implements CompositeCheckedOperations {
 
-	/** The item output file {@link #init()} chose because none was given; {@code null} until then. */
+	/**
+	 * The item output file {@link #init()} chose because none was given; {@code null} until then, and
+	 * for a file the step was given, in its base or in a context.
+	 */
 	private volatile String defaultItemOutputFile;
 
 	public MixedLoadStepClient(
@@ -65,7 +68,16 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return true;
 	}
 
-	/** The slice takes the step id's flag from the merge of the contexts, which a marked context would change. */
+	/** Every metrics row is an operation type of the one context, which runs on every sub-load over the base. */
+	@Override
+	protected Config effectiveConfig(final int originIndex) {
+		return MixedLoadStepLocal.mergedConfig(config, ctxConfigs);
+	}
+
+	/**
+	 * Append merges a mixed context's map as before 5.17.1. The slice takes the step id from the base
+	 * and reads no context's flag, so marking a context would change nothing the step resolves.
+	 */
 	@Override
 	protected boolean marksSetContextStepIds() {
 		return false;
@@ -132,27 +144,37 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 			stepConfig.val("id", autoStepId);
 		}
 
-		final int getWeight = config.intVal("load-op-weights-get");
-		final int putWeight = config.intVal("load-op-weights-put");
-		final int deleteWeight = config.intVal("load-op-weights-delete");
-		final int statWeight = config.intVal("load-op-weights-stat");
+		// The slice runs the base merged with every context, so its operations, concurrency and item
+		// size come from the merge; the metrics rows must name the operations it runs.
+		final Config merged = MixedLoadStepLocal.mergedConfig(config, ctxConfigs);
+		final int getWeight = merged.intVal("load-op-weights-get");
+		final int putWeight = merged.intVal("load-op-weights-put");
+		final int deleteWeight = merged.intVal("load-op-weights-delete");
+		final int statWeight = merged.intVal("load-op-weights-stat");
 
 		// An item output file makes the base client give each remote slice its own file and append
-		// them all to this one once the slices close.
-		final String itemOutputFile = config.stringVal("item-output-file");
+		// them all to this one once the slices close. The slice writes the merged value, so the base
+		// takes it and the contexts drop theirs: one aggregator collects every slice's items into the
+		// file the slices write locally, and the check names it.
+		String itemOutputFile = merged.stringVal("item-output-file");
+		if (ctxConfigs != null) {
+			ctxConfigs.forEach(ctxConfig -> ctxConfig.val("item-output-file", null));
+		}
 		if (putWeight > 0 && (itemOutputFile == null || itemOutputFile.isEmpty())) {
-			final String chosen = MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString();
-			config.val("item-output-file", chosen);
-			defaultItemOutputFile = chosen;
+			itemOutputFile = MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString();
+			defaultItemOutputFile = itemOutputFile;
+		}
+		if (itemOutputFile != null && !itemOutputFile.isEmpty()) {
+			config.val("item-output-file", itemOutputFile);
 		}
 
-		final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");
+		final int concurrencyLimit = merged.intVal("storage-driver-limit-concurrency");
 		final Config outputConfig = config.configVal("output");
 		final Config metricsConfig = outputConfig.configVal("metrics");
 		final boolean colorFlag = outputConfig.boolVal("color");
 
 		final SizeInBytes itemDataSize;
-		final Object itemDataSizeRaw = config.val("item-data-size");
+		final Object itemDataSizeRaw = merged.val("item-data-size");
 		if (itemDataSizeRaw instanceof String) {
 			itemDataSize = BinarySizeFormat.parseSize((String) itemDataSizeRaw);
 		} else {
@@ -227,7 +249,8 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	@Override
 	protected void itemOutputCollected(final String itemOutputFile, final Map<OpType, Long> successCounts)
 					throws IOException {
-		if (config.intVal("load-op-weights-put") <= 0) {
+		// The slices run PUTs by the merged weights.
+		if (MixedLoadStepLocal.mergedConfig(config, ctxConfigs).intVal("load-op-weights-put") <= 0) {
 			return;
 		}
 		final Long created = successCounts.get(OpType.CREATE);

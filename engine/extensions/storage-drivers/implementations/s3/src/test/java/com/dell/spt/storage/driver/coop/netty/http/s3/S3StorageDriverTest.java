@@ -2311,10 +2311,12 @@ public class S3StorageDriverTest {
 	private static class CapturingAppender extends AbstractAppender {
 		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
 		private final CountDownLatch latch;
+		private final Level previousLevel;
 
-		CapturingAppender(int expectedMessages) {
+		CapturingAppender(int expectedMessages, Level previousLevel) {
 			super("test-capture", null, null, true, Property.EMPTY_ARRAY);
 			this.latch = new CountDownLatch(expectedMessages);
+			this.previousLevel = previousLevel;
 		}
 
 		@Override
@@ -2329,9 +2331,10 @@ public class S3StorageDriverTest {
 	}
 
 	private static CapturingAppender attachCapture(int expectedMessages) {
-		var appender = new CapturingAppender(expectedMessages);
-		appender.start();
 		var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART.getName());
+		// detachCapture puts it back, so that later tests in this JVM see the level this one found
+		var appender = new CapturingAppender(expectedMessages, logger.getLevel());
+		appender.start();
 		logger.addAppender(appender);
 		logger.setLevel(Level.INFO);
 		return appender;
@@ -2346,6 +2349,7 @@ public class S3StorageDriverTest {
 		}
 		var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART.getName());
 		logger.removeAppender(appender);
+		logger.setLevel(appender.previousLevel);
 		appender.stop();
 	}
 

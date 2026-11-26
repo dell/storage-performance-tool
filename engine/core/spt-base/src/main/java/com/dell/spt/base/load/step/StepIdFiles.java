@@ -23,6 +23,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * The logger files a step publishes once per step id and refuses to replace at its close: the
@@ -39,6 +40,18 @@ public final class StepIdFiles {
 
 	/** The loggers of the NIC files a slice with a NIC set publishes. */
 	public static final List<String> NIC_LOGGER_NAMES = List.of(Loggers.NIC_PATHS.getName(), Loggers.NIC_SET.getName());
+	/** The loggers of the integrity logs, which an appender writes and may hold open after the step. */
+	public static final Set<String> APPENDER_LOGGER_NAMES = Set.of(
+					Loggers.INTEGRITY_FAILURES.getName(), Loggers.INTEGRITY_PERFORMANCE.getName(), Loggers.MULTIPART_LIFECYCLE.getName());
+	/** The loggers of every file of this kind, of any step. */
+	public static final Set<String> LOGGER_NAMES = Set.of(
+					Loggers.OPERATION_LIFECYCLE.getName(),
+					Loggers.RANGE_READ.getName(),
+					Loggers.INTEGRITY_FAILURES.getName(),
+					Loggers.INTEGRITY_PERFORMANCE.getName(),
+					Loggers.MULTIPART_LIFECYCLE.getName(),
+					Loggers.NIC_PATHS.getName(),
+					Loggers.NIC_SET.getName());
 
 	private StepIdFiles() {}
 

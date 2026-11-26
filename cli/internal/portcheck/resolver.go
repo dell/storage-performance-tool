@@ -65,8 +65,18 @@ type ConflictResolver struct {
 	input io.Reader
 }
 
+// ResolveOptions says how a conflict may be resolved.
+type ResolveOptions struct {
+	// Force resolves the conflict without asking, as --force does.
+	Force bool
+	// Interactive means an operator can answer the conflict prompt. The caller
+	// decides it (headless mode, a terminal on stdin); the resolver never reads
+	// stdin to guess it. Without an operator, a conflict is left alone.
+	Interactive bool
+}
+
 // NewConflictResolver creates a new conflict resolver
-func NewConflictResolver(port string, forceMode bool) (*ConflictResolver, error) {
+func NewConflictResolver(port string, opts ResolveOptions) (*ConflictResolver, error) {
 	checker := NewPortChecker(port)
 
 	dockerFinder, err := NewDockerContainerFinder()
@@ -77,15 +87,12 @@ func NewConflictResolver(port string, forceMode bool) (*ConflictResolver, error)
 		dockerFinder = nil
 	}
 
-	// Detect if we're in interactive mode (TTY available)
-	interactiveMode := isInteractiveMode()
-
 	return &ConflictResolver{
 		Port:            port,
 		checker:         checker,
 		dockerFinder:    dockerFinder,
-		forceMode:       forceMode,
-		interactiveMode: interactiveMode,
+		forceMode:       opts.Force,
+		interactiveMode: opts.Interactive,
 		clock:           &RealClock{},
 	}, nil
 }
@@ -175,15 +182,12 @@ func (r *ConflictResolver) presentConflictAndGetChoice(ctx context.Context, info
 	r.displayConflictInfo(info)
 
 	if !r.interactiveMode {
-		// Stopping an engine may end another user's live run, so it takes
-		// --force or an operator's choice.
-		if info.IsSpt {
-			logging.LogInfo("portcheck", "non-interactive mode: leaving the SPT engine alone")
-			return StrategyAbort, errNoOperatorAnswer
-		}
-		logging.LogInfo("portcheck", "non-interactive mode: defaulting to graceful resolution")
-		fmt.Printf("[CONFLICT] Non-interactive mode: attempting graceful resolution for port %s\n", r.Port)
-		return StrategyGracefulStop, nil
+		// Stopping an engine may end another user's live run, and nothing else
+		// can be freed without an operator, so it takes --force or an
+		// operator's choice. This is the answer to an end of input at the
+		// prompt too.
+		logging.LogInfo("portcheck", "non-interactive mode: leaving the port's holder alone", "is_spt", info.IsSpt)
+		return StrategyAbort, errNoOperatorAnswer
 	}
 
 	// Interactive mode - present options and get user choice
@@ -1144,25 +1148,15 @@ func (r *ConflictResolver) Close() error {
 	return nil
 }
 
-// isInteractiveMode detects if we're in interactive mode (TTY available)
-func isInteractiveMode() bool {
-	fileInfo, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-
-	// Check if stdin is a character device (TTY)
-	return (fileInfo.Mode() & os.ModeCharDevice) != 0
-}
-
 // Helper function for easy conflict resolution
 // ResolvePortConflict detects and interacts with any service using the given
-// port, optionally forcing cleanup when forceMode is true. It returns a
-// ResolutionResult describing the outcome.
+// port, forcing cleanup when opts.Force is set and asking the operator only
+// when opts.Interactive is. It returns a ResolutionResult describing the
+// outcome.
 //
 //nolint:revive // comment form is acceptable in this codebase
-func ResolvePortConflict(ctx context.Context, port string, forceMode bool) (*ResolutionResult, error) {
-	resolver, err := NewConflictResolver(port, forceMode)
+func ResolvePortConflict(ctx context.Context, port string, opts ResolveOptions) (*ResolutionResult, error) {
+	resolver, err := NewConflictResolver(port, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create conflict resolver: %w", err)
 	}

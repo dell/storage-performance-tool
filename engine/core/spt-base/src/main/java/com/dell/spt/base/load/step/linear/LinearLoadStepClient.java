@@ -27,6 +27,12 @@ public class LinearLoadStepClient
 		return new LinearLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
 	}
 
+	/** A linear step runs on its base and ignores its contexts. */
+	@Override
+	protected Config effectiveConfig(final int originIndex) {
+		return config;
+	}
+
 	@Override
 	protected boolean supportsStandaloneDeleteArtifactAggregation() {
 		return true;

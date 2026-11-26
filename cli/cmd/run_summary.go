@@ -78,14 +78,16 @@ func usesCompactSummaryOutput(out io.Writer) bool {
 }
 
 // generateRunSummary loads run artifacts from runDir, produces a summary report file,
-// and writes a console-friendly snippet to out. Non-fatal errors are logged and
-// returned so callers can surface warnings without aborting the workflow.
-func generateRunSummary(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
+// and writes a console-friendly snippet to out. end is how the run ended, which the
+// artifacts do not say. Non-fatal errors are logged and returned so callers can
+// surface warnings without aborting the workflow.
+func generateRunSummary(ctx context.Context, runDir string, out io.Writer, end summary.RunEnd) (*summary.RunSummary, error) {
 	loader := summary.NewLoader()
 	runData, err := loader.Load(ctx, runDir)
 	if err != nil {
 		return nil, fmt.Errorf("load results: %w", err)
 	}
+	runData.End = end
 	agg, err := summary.Aggregate(runData)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate summary: %w", err)
@@ -146,4 +148,33 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 	return nil
+}
+
+// summaryRunEnd is how the run ended, for summary warnings that only fit a run the engine
+// ended on its own. It judges the run as resolveOrdinaryRunError does: the tracker of an ordinary
+// run returns once its step files are stable, so a finished run can still read RUNNING or no
+// state (a --cleanup or --items-file run in its last pause), and only a stop or failure it saw,
+// a tracker error, or a run this CLI ended keeps a run from counting as completed.
+func summaryRunEnd(outcome *autoResultsOutcome) summary.RunEnd {
+	switch {
+	case outcome == nil:
+		return summary.RunEndUnknown
+	case outcome.AutoTerminated:
+		return summary.RunEndAutoTerminated
+	case outcome.Interrupted || outcome.TrackerErr != nil:
+		// Interrupted is recorded on its own: a terminal reconciliation after the shutdown
+		// clears TrackerErr when it sees the engine finish.
+		return summary.RunEndInterrupted
+	case outcome.Tracker == nil:
+		return summary.RunEndUnknown
+	}
+	switch outcome.Tracker.FinalState {
+	case constants.StateFailed, constants.StateStopped:
+		// FAILED, or STOPPED by something other than this CLI.
+		return summary.RunEndFailed
+	default:
+		// COMPLETED; IDLE on an engine without /run state; RUNNING or none when the tracker
+		// returned on stable step files.
+		return summary.RunEndCompleted
+	}
 }

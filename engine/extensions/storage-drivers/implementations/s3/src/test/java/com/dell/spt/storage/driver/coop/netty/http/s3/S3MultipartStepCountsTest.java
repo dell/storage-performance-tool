@@ -18,12 +18,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.regex.MatchResult;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,6 +68,8 @@ final class S3MultipartStepCountsTest {
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private long stepMillis;
+	/** The last recycled or read step's own elapsed time, from its last metrics snapshot, by operation type and concurrency limit. */
+	private final Map<String, Long> stepElapsedMillis = new ConcurrentHashMap<>();
 	private String stepId;
 
 	@TempDir
@@ -775,6 +779,96 @@ final class S3MultipartStepCountsTest {
 		assertEnded();
 	}
 
+	/**
+	 * A recycled CREATE of one saved item: each circulation is a new upload, with its own initiation,
+	 * every part and a completion under its own upload ID, and is counted once.
+	 */
+	@Test
+	void aRecycledUploadIsANewUploadOnEachCirculation() throws Exception {
+		final var outcomes = recycle(1, 3, TIME_LIMIT, 1, 0);
+
+		assertEquals(List.of(3L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(3, 3, 0);
+		assertEquals(3L * 5, count(stub.objectRequests(), request -> S3NicSetWorkloadTest.phase(request).equals("PUT part")),
+						() -> "every part of every circulation: " + stub.objectRequests());
+		assertEquals(List.of("upload-1", "upload-2", "upload-3"), completedUploads());
+		assertNoNullUploadId();
+		assertEnded();
+	}
+
+	/**
+	 * Four saved items recycled until the time limit, one upload open at a time: the step runs to its
+	 * limit without a failure, every success is a completed upload, and the recycled uploads take an
+	 * upload permit as new ones do.
+	 */
+	@Test
+	void aTimeLimitedRecycledUploadStepRunsToItsLimitWithinTheUploadLimit() throws Exception {
+		final var outcomes = recycle(4, 0, "4s", 4, 1);
+
+		final var createOutcome = outcomes.get("CREATE-4");
+		assertTrue(createOutcome != null, outcomes::toString);
+		assertEquals(0L, createOutcome.get(1), outcomes::toString);
+		assertTrue(createOutcome.get(0) > 4, () -> "each item circulates more than once: " + outcomes);
+		final var completed = completedUploads();
+		assertEquals(createOutcome.get(0), completed.size(), "a completion for each success");
+		assertEquals(completed.size(), completed.stream().distinct().count(), "each under its own upload ID");
+		assertNoNullUploadId();
+		assertEquals(1, stub.peakOpenUploads(), "uploads open at once");
+		final long elapsedMillis = stepElapsedMillis.get("CREATE-4");
+		assertTrue(elapsedMillis >= TimeUnit.SECONDS.toMillis(4), () -> "the step ended after " + elapsedMillis + " ms");
+	}
+
+	/** A recycled split READ of four saved items reads each, every time, in all five of its ranges. */
+	@Test
+	void aRecycledSplitReadReadsEveryRangeOnEachCirculation() throws Exception {
+		final var outcomes = read(12, true, false);
+
+		assertEquals(List.of(12L, 0L), outcomes.get("READ-1"), outcomes::toString);
+		final var gets = stub.objectRequests().stream().filter(request -> "GET".equals(request.method())).toList();
+		assertEquals(12 * 5, gets.size(), gets::toString);
+		assertTrue(gets.stream().allMatch(request -> request.range() != null), gets::toString);
+		final Map<String, Long> byRange = gets.stream()
+						.collect(Collectors.groupingBy(request -> request.path() + " " + request.range(), Collectors.counting()));
+		assertEquals(4 * 5, byRange.size(), byRange::toString);
+		assertTrue(byRange.values().stream().allMatch(reads -> reads == 3), byRange::toString);
+		assertEnded();
+	}
+
+	/**
+	 * Saves {@code items} 5 KB objects whole, then writes them again in five 1 KB parts in a recycling
+	 * CREATE step of its own, up to {@code count} results (0: no count limit) or {@code timeLimit}.
+	 */
+	private Map<String, List<Long>> recycle(final int items, final int count, final String timeLimit,
+					final int concurrency, final int multipartObjects) throws Exception {
+		final var itemsFile = tempDir.resolve("items.csv").toString();
+		return timed(null, """
+						Load.config({
+							"load": {"step": {"id": "seed-%d"}, "op": {"limit": {"count": %d}}},
+							"item": {"data": {"size": "5KB"}, "output": {"file": "%s"}}
+						}).run();
+						Load.config({
+							"load": {
+								"step": {"limit": {"time": "%s"}},
+								"op": {"limit": {"count": %d}, "recycle": {"mode": true}, "wait": {"limit": %d}}
+							},
+							"storage": {"driver": {"limit": {"concurrency": %d, "multipart": {"objects": %d}}}},
+							"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}, "input": {"file": "%s"}}
+						}).run();
+						""".formatted(System.nanoTime(), items, itemsFile, timeLimit, count, LONG_WAIT_LIMIT_SECONDS, concurrency,
+						multipartObjects, itemsFile));
+	}
+
+	/** The upload ID of each completion the stub was sent, in order. */
+	private List<String> completedUploads() {
+		return stub.objectRequests().stream().filter(request -> S3NicSetWorkloadTest.phase(request).equals("POST complete"))
+						.map(request -> NicSetLoopback.param(request.query(), "uploadId")).toList();
+	}
+
+	private void assertNoNullUploadId() {
+		assertEquals(List.of(), stub.requests().stream()
+						.filter(request -> request.query() != null && request.query().contains("uploadId=null")).toList());
+	}
+
 	/** A step of {@code count} 5 KB uploads of five 1 KB parts. */
 	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
 					final NicSetLoopback.Factory factory) throws Exception {
@@ -792,6 +886,14 @@ final class S3MultipartStepCountsTest {
 
 	/** Writes four 5 KB objects whole, then reads each in five 1 KB ranges in a step of its own. */
 	private Map<String, List<Long>> read(final boolean retry) throws Exception {
+		return read(4, false, retry);
+	}
+
+	/**
+	 * Writes four 5 KB objects whole, then reads them in five 1 KB ranges each in a step of its own,
+	 * up to {@code count} reads, recycling them with {@code recycle}.
+	 */
+	private Map<String, List<Long>> read(final int count, final boolean recycle, final boolean retry) throws Exception {
 		final var items = tempDir.resolve("items.csv").toString();
 		return timed(null, """
 						Load.config({
@@ -801,18 +903,23 @@ final class S3MultipartStepCountsTest {
 						Load.config({
 							"load": {
 								"step": {"limit": {"time": "%s"}},
-								"op": {"type": "read", "limit": {"count": 4}, "retry": %s, "retryLimit": 1, "wait": {"limit": %d}}
+								"op": {
+									"type": "read", "limit": {"count": %d}, "recycle": {"mode": %s},
+									"retry": %s, "retryLimit": 1, "wait": {"limit": %d}
+								}
 							},
 							"storage": {"driver": {"limit": {"concurrency": 1}}},
 							"item": {"data": {"ranges": {"threshold": "1KB"}}, "input": {"file": "%s"}}
 						}).run();
-						""".formatted(System.nanoTime(), items, TIME_LIMIT, retry, LONG_WAIT_LIMIT_SECONDS, items));
+						""".formatted(System.nanoTime(), items, TIME_LIMIT, count, recycle, retry, LONG_WAIT_LIMIT_SECONDS, items));
 	}
 
 	private Map<String, List<Long>> timed(final NicSetLoopback.Factory factory, final String scenario) throws Exception {
 		final var started = System.nanoTime();
 		stepId = "multipart-counts-" + System.nanoTime();
-		final var outcomes = S3NicSetWorkloadTest.runScenario(stub.listeners(1), factory, stepId, scenario);
+		final var outcomes = factory == null
+						? S3NicSetWorkloadTest.runScenarioTimed(stub.listeners(1), stepId, scenario, stepElapsedMillis)
+						: S3NicSetWorkloadTest.runScenario(stub.listeners(1), factory, stepId, scenario);
 		stepMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 		return outcomes;
 	}

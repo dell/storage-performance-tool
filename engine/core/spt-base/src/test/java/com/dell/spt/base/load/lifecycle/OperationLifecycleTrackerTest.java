@@ -18,6 +18,7 @@ import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -775,6 +776,116 @@ final class OperationLifecycleTrackerTest {
 		assertEquals(1, tracker.snapshot().terminal());
 		assertEquals(0, tracker.outstandingOperationCount());
 		assertEquals(0, tracker.inFlightOperationCount());
+	}
+
+	/**
+	 * The unattempted observer runs once for each operation that leaves custody as unattempted:
+	 * not for a repeated call, not for one the tracker never held (as one refused at admission),
+	 * and not for a dispatched operation the drain resolves.
+	 */
+	@Test
+	void theUnattemptedObserverRunsOncePerOperationLeavingCustody() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final List<DataOperationImpl<DataItemImpl>> observed = new CopyOnWriteArrayList<>();
+		tracker.unattemptedObserver(observed::add);
+		final var queued = operation("queued");
+		final var buffered = operation("buffered");
+		final var neverHeld = operation("never-held");
+		final var dispatched = operation("dispatched");
+		assertTrue(tracker.driverQueued(queued));
+		assertTrue(tracker.generatorBuffered(buffered));
+		assertTrue(tracker.driverQueued(dispatched));
+		assertTrue(tracker.dispatched(dispatched));
+
+		assertTrue(tracker.unattempted(queued));
+		assertFalse(tracker.unattempted(queued), "a repeated call does not transition");
+		assertTrue(tracker.unattempted(buffered));
+		assertTrue(tracker.unattempted(neverHeld), "an operation the tracker never held still becomes unattempted");
+		assertFalse(tracker.unattempted(dispatched), "a dispatched operation is not unattempted");
+		assertEquals(1, tracker.expireTerminalDeadline());
+
+		assertEquals(List.of(queued, buffered), observed);
+		assertEquals(3, tracker.counters().unattempted());
+	}
+
+	/** A compatibility operation, which carries no lifecycle of its own, reaches the observer the same way. */
+	@Test
+	void theUnattemptedObserverSeesACompatibilityOperationOnce() {
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		final List<Operation<Item>> observed = new CopyOnWriteArrayList<>();
+		tracker.unattemptedObserver(observed::add);
+		@SuppressWarnings("unchecked")
+		final Operation<Item> op = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		assertTrue(tracker.driverQueued(op));
+
+		assertTrue(tracker.unattempted(op));
+		assertFalse(tracker.unattempted(op));
+
+		assertEquals(List.of(op), observed);
+	}
+
+	/**
+	 * An operation the driver created and queued itself never reaches the observer; the mark lasts
+	 * for its pass only, so a later pass queued as an ordinary operation does.
+	 */
+	@Test
+	void aDriverCreatedOperationLeavesCustodyUnobserved() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final List<DataOperationImpl<DataItemImpl>> observed = new CopyOnWriteArrayList<>();
+		tracker.unattemptedObserver(observed::add);
+		final var child = operation("child");
+		final var generated = operation("generated");
+		assertTrue(tracker.driverCreatedQueued(child));
+		assertTrue(tracker.driverQueued(generated));
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(child));
+		assertEquals(2, tracker.counters().driverQueued(), "both are held in custody");
+
+		assertTrue(tracker.unattempted(child));
+		assertTrue(tracker.unattempted(generated));
+		assertEquals(List.of(generated), observed);
+		assertEquals(2, tracker.counters().unattempted());
+
+		// A new pass of the same operation, queued as an ordinary one, is observed.
+		assertTrue(tracker.driverQueued(child));
+		assertTrue(tracker.unattempted(child));
+		assertEquals(List.of(generated, child), observed);
+	}
+
+	/** The same holds for a compatibility operation, which carries no lifecycle of its own. */
+	@Test
+	void aDriverCreatedCompatibilityOperationLeavesCustodyUnobserved() {
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		final List<Operation<Item>> observed = new CopyOnWriteArrayList<>();
+		tracker.unattemptedObserver(observed::add);
+		@SuppressWarnings("unchecked")
+		final Operation<Item> child = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		assertTrue(tracker.driverCreatedQueued(child));
+		assertTrue(tracker.unattempted(child));
+		assertEquals(List.of(), observed);
+		assertEquals(1, tracker.counters().unattempted());
+	}
+
+	/** Past the dispatch deadline, the driver-created route refuses custody as {@code driverQueued} does. */
+	@Test
+	void theDriverCreatedRouteHonoursTheDispatchDeadline() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		tracker.enforceDispatchDeadline(System.nanoTime() - 1);
+		assertFalse(tracker.driverCreatedQueued(operation("late")));
+		assertTrue(OperationLifecycleTracker.<DataOperationImpl<DataItemImpl>> disabled()
+						.driverCreatedQueued(operation("disabled")));
+	}
+
+	/** The shared disabled tracker keeps no observer, so one step cannot install it for another. */
+	@Test
+	void theDisabledTrackerKeepsNoUnattemptedObserver() throws Exception {
+		final var disabled = OperationLifecycleTracker.<DataOperationImpl<DataItemImpl>> disabled();
+		disabled.unattemptedObserver(op -> {
+			throw new AssertionError("the disabled tracker ran an observer");
+		});
+		final var field = OperationLifecycleTracker.class.getDeclaredField("unattemptedObserver");
+		field.setAccessible(true);
+		assertEquals(null, field.get(disabled));
+		assertTrue(disabled.unattempted(operation("disabled")));
 	}
 
 	@Test

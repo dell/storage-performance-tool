@@ -66,14 +66,17 @@ type Params struct {
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
 
 	// Standalone DELETE workload.
-	DeleteBatchSize         int
-	DeleteExisting          bool
-	AllowEmptyPrefix        bool
-	SelectionSourceCount    int
-	SelectionUniqueCount    int
-	SelectionSelectedCount  int
-	SelectionSHA256         string
-	SelectionOrder          string
+	DeleteBatchSize        int
+	DeleteExisting         bool
+	AllowEmptyPrefix       bool
+	SelectionSourceCount   int
+	SelectionUniqueCount   int
+	SelectionSelectedCount int
+	SelectionSHA256        string
+	SelectionOrder         string
+	// DeleteSavedItems is set when --items-file was read as a saved items file; nil for a
+	// canonical manifest.
+	DeleteSavedItems        *SavedItemsSource
 	FailureBudgetMode       string
 	MaxFailedObjects        int64
 	MaxFailurePercent       float64
@@ -200,4 +203,14 @@ func (p Params) BucketSetSize() int {
 		return p.BucketCount
 	}
 	return 1
+}
+
+// SavedItemsSource describes a DELETE --items-file read as the items file an S3 write saved: the
+// rows converted to current-key records, the first few distinct buckets in file order, the number
+// of distinct buckets, and whether there were more than the CLI counts.
+type SavedItemsSource struct {
+	Rows        int
+	Buckets     []string
+	BucketCount int
+	MoreBuckets bool
 }
