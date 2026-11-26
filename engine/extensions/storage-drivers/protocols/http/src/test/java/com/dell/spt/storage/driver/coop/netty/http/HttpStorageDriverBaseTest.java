@@ -165,6 +165,20 @@ class HttpStorageDriverBaseTest {
 			channel.attr(ATTR_KEY_OPERATION).set(operation);
 		}
 
+		/** Binds {@code operation} to {@code channel} as a lease does, the transport held. */
+		void leaseFor(final io.netty.channel.Channel channel, final Operation<?> operation) {
+			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+			channel.attr(ATTR_KEY_OPERATION).set(operation);
+		}
+
+		int releasedTransports;
+
+		/** The test channels are not pooled: count the release instead. */
+		@Override
+		protected void releaseTransport(final io.netty.channel.Channel channel) {
+			releasedTransports++;
+		}
+
 		HttpMethod exposeDataHttpMethod(final OpType opType) {
 			return dataHttpMethod(opType);
 		}
@@ -649,6 +663,294 @@ class HttpStorageDriverBaseTest {
 		final StringBuilder sb = new StringBuilder();
 		HttpStorageDriverBase.rangeListToStringBuff(List.of(r1, r2), 1024, sb);
 		assertTrue(sb.toString().contains(","), "Multiple ranges should be comma-separated");
+	}
+
+	// --- fixed-range UPDATE: append offsets, recorded size, byte count and retry ---
+
+	@Test
+	void rangeListToStringBuff_appendFollowedByOtherRanges_isClosed() {
+		final StringBuilder sb = new StringBuilder();
+		HttpStorageDriverBase.rangeListToStringBuff(List.of(new Range("-512-"), new Range("0-99")), 1024, sb);
+		assertEquals("1024-1535,0-99", sb.toString());
+	}
+
+	@Test
+	void rangeListToStringBuff_twoAppends_secondStartsWhereTheFirstEnds() {
+		final StringBuilder sb = new StringBuilder();
+		HttpStorageDriverBase.rangeListToStringBuff(List.of(new Range("-512-"), new Range("-512-")), 1024, sb);
+		assertEquals("1024-1535,1536-", sb.toString());
+	}
+
+	private static final long ITEM_SIZE = 1024;
+
+	private static DataItemImpl appendItem() throws Exception {
+		final var item = new DataItemImpl("obj", 0, ITEM_SIZE);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
+		return item;
+	}
+
+	private static DataOperationImpl<DataItemImpl> fixedRangeUpdate(final DataItemImpl item, final String... ranges) {
+		final List<Range> fixedRanges = java.util.Arrays.stream(ranges).map(Range::new).toList();
+		final var op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, "/bucket", null, fixedRanges, 0);
+		op.reset();
+		return op;
+	}
+
+	private static TestHttpDriver driver(final boolean ssl) throws Exception {
+		final var cfg = baseConfig();
+		if (ssl) {
+			cfg.val("storage-net-ssl-enabled", true);
+			cfg.val("storage-net-ssl-provider", "JDK");
+		}
+		final var drv = new TestHttpDriver(cfg);
+		@SuppressWarnings("unchecked")
+		final com.github.akurilov.commons.io.Output<DataOperation<DataItemImpl>> results = mock(com.github.akurilov.commons.io.Output.class);
+		when(results.put(any(DataOperation.class))).thenReturn(true);
+		drv.operationResultOutput(results);
+		return drv;
+	}
+
+	/** The request, the bytes of each queued body write, and whether the last content followed. */
+	private record SentUpdate(HttpRequest request, List<byte[]> bodies) {}
+
+	private static SentUpdate sendUpdate(
+					final TestHttpDriver drv, final EmbeddedChannel ch, final DataOperationImpl<DataItemImpl> op)
+					throws Exception {
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		drv.exposeSendRequest(ch, op);
+		final HttpRequest request = ch.readOutbound();
+		final List<byte[]> bodies = new java.util.ArrayList<>();
+		Object next;
+		while (!((next = ch.readOutbound()) instanceof io.netty.handler.codec.http.LastHttpContent)) {
+			assertNotNull(next, "the request must end with its last content");
+			bodies.add(bytesOf(next));
+		}
+		return new SentUpdate(request, bodies);
+	}
+
+	private static byte[] bytesOf(final Object queued) throws Exception {
+		final var out = new java.io.ByteArrayOutputStream();
+		if (queued instanceof io.netty.channel.FileRegion region) {
+			final var target = java.nio.channels.Channels.newChannel(out);
+			long done = 0;
+			while (done < region.count()) {
+				done += region.transferTo(target, done);
+			}
+		} else {
+			final var stream = (com.dell.spt.storage.driver.coop.netty.data.SeekableByteChannelChunkedNioStream) queued;
+			ByteBuf chunk;
+			while ((chunk = stream.readChunk(io.netty.buffer.ByteBufAllocator.DEFAULT)) != null) {
+				final byte[] b = new byte[chunk.readableBytes()];
+				chunk.readBytes(b);
+				chunk.release();
+				out.write(b);
+			}
+		}
+		return out.toByteArray();
+	}
+
+	/** The item's bytes at {@code [beg, beg + size)}. */
+	private static byte[] itemBytes(final long beg, final long size) throws Exception {
+		return bytesOf(new com.dell.spt.storage.driver.coop.netty.data.DataItemFileRegion(appendItem().slice(beg, size)));
+	}
+
+	/**
+	 * Each append starts where the previous append of the request ended, an append that other
+	 * ranges follow is closed, the item grows by the appended bytes only when the UPDATE succeeds,
+	 * and the byte count is the Content-Length. The lone append, a list whose only append is last, and overwrite-only lists
+	 * are as before, as is a lone past-end overwrite (recorded size unchanged).
+	 */
+	@ParameterizedTest
+	@CsvSource(delimiter = ';', value = {
+			"false; -512-; 1024-; 1024:512; 1536",
+			"false; 0-99|-512-; 0-99,1024-; 0:100|1024:512; 1536",
+			"false; -512-|0-99; 1024-1535,0-99; 1024:512|0:100; 1536",
+			"false; -512-|-512-; 1024-1535,1536-; 1024:512|1536:512; 2048",
+			"false; -512-|100-; 1024-1535,100-; 1024:512|100:924; 1536",
+			"false; 300-|-512-; 300-,1024-; 300:724|1024:512; 1536",
+			"false; 0-99|200-299; 0-99,200-299; 0:100|200:100; 1024",
+			"false; 0-2047; 0-2047; 0:2048; 1024",
+			"true; -512-; 1024-; 1024:512; 1536",
+			"true; 0-99|-512-; 0-99,1024-; 0:100|1024:512; 1536",
+			"true; -512-|0-99; 1024-1535,0-99; 1024:512|0:100; 1536",
+			"true; -512-|-512-; 1024-1535,1536-; 1024:512|1536:512; 2048",
+			"true; -512-|100-; 1024-1535,100-; 1024:512|100:924; 1536",
+			"true; 300-|-512-; 300-,1024-; 300:724|1024:512; 1536",
+	})
+	void fixedRangeUpdateSendsEachAppendAtItsOwnOffset(
+					final boolean ssl, final String ranges, final String expectedRange,
+					final String expectedSlices, final long expectedSize) throws Exception {
+		final var drv = driver(ssl);
+		final var item = appendItem();
+		final var op = fixedRangeUpdate(item, ranges.split("\\|"));
+		final var ch = new EmbeddedChannel();
+
+		final var sent = sendUpdate(drv, ch, op);
+
+		assertEquals("bytes=" + expectedRange, sent.request().headers().get(HttpHeaderNames.RANGE));
+		long expectedLength = 0;
+		final var slices = expectedSlices.split("\\|");
+		assertEquals(slices.length, sent.bodies().size());
+		for (int i = 0; i < slices.length; i++) {
+			final long beg = Long.parseLong(slices[i].split(":")[0]);
+			final long size = Long.parseLong(slices[i].split(":")[1]);
+			assertArrayEquals(itemBytes(beg, size), sent.bodies().get(i), "slice " + i + " of " + ranges);
+			expectedLength += size;
+		}
+		assertEquals(expectedLength, Long.parseLong(sent.request().headers().get(HttpHeaderNames.CONTENT_LENGTH)));
+		assertEquals(expectedLength, op.countBytesDone(), "the count is the bytes queued");
+		assertEquals(ITEM_SIZE, item.size(), "queueing the body leaves the size");
+		op.status(Operation.Status.SUCC);
+		drv.complete(ch, op);
+		assertEquals(expectedSize, item.size());
+		ch.finishAndReleaseAll();
+	}
+
+	/**
+	 * A failed UPDATE attempt leaves the size, so the retry sends the same ranges; the success grows
+	 * the item by its appends once. An overwrite beside the append tells the append sum from the
+	 * bytes queued.
+	 */
+	@ParameterizedTest
+	@CsvSource({"-512-, 1024-, 1536", "-512-|-512-, 1024-1535|1536-, 2048",
+			"0-99|-512-, 0-99|1024-, 1536", "-512-|0-99, 1024-1535|0-99, 1536"
+	})
+	void aFailedAppendLeavesTheSizeAndTheRetryStartsFromIt(
+					final String ranges, final String expectedRange, final long expectedSize) throws Exception {
+		final var drv = driver(false);
+		final var item = appendItem();
+		final var op = fixedRangeUpdate(item, ranges.split("\\|"));
+		final var ch = new EmbeddedChannel();
+		final var first = sendUpdate(drv, ch, op);
+		assertEquals("bytes=" + expectedRange.replace('|', ','), first.request().headers().get(HttpHeaderNames.RANGE));
+
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		drv.complete(ch, op);
+		assertEquals(ITEM_SIZE, item.size(), "a failed attempt does not grow the item");
+		drv.complete(ch, op);
+		assertEquals(ITEM_SIZE, item.size());
+		assertEquals(1, drv.releasedTransports);
+
+		final var retry = op.result();
+		retry.reset();
+		final var retryCh = new EmbeddedChannel();
+		final var second = sendUpdate(drv, retryCh, retry);
+		assertEquals(first.request().headers().get(HttpHeaderNames.RANGE), second.request().headers().get(HttpHeaderNames.RANGE));
+		retry.status(Operation.Status.SUCC);
+		drv.complete(retryCh, retry);
+		assertEquals(expectedSize, item.size(), "a successful attempt keeps its appends");
+		drv.complete(retryCh, retry);
+		assertEquals(expectedSize, item.size(), "a second complete() grows nothing more");
+		ch.finishAndReleaseAll();
+		retryCh.finishAndReleaseAll();
+	}
+
+	/**
+	 * A failure the event loop sees while the dispatcher still queues the body: an early response
+	 * (a 503) or a failed write flips the status before the body is queued, and complete() runs
+	 * after the body ({@code AFTER_BODY}) or at its first write ({@code AT_BODY}). Either way the
+	 * attempt leaves the size, also when the append is longer than the item, and the retry starts
+	 * from it.
+	 */
+	@ParameterizedTest
+	@CsvSource({"AFTER_BODY, -512-, 1024-, 1536", "AFTER_BODY, 0-99|-512-, 0-99|1024-, 1536",
+			"AFTER_BODY, -2048-, 1024-, 3072", "AT_BODY, -512-, 1024-, 1536",
+			"AT_BODY, -2048-, 1024-, 3072"
+	})
+	void anAppendFailedWhileItsBodyIsQueuedLeavesTheSize(
+					final String completeAt, final String ranges, final String expectedRange, final long expectedSize)
+					throws Exception {
+		final var drv = driver(false);
+		final var item = appendItem();
+		final var op = fixedRangeUpdate(item, ranges.split("\\|"));
+		final boolean atBody = "AT_BODY".equals(completeAt);
+		final var failing = new io.netty.channel.ChannelOutboundHandlerAdapter() {
+			private boolean completed;
+			private HttpRequest request;
+
+			@Override
+			public void write(
+							final io.netty.channel.ChannelHandlerContext ctx, final Object msg,
+							final io.netty.channel.ChannelPromise promise) throws Exception {
+				if (msg instanceof HttpRequest sentRequest) {
+					request = sentRequest;
+					op.status(Operation.Status.RESP_FAIL_SVC);
+				} else if (atBody && !completed && !(msg instanceof io.netty.handler.codec.http.LastHttpContent)) {
+					completed = true;
+					drv.complete(ctx.channel(), op);
+				}
+				super.write(ctx, msg, promise);
+			}
+		};
+		final var ch = new EmbeddedChannel(failing);
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		drv.exposeSendRequest(ch, op);
+		final HttpRequest sent = failing.request;
+		assertEquals("bytes=" + expectedRange.replace('|', ','), sent.headers().get(HttpHeaderNames.RANGE));
+		if (!atBody) {
+			drv.complete(ch, op);
+		}
+		assertEquals(1, drv.releasedTransports);
+		assertEquals(ITEM_SIZE, item.size(), "the failed attempt leaves the size");
+
+		final var retry = op.result();
+		retry.reset();
+		final var retryCh = new EmbeddedChannel();
+		final var second = sendUpdate(drv, retryCh, retry);
+		assertEquals(sent.headers().get(HttpHeaderNames.RANGE), second.request().headers().get(HttpHeaderNames.RANGE));
+		retry.status(Operation.Status.SUCC);
+		drv.complete(retryCh, retry);
+		assertEquals(expectedSize, item.size());
+		ch.finishAndReleaseAll();
+		retryCh.finishAndReleaseAll();
+	}
+
+	/**
+	 * On a closed channel the header write fails at once and complete() runs before the body is
+	 * queued: the attempt must not grow the item, so the retry appends at the object's end.
+	 */
+	@Test
+	void anAppendFailedOnAClosedChannelDoesNotGrowTheItem() throws Exception {
+		final var drv = driver(false);
+		final var item = appendItem();
+		final var op = fixedRangeUpdate(item, "-512-");
+		final var closed = new EmbeddedChannel();
+		final var unusedClose = closed.close();
+		drv.leaseFor(closed, op);
+		op.startRequest();
+		drv.exposeSendRequest(closed, op);
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+		assertEquals(1, drv.releasedTransports, "complete() ran for the failed write");
+		assertEquals(ITEM_SIZE, item.size());
+
+		final var retry = op.result();
+		retry.reset();
+		final var ch = new EmbeddedChannel();
+		final var sent = sendUpdate(drv, ch, retry);
+		assertEquals("bytes=1024-", sent.request().headers().get(HttpHeaderNames.RANGE));
+		retry.status(Operation.Status.SUCC);
+		drv.complete(ch, retry);
+		assertEquals(1536, item.size());
+		ch.finishAndReleaseAll();
+	}
+
+	/** An UPDATE that queues no ranges (a tagging UPDATE sends no body) leaves the size alone. */
+	@ParameterizedTest
+	@CsvSource({"SUCC", "RESP_FAIL_SVC"
+	})
+	void anUpdateThatQueuedNoRangesLeavesTheSize(final Operation.Status status) throws Exception {
+		final var drv = driver(false);
+		final var item = appendItem();
+		final var op = fixedRangeUpdate(item, "-512-");
+		final var ch = new EmbeddedChannel();
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		op.status(status);
+		drv.complete(ch, op);
+		assertEquals(ITEM_SIZE, item.size());
+		ch.finishAndReleaseAll();
 	}
 
 	private static final int DEFAULT_CAP = HttpStorageDriverBase.CONTROL_RESPONSE_MAX_CONTENT_LENGTH;

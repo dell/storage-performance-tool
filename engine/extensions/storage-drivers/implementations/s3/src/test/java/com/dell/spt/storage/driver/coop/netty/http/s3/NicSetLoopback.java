@@ -121,6 +121,7 @@ final class NicSetLoopback implements AutoCloseable {
 	private final Map<String, Map<Integer, byte[]>> uploads = new ConcurrentHashMap<>();
 	private final Map<String, String> tags = new ConcurrentHashMap<>();
 	private final AtomicInteger uploadIds = new AtomicInteger();
+	private final AtomicInteger peakOpenUploads = new AtomicInteger();
 	private final Map<String, AtomicInteger> active = new ConcurrentHashMap<>();
 	private final Map<String, AtomicInteger> peaks = new ConcurrentHashMap<>();
 	private final AtomicInteger objectRequestCount = new AtomicInteger();
@@ -502,6 +503,11 @@ final class NicSetLoopback implements AutoCloseable {
 		return uploads.size();
 	}
 
+	/** The most multipart uploads open at once. */
+	int peakOpenUploads() {
+		return peakOpenUploads.get();
+	}
+
 	/** The tagging document last written to {@code path}. */
 	String tags(final String path) {
 		return tags.get(path);
@@ -633,6 +639,7 @@ final class NicSetLoopback implements AutoCloseable {
 			} else if (query.contains("uploads")) {
 				final var uploadId = "upload-" + uploadIds.incrementAndGet();
 				uploads.put(uploadId, new ConcurrentSkipListMap<>());
+				peakOpenUploads.accumulateAndGet(uploads.size(), Math::max);
 				respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key><UploadId>"
 								+ uploadId + "</UploadId></InitiateMultipartUploadResult>");
 			} else if (uploads.containsKey(param(query, "uploadId")) && failCompletionWithErrorBody.test(request)) {

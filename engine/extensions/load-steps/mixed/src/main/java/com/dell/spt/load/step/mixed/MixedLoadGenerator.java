@@ -3,6 +3,7 @@ package com.dell.spt.load.step.mixed;
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -31,6 +32,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
@@ -86,6 +88,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private final List<UncountedCell> uncountedCells = new CopyOnWriteArrayList<>();
 	private final LongAdder uncountedOnVirtualThreads = new LongAdder();
 	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
+	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
 	// Set on the task thread when the driver refuses an operation with EOF, read by handleError.
 	private boolean outputClosed = false;
 
@@ -215,6 +218,9 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			} else {
 				permitTransferred = dispatchNonDelete(opType);
 			}
+		} catch (final Error e) {
+			// The task runner catches only exceptions: an error would end the task unreported.
+			throw failure(e);
 		} finally {
 			if (!permitTransferred) {
 				concurrencyThrottle.release();
@@ -336,7 +342,36 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			Loggers.MSG.debug("MixedLoadGenerator: finish due to the driver's EOF");
 			return;
 		}
-		LogUtil.exception(Level.ERROR, e, "MixedLoadGenerator error in doWork");
+		if (e instanceof EOFException) {
+			LogUtil.exception(Level.ERROR, e, "MixedLoadGenerator error in doWork");
+			return;
+		}
+		// The task has stopped, so the step can only fail: ending it as done would report success.
+		failure(e);
+	}
+
+	/**
+	 * Records the failure that stopped the task as the step's terminal failure. Its public message
+	 * names only the failure's class; the failure goes to the log.
+	 */
+	private IntegrityTerminalException failure(final Throwable cause) {
+		final var found = IntegrityTerminalException.find(cause);
+		final var terminal = found != null
+						? found
+						: new IntegrityTerminalException(
+										IntegrityTerminalException.Category.EXECUTION,
+										"Mixed load generator stopped on an unexpected " + cause.getClass().getName(),
+										cause);
+		terminalFailure.compareAndSet(null, terminal);
+		if (found == null) {
+			LogUtil.exception(Level.ERROR, cause, "MixedLoadGenerator error in doWork");
+		}
+		return terminal;
+	}
+
+	@Override
+	public IntegrityTerminalException terminalFailure() {
+		return terminalFailure.get();
 	}
 
 	@Override

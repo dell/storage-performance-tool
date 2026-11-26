@@ -49,7 +49,7 @@ class NettyStorageDriverMockDispatchTest {
 		}
 	}
 
-	private static Config storageConfig() throws Exception {
+	static Config storageConfig() throws Exception {
 		final var schemas = new ArrayList<Map<String, Object>>();
 		for (final var extension : Extension.load(Thread.currentThread().getContextClassLoader())) {
 			final var provider = extension.schemaProvider();

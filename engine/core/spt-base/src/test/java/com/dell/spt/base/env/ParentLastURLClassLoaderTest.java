@@ -220,6 +220,80 @@ public class ParentLastURLClassLoaderTest {
 
 	// Helper methods to create test JARs
 
+	@Test
+	void testConcurrentFirstLoadsDefineEachClassOnce() throws Exception {
+		final int classCount = 200;
+		final int threadCount = 8;
+		final Path concurrentJar = createJarWithClasses("com.test.concurrent.Loaded", classCount);
+		try (ParentLastURLClassLoader loader = new ParentLastURLClassLoader(
+						new URL[]{concurrentJar.toUri().toURL()
+						},
+						ClassLoader.getSystemClassLoader())) {
+			final List<Throwable> failures = Collections.synchronizedList(new ArrayList<>());
+			for (int i = 0; i < classCount; i++) {
+				final String name = "com.test.concurrent.Loaded" + i;
+				final java.util.concurrent.CyclicBarrier barrier = new java.util.concurrent.CyclicBarrier(threadCount);
+				final Class<?>[] loaded = new Class<?>[threadCount];
+				final Thread[] threads = new Thread[threadCount];
+				for (int t = 0; t < threadCount; t++) {
+					final int slot = t;
+					threads[t] = new Thread(() -> {
+						try {
+							barrier.await();
+							loaded[slot] = loader.loadClass(name);
+						} catch (Throwable e) {
+							failures.add(e);
+						}
+					});
+					threads[t].start();
+				}
+				for (Thread thread : threads) {
+					thread.join();
+				}
+				for (Class<?> clazz : loaded) {
+					if (clazz != null) {
+						assertSame(loaded[0], clazz, "Every thread should get the one class defined for " + name);
+						assertSame(loader, clazz.getClassLoader());
+					}
+				}
+			}
+			assertTrue(failures.isEmpty(), "Concurrent first loads failed: " + failures.stream().limit(3).toList());
+			assertTrue(loader.isRegisteredAsParallelCapable());
+		}
+	}
+
+	private Path createJarWithClasses(String classNamePrefix, int count) throws Exception {
+		final int lastDot = classNamePrefix.lastIndexOf('.');
+		final String packageName = classNamePrefix.substring(0, lastDot);
+		final String simplePrefix = classNamePrefix.substring(lastDot + 1);
+		final Path srcDir = tempDir.resolve("concurrent-src");
+		final Path outDir = tempDir.resolve("concurrent-classes");
+		final Path packageDir = srcDir.resolve(packageName.replace('.', '/'));
+		Files.createDirectories(packageDir);
+		Files.createDirectories(outDir);
+		final List<Path> sources = new ArrayList<>();
+		for (int i = 0; i < count; i++) {
+			final Path source = packageDir.resolve(simplePrefix + i + ".java");
+			Files.writeString(source, "package " + packageName + "; public class " + simplePrefix + i + " {}");
+			sources.add(source);
+		}
+		final JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+		try (StandardJavaFileManager fileManager = compiler.getStandardFileManager(null, null, null)) {
+			final JavaCompiler.CompilationTask task = compiler.getTask(
+							null, fileManager, null, List.of("-d", outDir.toString()), null,
+							fileManager.getJavaFileObjectsFromPaths(sources));
+			if (!task.call()) {
+				throw new RuntimeException("Compilation failed");
+			}
+		}
+		final Map<String, byte[]> contents = new HashMap<>();
+		for (int i = 0; i < count; i++) {
+			final String entry = packageName.replace('.', '/') + "/" + simplePrefix + i + ".class";
+			contents.put(entry, Files.readAllBytes(outDir.resolve(entry)));
+		}
+		return createJarWithContents(tempDir.resolve("concurrent.jar"), contents);
+	}
+
 	private Path createParentJar() throws Exception {
 		return createJarWithContents(tempDir.resolve("parent.jar"), Map.of(
 						"com/test/VersionedClass.class", compileClass(

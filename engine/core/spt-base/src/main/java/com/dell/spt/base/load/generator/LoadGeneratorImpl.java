@@ -311,7 +311,17 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			throw priorTerminalFailure;
 		}
 
-		drainRetryQueue();
+		try {
+			drainRetryQueue();
+		} catch (final Error e) {
+			throw failOnError(e);
+		} catch (final RuntimeException e) {
+			final var terminal = IntegrityTerminalException.find(e);
+			if (terminal != null) {
+				terminalFailure.compareAndSet(null, terminal);
+			}
+			throw e;
+		}
 
 		final var opBuff = operationBuffer();
 		var pendingOpCount = opBuff.size();
@@ -328,7 +338,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					} else { // recycle the tasks if any
 						n = 0;
 						O recycledOp;
-						final var limit = batchSize - pendingOpCount;
+						// A count limit caps the pull: everything pulled here is sent. Without one,
+						// read no counters.
+						final var limit = countLimit == Long.MAX_VALUE
+										? batchSize - pendingOpCount
+										: (int) Math.max(0, Math.min(batchSize - pendingOpCount, countLimit - generatedOpCount()));
 						// Spin-poll: try the lock-free queue, then spin-wait (PAUSE
 						// instruction, ~10ns) for up to ~1μs before falling back to
 						// parkNanos. This avoids the full futex/context-switch cost
@@ -568,6 +582,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			if (terminal != null) {
 				terminalFailure.compareAndSet(null, terminal);
 				throw terminal;
+			}
+			if (t instanceof Error) {
+				throw failOnError(t);
 			}
 			LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: unexpected failure", name);
 		} finally {
@@ -897,6 +914,21 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						IntegrityTerminalException.Category.EXECUTION,
 						"Operation assembly failed after recovering retained work",
 						assemblyFailure);
+	}
+
+	/**
+	 * An {@link Error} is not retried: retrying could hide it for the rest of the step. The step
+	 * fails with a public message that names only the error's class; the error goes to the log.
+	 */
+	private IntegrityTerminalException failOnError(final Throwable error) {
+		outputFinishFlag = true;
+		final var terminal = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Load generator stopped on an unexpected " + error.getClass().getName(),
+						error);
+		terminalFailure.compareAndSet(null, terminal);
+		LogUtil.trace(Loggers.ERR, Level.ERROR, error, "{}: stopped on an unexpected error", name);
+		return terminal;
 	}
 
 	private AssertionError contractFailure(final String message) {

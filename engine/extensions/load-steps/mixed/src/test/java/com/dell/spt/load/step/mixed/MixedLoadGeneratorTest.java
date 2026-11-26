@@ -3,6 +3,7 @@ package com.dell.spt.load.step.mixed;
 import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
@@ -961,8 +962,10 @@ class MixedLoadGeneratorTest {
 		final MixedLoadGenerator gen = new MixedLoadGenerator(
 						executor, schedule, pool, builders, noopOutput(), 1, mockNewItemSupplier());
 
-		assertThrows(AssertionError.class, gen::doWork,
+		final var failure = assertThrows(IntegrityTerminalException.class, gen::doWork,
 						"precondition: builder must fail with Error to exercise throwable path");
+		assertTrue(failure.getCause() instanceof AssertionError);
+		assertSame(failure, gen.terminalFailure());
 		assertEquals(1, availablePermits(gen),
 						"generator must release permit even when builder throws Error");
 	}
@@ -1014,6 +1017,7 @@ class MixedLoadGeneratorTest {
 			assertTrue(gen.isStopped());
 			assertEquals(4, availablePermits(gen), "the refused operation's permit is released");
 			assertEquals(List.of(), log.errorsContaining("MixedLoadGenerator"));
+			assertNull(gen.terminalFailure());
 		}
 	}
 
@@ -1028,7 +1032,29 @@ class MixedLoadGeneratorTest {
 			final List<String> errors = log.errorsContaining("MixedLoadGenerator error in doWork");
 			assertEquals(1, errors.size(), errors.toString());
 			assertTrue(errors.get(0).contains("synthetic driver failure"), errors.toString());
+			final var failure = gen.terminalFailure();
+			assertNotNull(failure, "a stopped generator fails the step");
+			assertEquals("Mixed load generator stopped on an unexpected java.io.IOException", failure.getMessage());
 		}
+	}
+
+	@Test
+	@DisplayName("An Error from the driver fails the step")
+	void aDriverErrorFailsTheStep() throws Exception {
+		final var error = new LinkageError("attempted duplicate class definition");
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				throw error;
+			}
+		};
+		final MixedLoadGenerator gen = startReadCreateGenerator(driver, mockNewItemSupplier());
+		assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
+		final var failure = gen.terminalFailure();
+		assertNotNull(failure);
+		assertEquals("Mixed load generator stopped on an unexpected java.lang.LinkageError", failure.getMessage());
+		assertSame(error, failure.getCause());
+		assertEquals(4, availablePermits(gen), "the refused operation's permit is released");
 	}
 
 	@Test
@@ -1072,6 +1098,7 @@ class MixedLoadGeneratorTest {
 			assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
 			final List<String> errors = log.errorsContaining("MixedLoadGenerator error in doWork");
 			assertEquals(1, errors.size(), errors.toString());
+			assertNull(gen.terminalFailure());
 		}
 	}
 
