@@ -8,6 +8,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
@@ -17,6 +18,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -40,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
+import org.apache.logging.log4j.Level;
 
 public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<I>>
 				extends StorageDriverBase<I, O> implements StorageDriver<I, O> {
@@ -172,24 +175,31 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			throwUnchecked(new EOFException());
 		}
 		var i = from;
-		while (i < to && isStarted()) {
-			if (inOpQueue.remainingCapacity() == 0) {
-				break;
-			}
-			final O nextOp = ops.get(i);
-			if (!prepare(nextOp)) {
-				break;
-			}
-			admissionLock.lock();
-			try {
-				if (admissionOpen && offerIncomingOperation(nextOp)) {
-					i++;
-				} else {
+		try {
+			while (i < to && isStarted()) {
+				if (inOpQueue.remainingCapacity() == 0) {
 					break;
 				}
-			} finally {
-				admissionLock.unlock();
+				final O nextOp = ops.get(i);
+				if (!prepare(nextOp)) {
+					break;
+				}
+				admissionLock.lock();
+				try {
+					if (admissionOpen && offerIncomingOperation(nextOp)) {
+						i++;
+					} else {
+						break;
+					}
+				} finally {
+					admissionLock.unlock();
+				}
 			}
+		} catch (final Throwable t) {
+			if (i == from) {
+				throw t;
+			}
+			return keepAcceptedPrefix(i - from, t);
 		}
 		final var n = i - from;
 		scheduledOpCount.add(n);
@@ -199,26 +209,60 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return n;
 	}
 
+	/**
+	 * A failure preparing a later operation of a batch must not hide the operations this call has
+	 * already queued: the caller would offer them again. The call reports the accepted prefix; the
+	 * failing operation is first in the caller's next call, which then reports the failure itself.
+	 * An {@link Error} or a terminal failure is thrown once the prefix is counted and dispatched: it
+	 * ends the step.
+	 */
+	private int keepAcceptedPrefix(final int accepted, final Throwable t) {
+		scheduledOpCount.add(accepted);
+		signalDispatch();
+		if (t instanceof Error error) {
+			throw error;
+		}
+		final var terminal = IntegrityTerminalException.find(t);
+		if (terminal != null) {
+			throw terminal;
+		}
+		if (t instanceof InterruptedException) {
+			Thread.currentThread().interrupt();
+			return accepted;
+		}
+		LogUtil.trace(Loggers.ERR, Level.WARN, t,
+						"{}: an operation failed to prepare after part of its batch was queued; it is offered again",
+						stepId);
+		return accepted;
+	}
+
 	@Override
 	public final int put(final List<O> ops) {
 		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
 		var n = 0;
-		for (final var nextOp : ops) {
-			if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
-				break;
-			}
-			admissionLock.lock();
-			try {
-				if (admissionOpen && offerIncomingOperation(nextOp)) {
-					n++;
-				} else {
+		try {
+			for (final var nextOp : ops) {
+				if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
 					break;
 				}
-			} finally {
-				admissionLock.unlock();
+				admissionLock.lock();
+				try {
+					if (admissionOpen && offerIncomingOperation(nextOp)) {
+						n++;
+					} else {
+						break;
+					}
+				} finally {
+					admissionLock.unlock();
+				}
 			}
+		} catch (final Throwable t) {
+			if (n == 0) {
+				throw t;
+			}
+			return keepAcceptedPrefix(n, t);
 		}
 		scheduledOpCount.add(n);
 		if (n > 0) {
