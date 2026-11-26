@@ -419,66 +419,78 @@ public interface FileIoHelper {
 	static <I extends DataItem, O extends DataOperation<I>> boolean invokeFixedRangesUpdate(
 					final I fileItem, final O op, final FileChannel dstChannel, final List<Range> byteRanges) throws IOException {
 
-		long countBytesDone = op.countBytesDone();
+		final int rangeCount = byteRanges.size();
+		final int currRangeIdx = op.currRangeIdx();
+		if (currRangeIdx > rangeCount) {
+			return true; // done before
+		}
+		// the recorded size changes only once the whole update is done, so a retry after a failure writes the same ranges
 		final long baseItemSize = fileItem.size();
-		final long updatingRangesSize = op.markedRangesSize();
-
-		if (updatingRangesSize > 0) {
-			if (updatingRangesSize > countBytesDone) {
-				Range byteRange;
-				DataItem updatingRange;
-				int currRangeIdx = op.currRangeIdx();
-				long rangeBeg;
-				long rangeEnd;
-				long rangeSize;
-				if (currRangeIdx < byteRanges.size()) {
-					byteRange = byteRanges.get(currRangeIdx);
-					rangeBeg = byteRange.getBeg();
-					rangeEnd = byteRange.getEnd();
-					rangeSize = byteRange.getSize();
-					// an overwrite keeps the recorded size, even when it reaches past the item's end
-					long sizeWhenDone = baseItemSize;
-					if (rangeSize == -1) {
-						if (rangeBeg == -1) {
-							// last "rangeEnd" bytes
-							rangeBeg = baseItemSize - rangeEnd;
-							rangeSize = rangeEnd;
-						} else if (rangeEnd == -1) {
-							// start @ offset equal to "rangeBeg"
-							rangeSize = baseItemSize - rangeBeg;
-						} else {
-							rangeSize = rangeEnd - rangeBeg + 1;
-						}
-					} else {
-						// append exactly rangeSize bytes to the end; the size grows by this range once it is done, so a
-						// call that resumes a split write (a dedupable write stops at the data ring end) goes on from the
-						// same end
-						rangeBeg = baseItemSize;
-						sizeWhenDone = baseItemSize + rangeSize;
-					}
-					updatingRange = fileItem.slice(rangeBeg, rangeSize);
-					updatingRange.position(countBytesDone);
-					dstChannel.position(rangeBeg + countBytesDone);
-					countBytesDone += updatingRange.writeToFileChannel(dstChannel, rangeSize - countBytesDone);
-					if (countBytesDone == rangeSize) {
-						fileItem.size(sizeWhenDone);
-						op.currRangeIdx(currRangeIdx + 1);
-						op.countBytesDone(0);
-					} else {
-						op.countBytesDone(countBytesDone);
-					}
+		// the size the current range sees: an N- or -N range after an append addresses the grown size
+		long sizeBefore = baseItemSize;
+		// the bytes of the ranges before the current one
+		long bytesBefore = 0;
+		long rangeBeg = 0;
+		long rangeSize = 0;
+		for (int i = 0; i <= currRangeIdx && i < rangeCount; i++) {
+			final Range byteRange = byteRanges.get(i);
+			final long beg = byteRange.getBeg();
+			final long end = byteRange.getEnd();
+			final long size = byteRange.getSize();
+			if (size == -1) {
+				// an overwrite keeps the recorded size, even when it reaches past the item's end
+				if (beg == -1) {
+					// last "end" bytes
+					rangeBeg = sizeBefore - end;
+					rangeSize = end;
+				} else if (end == -1) {
+					// from offset "beg"; nothing to write when it starts past the end
+					rangeBeg = beg;
+					rangeSize = Math.max(0, sizeBefore - beg);
 				} else {
-					op.countBytesDone(updatingRangesSize);
-					return true;
+					rangeBeg = beg;
+					rangeSize = end - beg + 1;
+				}
+				if (i < currRangeIdx) {
+					bytesBefore += rangeSize;
 				}
 			} else {
-				return true;
+				// append exactly "size" bytes to the end
+				rangeBeg = sizeBefore;
+				rangeSize = size;
+				if (i < currRangeIdx) {
+					bytesBefore += size;
+					sizeBefore += size;
+				}
 			}
-		} else {
-			return true;
 		}
 
-		return false;
+		if (currRangeIdx < rangeCount) {
+			if (rangeSize > 0) {
+				// the count is cumulative: the part before the current range's offset is the earlier ranges' bytes
+				long rangeBytesDone = op.countBytesDone() - bytesBefore;
+				final DataItem updatingRange = fileItem.slice(rangeBeg, rangeSize);
+				updatingRange.position(rangeBytesDone);
+				dstChannel.position(rangeBeg + rangeBytesDone);
+				rangeBytesDone += updatingRange.writeToFileChannel(dstChannel, rangeSize - rangeBytesDone);
+				op.countBytesDone(bytesBefore + rangeBytesDone);
+				if (rangeBytesDone == rangeSize) {
+					op.currRangeIdx(currRangeIdx + 1);
+				}
+				return false;
+			}
+			// nothing to write: skip the range, and finish now when it is the last
+			if (currRangeIdx + 1 < rangeCount) {
+				op.currRangeIdx(currRangeIdx + 1);
+				return false;
+			}
+		}
+
+		if (sizeBefore != baseItemSize) {
+			fileItem.size(sizeBefore);
+		}
+		op.currRangeIdx(rangeCount + 1);
+		return true;
 	}
 
 	static <I extends DataItem, O extends DataOperation<I>> boolean invokeOverwrite(
