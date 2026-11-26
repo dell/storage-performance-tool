@@ -311,7 +311,17 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			throw priorTerminalFailure;
 		}
 
-		drainRetryQueue();
+		try {
+			drainRetryQueue();
+		} catch (final Error e) {
+			throw failOnError(e);
+		} catch (final RuntimeException e) {
+			final var terminal = IntegrityTerminalException.find(e);
+			if (terminal != null) {
+				terminalFailure.compareAndSet(null, terminal);
+			}
+			throw e;
+		}
 
 		final var opBuff = operationBuffer();
 		var pendingOpCount = opBuff.size();
@@ -912,12 +922,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	 */
 	private IntegrityTerminalException failOnError(final Throwable error) {
 		outputFinishFlag = true;
-		LogUtil.trace(Loggers.ERR, Level.ERROR, error, "{}: stopped on an unexpected error", name);
 		final var terminal = new IntegrityTerminalException(
 						IntegrityTerminalException.Category.EXECUTION,
 						"Load generator stopped on an unexpected " + error.getClass().getName(),
 						error);
 		terminalFailure.compareAndSet(null, terminal);
+		LogUtil.trace(Loggers.ERR, Level.ERROR, error, "{}: stopped on an unexpected error", name);
 		return terminal;
 	}
 

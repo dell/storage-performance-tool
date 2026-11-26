@@ -8,6 +8,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
@@ -196,7 +197,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			if (i == from) {
 				throw t;
 			}
-			keepAcceptedPrefix(t);
+			return keepAcceptedPrefix(i - from, t);
 		}
 		final var n = i - from;
 		scheduledOpCount.add(n);
@@ -210,14 +211,27 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * A failure preparing a later operation of a batch must not hide the operations this call has
 	 * already queued: the caller would offer them again. The call reports the accepted prefix; the
 	 * failing operation is first in the caller's next call, which then reports the failure itself.
+	 * An {@link Error} or a terminal failure is thrown once the prefix is counted and dispatched: it
+	 * ends the step.
 	 */
-	private void keepAcceptedPrefix(final Throwable t) {
+	private int keepAcceptedPrefix(final int accepted, final Throwable t) {
+		scheduledOpCount.add(accepted);
+		signalDispatch();
+		if (t instanceof Error error) {
+			throw error;
+		}
+		final var terminal = IntegrityTerminalException.find(t);
+		if (terminal != null) {
+			throw terminal;
+		}
 		if (t instanceof InterruptedException) {
 			Thread.currentThread().interrupt();
+			return accepted;
 		}
 		Loggers.ERR.warn(
-						"{}: an operation failed to prepare after part of its batch was queued; it is offered again: {}",
-						stepId, t.toString());
+						"{}: an operation failed to prepare after part of its batch was queued; it is offered again",
+						stepId, t);
+		return accepted;
 	}
 
 	@Override
@@ -246,7 +260,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			if (n == 0) {
 				throw t;
 			}
-			keepAcceptedPrefix(t);
+			return keepAcceptedPrefix(n, t);
 		}
 		scheduledOpCount.add(n);
 		if (n > 0) {

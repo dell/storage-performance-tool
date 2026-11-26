@@ -297,7 +297,7 @@ class RangeReadAdmissionTest {
 	}
 
 	@Test
-	void anErrorAfterAnAcceptedOperationReturnsTheAcceptedPrefix() {
+	void anErrorAfterAnAcceptedOperationPropagatesAndKeepsTheAcceptedOperationQueued() {
 		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
 		var admission = new RangeReadAdmission<>(driver, tracker, 4);
@@ -307,15 +307,10 @@ class RangeReadAdmissionTest {
 		tracker.generatorBuffered(first);
 		tracker.generatorBuffered(second);
 		when(driver.put(first)).thenAnswer(call -> tracker.driverQueued(first));
-		when(driver.put(second))
-						.thenThrow(new LinkageError("attempted duplicate class definition"))
-						.thenThrow(new LinkageError("attempted duplicate class definition"))
-						.thenAnswer(call -> tracker.driverQueued(second));
-		assertEquals(1, admission.put(List.of(first, second)));
-		assertThrows(LinkageError.class, () -> admission.put(List.of(second)));
-		assertEquals(1, admission.put(List.of(second)));
+		when(driver.put(second)).thenThrow(new LinkageError("attempted duplicate class definition"));
+		// The generator fails the step on an Error, so the accepted operation is not offered again.
+		assertThrows(LinkageError.class, () -> admission.put(List.of(first, second)));
 		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(first));
-		assertEquals(OperationLifecycleState.DRIVER_QUEUED, tracker.stateOf(second));
 		verify(driver, times(1)).put(first);
 		tracker.unattempted(first);
 		tracker.unattempted(second);

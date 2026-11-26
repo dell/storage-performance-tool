@@ -351,15 +351,17 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	 * names only the failure's class; the failure goes to the log.
 	 */
 	private IntegrityTerminalException failure(final Throwable cause) {
-		var terminal = IntegrityTerminalException.find(cause);
-		if (terminal == null) {
-			LogUtil.exception(Level.ERROR, cause, "MixedLoadGenerator error in doWork");
-			terminal = new IntegrityTerminalException(
-							IntegrityTerminalException.Category.EXECUTION,
-							"Mixed load generator stopped on an unexpected " + cause.getClass().getName(),
-							cause);
-		}
+		final var found = IntegrityTerminalException.find(cause);
+		final var terminal = found != null
+						? found
+						: new IntegrityTerminalException(
+										IntegrityTerminalException.Category.EXECUTION,
+										"Mixed load generator stopped on an unexpected " + cause.getClass().getName(),
+										cause);
 		terminalFailure.compareAndSet(null, terminal);
+		if (found == null) {
+			LogUtil.exception(Level.ERROR, cause, "MixedLoadGenerator error in doWork");
+		}
 		return terminal;
 	}
 

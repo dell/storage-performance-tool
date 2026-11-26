@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -46,8 +47,10 @@ class PartialBatchAdmissionTest {
 
 	private static final String UNCACHED = "uncached";
 	private static final String ERROR = "error";
+	private static final String TERMINAL = "terminal";
+	private static final String EXCEPTION = "exception";
 
-	/** Scripts {@code requestNewPath}: an uncached path, as after a failed connect, or an error. */
+	/** Scripts {@code requestNewPath}: an uncached path, as after a failed connect, or a failure. */
 	private static final class ScriptedPathDriver extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
 		private final List<String> script;
 		private final AtomicInteger calls = new AtomicInteger();
@@ -67,6 +70,12 @@ class PartialBatchAdmissionTest {
 			if (ERROR.equals(step)) {
 				throw new LinkageError("attempted duplicate class definition");
 			}
+			if (EXCEPTION.equals(step)) {
+				throw new IllegalStateException("bucket check failed");
+			}
+			if (TERMINAL.equals(step)) {
+				throw new IntegrityTerminalException(IntegrityTerminalException.Category.EXECUTION, "terminal");
+			}
 			return path;
 		}
 	}
@@ -77,8 +86,8 @@ class PartialBatchAdmissionTest {
 	}
 
 	@Test
-	void aRangedBatchPutReportsTheOperationsQueuedBeforeAPrepareError() throws Exception {
-		final var driver = new ScriptedPathDriver(4, UNCACHED, ERROR);
+	void aRangedBatchPutReportsTheOperationsQueuedBeforeAPrepareException() throws Exception {
+		final var driver = new ScriptedPathDriver(4, UNCACHED, EXCEPTION);
 		final var results = new CopyOnWriteArrayList<Operation<DataItem>>();
 		driver.operationResultOutput(collector(results));
 		try {
@@ -94,8 +103,8 @@ class PartialBatchAdmissionTest {
 	}
 
 	@Test
-	void aListBatchPutReportsTheOperationsQueuedBeforeAPrepareError() throws Exception {
-		final var driver = new ScriptedPathDriver(4, UNCACHED, ERROR);
+	void aListBatchPutReportsTheOperationsQueuedBeforeAPrepareException() throws Exception {
+		final var driver = new ScriptedPathDriver(4, UNCACHED, EXCEPTION);
 		final var results = new CopyOnWriteArrayList<Operation<DataItem>>();
 		driver.operationResultOutput(collector(results));
 		try {
@@ -105,6 +114,62 @@ class PartialBatchAdmissionTest {
 			assertEquals(2, driver.put(ops.subList(1, 3)));
 			await(() -> results.size() == 3);
 			assertEachOnce(ops, results);
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void anErrorAfterAQueuedOperationIsThrownOnceThatOperationIsDispatched() throws Exception {
+		final var driver = new ScriptedPathDriver(4, UNCACHED, ERROR);
+		final var results = new CopyOnWriteArrayList<Operation<DataItem>>();
+		driver.operationResultOutput(collector(results));
+		try {
+			driver.start();
+			final var ops = ops(3);
+			assertThrows(LinkageError.class, () -> driver.put(ops, 0, 3));
+			assertEquals(1, driver.scheduledOpCount());
+			await(() -> results.size() == 1);
+			assertEachOnce(ops.subList(0, 1), results);
+		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void aGeneratorFailsTheStepOnAnErrorAfterAQueuedOperation() throws Exception {
+		final var driver = new ScriptedPathDriver(4, UNCACHED, ERROR);
+		driver.operationResultOutput(collector(new CopyOnWriteArrayList<>()));
+		final var items = new ArrayList<DataItem>();
+		for (var i = 0; i < 6; i++) {
+			items.add(new DataItemImpl("obj-" + i, 0, 1));
+		}
+		final var generator = new LoadGeneratorImpl<DataItem, Operation<DataItem>>(
+						new ListInput<>(items), builder(), List.of(), driver, 4, 6, 4, false, false);
+		generator.operationLifecycle(driver.operationLifecycle());
+		try {
+			driver.start();
+			generator.start();
+			await(() -> generator.terminalFailure() != null);
+			assertTrue(generator.terminalFailure().getCause() instanceof LinkageError);
+		} finally {
+			generator.close();
+			driver.close();
+		}
+	}
+
+	@Test
+	void aTerminalFailureAfterAQueuedOperationIsThrownOnceThatOperationIsDispatched() throws Exception {
+		final var driver = new ScriptedPathDriver(4, UNCACHED, TERMINAL);
+		final var results = new CopyOnWriteArrayList<Operation<DataItem>>();
+		driver.operationResultOutput(collector(results));
+		try {
+			driver.start();
+			final var ops = ops(3);
+			assertThrows(IntegrityTerminalException.class, () -> driver.put(ops, 0, 3));
+			assertEquals(1, driver.scheduledOpCount());
+			await(() -> results.size() == 1);
+			assertEachOnce(ops.subList(0, 1), results);
 		} finally {
 			driver.close();
 		}
@@ -125,8 +190,8 @@ class PartialBatchAdmissionTest {
 	}
 
 	@Test
-	void aGeneratorRunsEveryOperationOnceAfterAnUncachedPathThenAPrepareError() throws Exception {
-		final var driver = new ScriptedPathDriver(4, UNCACHED, ERROR);
+	void aGeneratorRunsEveryOperationOnceAfterAnUncachedPathThenAPrepareException() throws Exception {
+		final var driver = new ScriptedPathDriver(4, UNCACHED, EXCEPTION);
 		final var results = new CopyOnWriteArrayList<Operation<DataItem>>();
 		driver.operationResultOutput(collector(results));
 		final var items = new ArrayList<DataItem>();
