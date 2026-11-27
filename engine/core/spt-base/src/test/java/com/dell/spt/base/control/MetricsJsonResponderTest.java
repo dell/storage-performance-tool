@@ -913,6 +913,8 @@ public class MetricsJsonResponderTest {
 						12_000L);
 		when(mgr.getLastProgressSnapshot("step-retain", false)).thenReturn(java.util.Optional.of(progress));
 		when(mgr.getLastProgressSnapshot("step-retain")).thenReturn(java.util.Optional.of(progress));
+		// A plain mock does not run the interface's default context lookup: stub it.
+		when(mgr.getLastProgressSnapshot(ctx)).thenReturn(java.util.Optional.of(progress));
 
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
 		final JsonNode nodeVerbose = responder.buildNodeMetrics(true).get(0);

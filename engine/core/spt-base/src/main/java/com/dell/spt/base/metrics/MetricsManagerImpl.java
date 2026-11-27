@@ -48,9 +48,11 @@ import java.util.Map;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
@@ -89,7 +91,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
-	private final Map<ProgressKey, TerminalStepEntry> lastProgressByStepId = new ConcurrentHashMap<>();
+	// Live progress per metrics context: a step with several contexts (mixed, weighted, pipeline)
+	// keeps one entry for each, so a live row never takes a sibling context's counts.
+	private final Map<ContextProgressKey, TerminalStepEntry> lastProgressByContext = new ConcurrentHashMap<>();
+	// Contexts whose unregister ran without the output lock: the sweep that held it may record one
+	// again after the unregister removed its entries, so the sweep removes them once more at its end.
+	private final Queue<MetricsContext<?>> progressLeftByUnlockedUnregister = new ConcurrentLinkedQueue<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 	private static final List<Double> STANDARD_TIMING_QUANTILES = List.of(0.5, 0.9, 0.99, 0.999);
 
@@ -135,7 +142,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 				final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
 				if (null != snapshot) {
-					recordProgressSnapshot(metricsCtx, snapshot);
+					recordSweepProgress(metricsCtx, snapshot);
 					final ConcurrencyMetricSnapshot concurrencySnapshot = snapshot.concurrencySnapshot();
 					if (null != concurrencySnapshot) {
 						actualConcurrency = (int) concurrencySnapshot.last();
@@ -180,6 +187,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			throwUncheckedIfInterrupted(cause);
 			LogUtil.exception(Level.DEBUG, cause, "Metrics manager failure");
 		} finally {
+			dropProgressLeftByUnlockedUnregister();
 			outputLock.unlock();
 		}
 		Thread.sleep(10); // 100 Hz iteration rate
@@ -201,7 +209,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	public void register(final MetricsContext metricsCtx) {
 		try {
 			startIfNotStarted();
-			lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
+			clearStaleProgress(metricsCtx);
 			allMetrics.add(metricsCtx);
 			if (metricsCtx instanceof DistributedMetricsContext<?> distributedMetricsCtx) {
 				distributedMetrics.put(
@@ -264,6 +272,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 					final boolean distributedEntry = metricsCtx instanceof DistributedMetricsContext;
 					final ProgressKey progressKey = ProgressKey.of(metricsCtx.loadStepId(), distributedEntry);
+					final ContextProgressKey contextProgressKey = ContextProgressKey.of(metricsCtx, distributedEntry);
 					recordProgressSnapshot(metricsCtx, snapshot);
 					TerminalStepEntry terminalEntry = null;
 
@@ -356,7 +365,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						final boolean failedDistributedRefresh = distributedEntry
 										&& ((DistributedMetricsContext<?>) metricsCtx).partial();
 						if (!failedDistributedRefresh) {
-							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
+							final TerminalStepEntry lastProgressEntry = lastProgressByContext.get(contextProgressKey);
 							if (lastProgressEntry != null) {
 								retainTerminal(progressKey, withFinalDriverStats(lastProgressEntry, snapshot, distributedEntry));
 							} else if (hasAllParts(snapshot)
@@ -367,10 +376,13 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							}
 						}
 					}
-					lastProgressByStepId.remove(progressKey);
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
 				} finally {
+					if (!lockAcquired) {
+						progressLeftByUnlockedUnregister.add(metricsCtx);
+					}
+					removeProgress(metricsCtx);
 					if (lockAcquired && outputLock.isHeldByCurrentThread()) {
 						outputLock.unlock();
 					}
@@ -576,7 +588,27 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		if (stepId == null) {
 			return Optional.empty();
 		}
-		return Optional.ofNullable(lastProgressByStepId.get(ProgressKey.of(stepId, distributed)));
+		// The entry of a step with one context of this scope. A step with several has one entry per
+		// context, and none of them stands for the step.
+		TerminalStepEntry match = null;
+		for (final Map.Entry<ContextProgressKey, TerminalStepEntry> e : lastProgressByContext.entrySet()) {
+			if (e.getKey().distributed == distributed && stepId.equals(e.getValue().stepId)) {
+				if (match != null) {
+					return Optional.empty();
+				}
+				match = e.getValue();
+			}
+		}
+		return Optional.ofNullable(match);
+	}
+
+	@Override
+	public Optional<TerminalStepEntry> getLastProgressSnapshot(final MetricsContext<?> metricsCtx) {
+		if (metricsCtx == null) {
+			return Optional.empty();
+		}
+		return Optional.ofNullable(lastProgressByContext.get(
+						ContextProgressKey.of(metricsCtx, metricsCtx instanceof DistributedMetricsContext)));
 	}
 
 	@Override
@@ -624,6 +656,64 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		allMetrics.forEach(MetricsContext::close);
 		allMetrics.clear();
 		distributedMetrics.clear();
+		lastProgressByContext.clear();
+		progressLeftByUnlockedUnregister.clear();
+	}
+
+	private void removeProgress(final MetricsContext<?> metricsCtx) {
+		lastProgressByContext.remove(ContextProgressKey.of(metricsCtx, false));
+		lastProgressByContext.remove(ContextProgressKey.of(metricsCtx, true));
+	}
+
+	/**
+	 * Clears, before a context registers, its own entries and every entry of its step and scope
+	 * whose context is no longer registered, as a step that reuses its ID did when the cache was
+	 * keyed by step. Entries of registered siblings stay.
+	 */
+	private void clearStaleProgress(final MetricsContext<?> metricsCtx) {
+		// A context registered again is no longer its earlier unregister's to clean up after.
+		progressLeftByUnlockedUnregister.removeIf(queued -> queued == metricsCtx);
+		removeProgress(metricsCtx);
+		final String stepId = metricsCtx.loadStepId();
+		final boolean distributed = metricsCtx instanceof DistributedMetricsContext;
+		lastProgressByContext.entrySet().removeIf(e -> e.getKey().distributed == distributed
+						&& Objects.equals(stepId, e.getValue().stepId)
+						&& !isRegistered(e.getKey().context));
+	}
+
+	/**
+	 * Records a sweep's snapshot of a context that is still registered. A context being unregistered
+	 * leaves the set before its unregister takes the output lock; its entry stays for the unregister
+	 * to read and remove.
+	 */
+	private void recordSweepProgress(final MetricsContext<?> metricsCtx, final AllMetricsSnapshot snapshot) {
+		if (isRegistered(metricsCtx)) {
+			recordProgressSnapshot(metricsCtx, snapshot);
+		}
+	}
+
+	/**
+	 * Removes, at the end of a sweep, the entries of contexts whose unregister timed out on the output
+	 * lock and ran beside the sweep. That unregister has removed them and read what it needed; an entry
+	 * the sweep recorded after the removal would hold its context until the manager closes.
+	 */
+	private void dropProgressLeftByUnlockedUnregister() {
+		MetricsContext<?> metricsCtx;
+		while ((metricsCtx = progressLeftByUnlockedUnregister.poll()) != null) {
+			if (!isRegistered(metricsCtx)) {
+				removeProgress(metricsCtx);
+			}
+		}
+	}
+
+	/** Whether this very context is registered; contexts of a step can compare equal. */
+	private boolean isRegistered(final MetricsContext<?> metricsCtx) {
+		for (final MetricsContext<?> registered : allMetrics) {
+			if (registered == metricsCtx) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private void recordProgressSnapshot(final MetricsContext metricsCtx, final AllMetricsSnapshot snapshot) {
@@ -641,8 +731,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		}
 
 		final boolean distributedEntry = metricsCtx instanceof DistributedMetricsContext && snapshot instanceof DistributedAllMetricsSnapshot;
-		final ProgressKey progressKey = ProgressKey.of(metricsCtx.loadStepId(), distributedEntry);
-		final TerminalStepEntry existing = lastProgressByStepId.get(progressKey);
+		final ContextProgressKey progressKey = ContextProgressKey.of(metricsCtx, distributedEntry);
+		final TerminalStepEntry existing = lastProgressByContext.get(progressKey);
 		if (existing != null
 						&& existing.successCount >= successCount
 						&& existing.failedCount >= failCount
@@ -654,7 +744,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 		final TerminalStepEntry entry = buildEntry(metricsCtx, snapshot);
 
-		lastProgressByStepId.put(progressKey, entry);
+		lastProgressByContext.put(progressKey, entry);
 		if (Loggers.MSG.isDebugEnabled()) {
 			Loggers.MSG.debug(
 							"{}: cached progress snapshot updated (distributed={}, success={}, fails={}, corrupt={}, bytes={})",
@@ -696,9 +786,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	/**
 	 * Returns a cached entry with the storage driver statistics of the final snapshot of the context
-	 * that leaves it, when that snapshot is of the entry's scope and has any. The cached entry was
-	 * built from an earlier snapshot, maybe of another context of the step; the statistics kept are
-	 * the driver's values at the end.
+	 * that leaves it, when that snapshot is of the entry's scope and has any. The cached entry is
+	 * that context's own, built from an earlier snapshot of it; the statistics kept are the driver's
+	 * values at the end.
 	 */
 	private static TerminalStepEntry withFinalDriverStats(
 					final TerminalStepEntry entry, final AllMetricsSnapshot snapshot, final boolean distributedEntry) {
@@ -825,6 +915,36 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		@Override
 		public int hashCode() {
 			return Objects.hash(stepId, distributed);
+		}
+	}
+
+	/**
+	 * Identifies one metrics context and scope in the live-progress cache. Contexts compare by
+	 * reference: {@code MetricsContextBase} equality compares a truncated start time, so two contexts
+	 * of a step can be equal.
+	 */
+	private static final class ContextProgressKey {
+		private final MetricsContext<?> context;
+		private final boolean distributed;
+
+		private ContextProgressKey(final MetricsContext<?> context, final boolean distributed) {
+			this.context = context;
+			this.distributed = distributed;
+		}
+
+		static ContextProgressKey of(final MetricsContext<?> context, final boolean distributed) {
+			return new ContextProgressKey(context, distributed);
+		}
+
+		@Override
+		public boolean equals(final Object o) {
+			return this == o
+							|| (o instanceof ContextProgressKey that && context == that.context && distributed == that.distributed);
+		}
+
+		@Override
+		public int hashCode() {
+			return 31 * System.identityHashCode(context) + Boolean.hashCode(distributed);
 		}
 	}
 
