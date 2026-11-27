@@ -958,6 +958,210 @@ public class MetricsManagerImplTest {
 						"no single entry stands for a step of several contexts");
 	}
 
+	@Test
+	void aSweepBlockedBeforeItRecordsLeavesNoEntryOfAContextUnregisteredMeanwhile() throws Exception {
+		final Thread testThread = Thread.currentThread();
+		final java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean(true);
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-race-refresh") {
+			@Override
+			public void refreshLastSnapshot() {
+				if (Thread.currentThread() != testThread && armed.compareAndSet(true, false)) {
+					entered.countDown();
+					awaitQuietly(release);
+				}
+			}
+		};
+		ctx.snapshot = new CountingSnapshot(50, 0, 51_200, 100.0, 110.0, new FakeConcurrencySnapshot(1), 2_000L);
+		// Keeps the manager running once the raced context is gone.
+		mgr.register(progressContext("step-race-keeper", OpType.READ, 0, 0));
+		mgr.register(ctx);
+		assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS), "the sweep reached the context");
+
+		// The sweep holds the output lock, so the unregister times out on it and runs alongside.
+		mgr.unregister(ctx);
+		release.countDown();
+		awaitSweep();
+
+		assertTrue(lastProgressEntries().isEmpty(), "no entry outlives its unregistered context");
+	}
+
+	@Test
+	void aSweepRecordingWhileAContextIsUnregisteredLeavesNoEntryOfIt() throws Exception {
+		final Thread testThread = Thread.currentThread();
+		final java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean(true);
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-race-record");
+		ctx.snapshot = new CountingSnapshot(50, 0, 51_200, 100.0, 110.0, new FakeConcurrencySnapshot(1), 2_000L) {
+			@Override
+			public RateMetricSnapshot successSnapshot() {
+				// The sweep blocks here inside its record, after any check made before it.
+				if (Thread.currentThread() != testThread && armed.compareAndSet(true, false)) {
+					entered.countDown();
+					awaitQuietly(release);
+				}
+				return super.successSnapshot();
+			}
+		};
+		mgr.register(progressContext("step-race-keeper", OpType.READ, 0, 0));
+		mgr.register(ctx);
+		assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS), "the sweep reached the record");
+
+		mgr.unregister(ctx);
+		release.countDown();
+		awaitSweep();
+
+		assertTrue(lastProgressEntries().isEmpty(), "no entry outlives its unregistered context");
+	}
+
+	@Test
+	void registerClearsTheContextsOwnEntry() throws Exception {
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-own", OpType.READ, 5, 5_120);
+		invokeRecordProgressSnapshot(ctx, ctx.snapshot);
+		assertEquals(1, lastProgressEntries().size());
+
+		mgr.register(ctx);
+
+		assertTrue(lastProgressEntries().isEmpty(), "a context registers with no cached progress");
+		assertTrue(mgr.getLastProgressSnapshot(ctx).isEmpty());
+	}
+
+	@Test
+	void registerClearsAStaleEntryOfItsStepAndScope() throws Exception {
+		// Left as a sweep that raced an unregister could leave it: the context is not registered.
+		final FakeMetricsContext<AllMetricsSnapshot> stale = progressContext("step-reused", OpType.CREATE, 900, 921_600);
+		invokeRecordProgressSnapshot(stale, stale.snapshot);
+		final FakeMetricsContext<AllMetricsSnapshot> next = progressContext("step-reused", OpType.CREATE, 3, 3_072);
+
+		mgr.register(next);
+
+		assertTrue(lastProgressEntries().isEmpty(), "the stale entry of the step goes");
+		invokeRecordProgressSnapshot(next, next.snapshot);
+		assertEquals(3L, mgr.getLastProgressSnapshot("step-reused").orElseThrow().successCount);
+		assertEquals(3L, mgr.getLastProgressSnapshot("step-reused", false).orElseThrow().successCount);
+	}
+
+	@Test
+	void registerKeepsTheEntriesOfRegisteredSiblingsAndOfOtherScopesAndSteps() throws Exception {
+		final FakeMetricsContext<AllMetricsSnapshot> read = progressContext("step-keep", OpType.READ, 1_000, 4_096_000);
+		mgr.register(read);
+		invokeRecordProgressSnapshot(read, read.snapshot);
+		final FakeDistributedMetricsContext fleet = distributedProgressContext("step-keep", OpType.READ, 70, 71_680);
+		invokeRecordProgressSnapshot(fleet, fleet.snapshot);
+		final FakeMetricsContext<AllMetricsSnapshot> other = progressContext("step-other", OpType.READ, 8, 8_192);
+		invokeRecordProgressSnapshot(other, other.snapshot);
+
+		mgr.register(progressContext("step-keep", OpType.CREATE, 0, 0));
+
+		assertEquals(3, lastProgressEntries().size(), "only the step's unregistered entries of the scope go");
+		assertEquals(1_000L, mgr.getLastProgressSnapshot(read).orElseThrow().successCount);
+		assertEquals(70L, mgr.getLastProgressSnapshot("step-keep", true).orElseThrow().successCount);
+		assertEquals(8L, mgr.getLastProgressSnapshot("step-other").orElseThrow().successCount);
+	}
+
+	@Test
+	void unregisteringAContextWithoutProgressRetainsNoSiblingsEntryAsItsTerminalRow() throws Exception {
+		final FakeMetricsContext<AllMetricsSnapshot> read = progressContext("step-idle-sibling", OpType.READ, 1_000, 4_096_000);
+		final FakeMetricsContext<AllMetricsSnapshot> create = progressContext("step-idle-sibling", OpType.CREATE, 0, 0);
+		mgr.register(read);
+		mgr.register(create);
+		invokeRecordProgressSnapshot(read, read.snapshot);
+
+		mgr.unregister(create);
+
+		assertTrue(
+						mgr.getTerminalSteps().stream().noneMatch(e -> "step-idle-sibling".equals(e.stepId)),
+						"a context with no progress leaves no terminal row, least of all its sibling's");
+		assertEquals(1_000L, mgr.getLastProgressSnapshot(read).orElseThrow().successCount, "the sibling keeps its entry");
+	}
+
+	@Test
+	void stepLookupOfADistributedContextReturnsItsEntry() throws Exception {
+		final FakeDistributedMetricsContext fleet = distributedProgressContext("step-fleet", OpType.READ, 70, 71_680);
+		invokeRecordProgressSnapshot(fleet, fleet.snapshot);
+
+		assertEquals(70L, mgr.getLastProgressSnapshot("step-fleet", true).orElseThrow().successCount);
+		assertEquals(70L, mgr.getLastProgressSnapshot(fleet).orElseThrow().successCount);
+		assertTrue(mgr.getLastProgressSnapshot("step-fleet").isEmpty(), "the fleet entry is not a node entry");
+	}
+
+	@Test
+	void stepLookupOfTwoDistributedContextsOfAStepReturnsNoEntry() throws Exception {
+		final FakeDistributedMetricsContext read = distributedProgressContext("step-fleets", OpType.READ, 70, 71_680);
+		final FakeDistributedMetricsContext create = distributedProgressContext("step-fleets", OpType.CREATE, 6, 6_144);
+		invokeRecordProgressSnapshot(read, read.snapshot);
+		invokeRecordProgressSnapshot(create, create.snapshot);
+
+		assertTrue(mgr.getLastProgressSnapshot("step-fleets", true).isEmpty(), "no single fleet entry stands for the step");
+		assertEquals(70L, mgr.getLastProgressSnapshot(read).orElseThrow().successCount);
+		assertEquals(6L, mgr.getLastProgressSnapshot(create).orElseThrow().successCount);
+	}
+
+	@Test
+	void stepLookupOfANodeAndAFleetContextOfAStepReturnsEachScopesEntry() throws Exception {
+		final FakeMetricsContext<AllMetricsSnapshot> node = progressContext("step-scopes", OpType.READ, 35, 35_840);
+		final FakeDistributedMetricsContext fleet = distributedProgressContext("step-scopes", OpType.READ, 70, 71_680);
+		invokeRecordProgressSnapshot(node, node.snapshot);
+		invokeRecordProgressSnapshot(fleet, fleet.snapshot);
+
+		assertEquals(35L, mgr.getLastProgressSnapshot("step-scopes").orElseThrow().successCount);
+		assertEquals(35L, mgr.getLastProgressSnapshot("step-scopes", false).orElseThrow().successCount);
+		assertEquals(70L, mgr.getLastProgressSnapshot("step-scopes", true).orElseThrow().successCount);
+		assertEquals(35L, mgr.getLastProgressSnapshot(node).orElseThrow().successCount);
+		assertEquals(70L, mgr.getLastProgressSnapshot(fleet).orElseThrow().successCount);
+	}
+
+	private static FakeDistributedMetricsContext distributedProgressContext(
+					final String stepId, final OpType opType, final long successCount, final long bytes) {
+		final FakeDistributedMetricsContext ctx = new FakeDistributedMetricsContext(stepId);
+		ctx.opType = opType;
+		ctx.snapshot = new DistributedCountingSnapshot(successCount, bytes);
+		return ctx;
+	}
+
+	/** A fleet snapshot with counts, as a distributed context publishes. */
+	private static final class DistributedCountingSnapshot extends CountingSnapshot implements DistributedAllMetricsSnapshot {
+		DistributedCountingSnapshot(final long successCount, final long bytes) {
+			super(successCount, 0, bytes, 100.0, 110.0, new FakeConcurrencySnapshot(1), 2_000L);
+		}
+
+		@Override
+		public int nodeCount() {
+			return 1;
+		}
+	}
+
+	private static void awaitQuietly(final java.util.concurrent.CountDownLatch latch) {
+		boolean interrupted = false;
+		try {
+			while (true) {
+				try {
+					if (latch.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+						return;
+					}
+					throw new IllegalStateException("never released");
+				} catch (final InterruptedException e) {
+					interrupted = true;
+				}
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	/** Waits for the sweep in progress to release the output lock. */
+	private void awaitSweep() throws Exception {
+		final java.lang.reflect.Field lockField = MetricsManagerImpl.class.getDeclaredField("outputLock");
+		lockField.setAccessible(true);
+		final java.util.concurrent.locks.ReentrantLock lock = (java.util.concurrent.locks.ReentrantLock) lockField.get(mgr);
+		assertTrue(lock.tryLock(10, java.util.concurrent.TimeUnit.SECONDS), "the sweep finished");
+		lock.unlock();
+	}
+
 	private static FakeMetricsContext<AllMetricsSnapshot> progressContext(
 					final String stepId, final OpType opType, final long successCount, final long bytes) {
 		FakeMetricsContext<AllMetricsSnapshot> ctx = new OrderedFakeMetricsContext(stepId);
@@ -1010,7 +1214,7 @@ public class MetricsManagerImplTest {
 
 	@SuppressWarnings("unchecked")
 	private Collection<TerminalStepEntry> lastProgressEntries() throws Exception {
-		java.lang.reflect.Field lastProgressField = MetricsManagerImpl.class.getDeclaredField("lastProgressByStepId");
+		java.lang.reflect.Field lastProgressField = MetricsManagerImpl.class.getDeclaredField("lastProgressByContext");
 		lastProgressField.setAccessible(true);
 		Map<?, TerminalStepEntry> map = (Map<?, TerminalStepEntry>) lastProgressField.get(mgr);
 		return new ArrayList<>(map.values());

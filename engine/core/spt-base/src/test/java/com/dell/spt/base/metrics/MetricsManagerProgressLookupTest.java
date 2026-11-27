@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,6 +34,33 @@ class MetricsManagerProgressLookupTest {
 		assertTrue(mgr.getLastProgressSnapshot(fleet).isEmpty());
 		verify(mgr).getLastProgressSnapshot("legacy-step", true);
 		assertTrue(mgr.getLastProgressSnapshot((MetricsContext<?>) null).isEmpty());
+	}
+
+	@Test
+	void contextLookupOfANodeContextFallsBackToTheOneArgumentStepLookup() {
+		final MetricsManager mgr = mock(MetricsManager.class, CALLS_REAL_METHODS);
+		final TerminalStepEntry entry = entry("node-step", OpType.READ);
+		// A manager written against the one-argument lookup alone; the two-argument one keeps its default.
+		doReturn(Optional.of(entry)).when(mgr).getLastProgressSnapshot("node-step");
+
+		final MetricsContext<?> read = context(mock(MetricsContext.class), "node-step", OpType.READ);
+
+		assertEquals(entry, mgr.getLastProgressSnapshot(read).orElseThrow());
+		verify(mgr).getLastProgressSnapshot("node-step");
+	}
+
+	@Test
+	void contextLookupOfADistributedContextFallsBackToTheFleetStepLookup() {
+		final MetricsManager mgr = mock(MetricsManager.class, CALLS_REAL_METHODS);
+		final TerminalStepEntry entry = entry("fleet-step", OpType.READ);
+		doReturn(Optional.of(entry)).when(mgr).getLastProgressSnapshot("fleet-step", true);
+		doReturn(Optional.of(entry("fleet-step", OpType.READ))).when(mgr).getLastProgressSnapshot("fleet-step");
+
+		final MetricsContext<?> fleet = context(mock(DistributedMetricsContext.class), "fleet-step", OpType.READ);
+
+		assertEquals(entry, mgr.getLastProgressSnapshot(fleet).orElseThrow(), "the fleet entry, not the node one");
+		verify(mgr).getLastProgressSnapshot("fleet-step", true);
+		verify(mgr, never()).getLastProgressSnapshot("fleet-step");
 	}
 
 	private static MetricsContext<?> context(final MetricsContext<?> ctx, final String stepId, final OpType opType) {
