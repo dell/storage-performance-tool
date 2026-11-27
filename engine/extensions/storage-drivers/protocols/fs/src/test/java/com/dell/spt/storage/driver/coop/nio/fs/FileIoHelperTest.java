@@ -613,6 +613,12 @@ public class FileIoHelperTest {
 		assertDoneInOneCallWritingNothing(1024, "500-499");
 	}
 
+	@Test
+	@Timeout(10)
+	public void aOneByteClosedRangeIsNotReversed() throws Exception {
+		assertFixedRangesUpdate(0, 1024, 1024, 1, "2000-", "100-100");
+	}
+
 	/**
 	 * Updates a 1 KiB item until the helper throws {@link IllegalArgumentException}, and checks the file length, the
 	 * kept recorded size and the bytes counted before the reversed range.
