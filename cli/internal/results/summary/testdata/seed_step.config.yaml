@@ -1,0 +1,23 @@
+# Trimmed from a fetched seed step config.yaml (spt run mixed, get 50 / stat 50,
+# load.op.limit.fail.count=20); only the keys around the limits are kept.
+output:
+  metrics:
+    summary:
+      persist: false
+load:
+  op:
+    type: "create"
+    limit:
+      count: 2500
+      recycle: 1000000
+      fail:
+        count: 20
+        rate: false
+      rate: 0.0
+    recycle:
+      mode: false
+  step:
+    limit:
+      size: 0
+      time: 0
+    id: "mt-001-20261126.134018.814-seed"
