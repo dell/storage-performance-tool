@@ -189,7 +189,7 @@ The launcher scripts start the `java` on `PATH` with `spt.jar`, which loads the 
 
 #### Launcher JVM options
 
-`run.sh` and `run.bat` pass the default JVM options of the SPT image: ZGC, `-Xms1g -Xmx4g`, `-XX:MaxDirectMemorySize=64g`, `-XX:+AlwaysPreTouch`, `-XX:+UseNUMA`, `-Xshare:off`, `-XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions` and the RMI response and handshake timeouts `-Dsun.rmi.transport.tcp.responseTimeout=10000 -Dsun.rmi.transport.tcp.handshakeTimeout=10000`. They differ from the image in two options:
+`run.sh` and `run.bat` pass the default JVM options of the SPT image: ZGC, `-Xms1g -Xmx4g`, `-XX:MaxDirectMemorySize=64g`, `-XX:+AlwaysPreTouch`, `-XX:+UseNUMA`, `-Xshare:off` and the RMI response and handshake timeouts `-Dsun.rmi.transport.tcp.responseTimeout=10000 -Dsun.rmi.transport.tcp.handshakeTimeout=10000`. They differ from the image in two options:
 
 - `-XX:+UseCompactObjectHeaders`: the image passes it, on Java 25. The launchers leave it out, because Java 21 refuses it.
 - `-XX:UseAVX=2`: the option exists only on x86 JVMs, and an arm64 JVM refuses it and doesn't start. The image passes it on `x86_64`, and the launchers when the `java` they run accepts it. They ask that `java` once at start, without `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` and `_JAVA_OPTIONS`.

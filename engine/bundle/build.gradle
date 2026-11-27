@@ -226,8 +226,6 @@ task createRunScript {
 # - UseNUMA: NUMA-aware allocation for multi-socket servers
 # - Xshare:off: disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
 # - UseAVX=2 (x86 JVMs only): avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
-# - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
-#   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
 # - sun.rmi.transport.tcp.responseTimeout: bounds how long the entry node's socket read
 #   waits for a reply to a distributed-coordination RMI call. Defaults to 0 (wait forever)
 #   in the JDK; without this, a transient network stall on the RMI connection hangs the

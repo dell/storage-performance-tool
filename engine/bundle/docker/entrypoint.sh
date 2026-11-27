@@ -24,8 +24,6 @@ set -eu
 # - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes. The option
 #   exists only on x86 JVMs, and an arm64 JVM refuses it and doesn't start, so it comes
 #   from X86_JAVA_OPTS, which is empty on other architectures
-# - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
-#   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
 # - UseCompactObjectHeaders (JEP 519): 64-bit object headers instead of 128-bit;
 #   reduces heap footprint and GC pressure for high-rate short-lived objects
 # - sun.rmi.transport.tcp.responseTimeout: bounds how long the entry node's socket read
@@ -49,7 +47,7 @@ X86_JAVA_OPTS=""
 case "$(uname -m)" in
 	x86_64) X86_JAVA_OPTS="-XX:UseAVX=2" ;;
 esac
-DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off ${X86_JAVA_OPTS} -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000 -Dsun.rmi.transport.tcp.handshakeTimeout=10000"
+DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off ${X86_JAVA_OPTS} -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000 -Dsun.rmi.transport.tcp.handshakeTimeout=10000"
 
 # Append any user-provided JAVA_OPTS (like RMI hostname) to the defaults.
 # If a user provides conflicting flags (like -Xmx8g), Java will use the last one specified.
