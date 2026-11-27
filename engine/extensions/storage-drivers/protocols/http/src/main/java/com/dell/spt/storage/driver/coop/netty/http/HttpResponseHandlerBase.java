@@ -20,6 +20,7 @@ import com.dell.spt.base.logging.Loggers;
 
 import com.dell.spt.storage.driver.coop.netty.ResponseHandlerBase;
 import static com.dell.spt.storage.driver.coop.netty.data.ResponseContentUtil.verifyChunk;
+import static com.dell.spt.storage.driver.coop.netty.data.ResponseContentUtil.verifyFinish;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
@@ -42,8 +43,19 @@ Created by kurila on 05.09.16.
 public abstract class HttpResponseHandlerBase<I extends Item, O extends Operation<I>>
 				extends ResponseHandlerBase<HttpObject, I, O> {
 
+	private final HttpStorageDriverBase<I, O> httpDriver;
+	/**
+	 * Whether a READ's body size is checked when its response ends: with verification on, unless the
+	 * driver reads metadata only (HEAD), whose responses carry no body. One final flag, so with
+	 * verification off the end of every response costs one predictable branch.
+	 */
+	private final boolean verifyReadSize;
+
 	protected HttpResponseHandlerBase(final HttpStorageDriverBase<I, O> driver, final boolean verifyFlag) {
 		super(driver, verifyFlag);
+		this.httpDriver = driver;
+		// some handler tests build a handler without a driver
+		this.verifyReadSize = verifyFlag && !(driver != null && driver.readMetadataOnly);
 	}
 
 	protected boolean handleResponseStatus(
@@ -146,7 +158,23 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 	}
 
 	protected void handleResponseContentFinish(final Channel channel, final O op) {
+		if (verifyReadSize) {
+			verifyReadSize(op);
+		}
 		driver.complete(channel, op);
+	}
+
+	/**
+	 * Fails a verified READ whose body ended short of, or past, the size it asked for. A refused or
+	 * already failed READ keeps its status, and a body the driver receives outside HTTP is checked by
+	 * that driver's transport.
+	 */
+	private void verifyReadSize(final O op) {
+		// No null check on the driver: complete() runs on it next, so a response cannot end without one.
+		if (op instanceof DataOperation<?> dataOp && OpType.READ.equals(op.type()) && SUCC.equals(op.status())
+						&& !httpDriver.observesReadBodyOutOfBand(op)) {
+			verifyFinish(dataOp);
+		}
 	}
 
 	@Override
