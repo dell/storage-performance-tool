@@ -201,7 +201,8 @@ public abstract class ResponseContentUtil {
 			if (!markedRangesMaskPair[0].get(currRangeIdx) && !markedRangesMaskPair[1].get(currRangeIdx)) {
 				if (-1 == markedRangesMaskPair[0].nextSetBit(currRangeIdx)
 								&& -1 == markedRangesMaskPair[1].nextSetBit(currRangeIdx)) {
-					// no range is left, but the chunk is not
+					// No range is left, but the chunk is not. Defensive: from a consistent state the entry
+					// check above fails such a chunk first; without this the loop would run past the masks.
 					throw new DataSizeException(
 									dataOp.markedRangesSize(), dataOp.markedRangesSize() + chunkSize - chunkOffset);
 				}
