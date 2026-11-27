@@ -329,7 +329,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/**
 	 * Check if the concurrency throttle has available permits. Used by OperationDispatchTask to
-	 * double-check before entering backpressure await. A driver with transport capacity beyond
+	 * double-check before entering backpressure await, and before waiting while uploads wait for
+	 * a multipart slot. A driver with transport capacity beyond
 	 * the throttle overrides it, so that the task parks instead of spinning while that capacity
 	 * is exhausted; whatever frees it must then call {@link #signalDispatchCapacityAvailable()}.
 	 */

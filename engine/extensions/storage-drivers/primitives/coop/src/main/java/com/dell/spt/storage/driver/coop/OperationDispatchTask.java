@@ -137,7 +137,9 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	 * Returns at once when a producer called {@link #unpark()} since the last wait; otherwise parks
 	 * the dispatch thread until one does. Callers re-check their wait condition before calling this,
 	 * and the loop re-checks it after: a signal for state the task already saw, or a spurious
-	 * return from the park, only costs one more iteration. Mirrors {@code Condition.await()} by
+	 * return from the park, only costs one more iteration, or two when the signal arrived while
+	 * the task was running (its unpark leaves the thread's park permit set, so the next park
+	 * after the flag's own return also returns at once). Mirrors {@code Condition.await()} by
 	 * throwing when interrupted so {@link #stop()} still terminates the work loop promptly.
 	 */
 	private void awaitDispatchSignal() throws InterruptedException {
