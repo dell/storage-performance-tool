@@ -11,7 +11,6 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.storage.driver.coop.netty.NettyStorageDriverBase;
-import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.math.Random;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
@@ -73,14 +72,10 @@ public final class NettyStorageDriverMock<I extends Item, O extends Operation<I>
 				}
 			} else if (OpType.UPDATE.equals(opType)) {
 				final I item = op.item();
-				if (item instanceof DataItem dataItem) {
+				if (item instanceof DataItem) {
 					final DataOperation dataOp = (DataOperation) op;
-
-					final List<Range> fixedRanges = dataOp.fixedRanges();
-					if (fixedRanges == null || fixedRanges.isEmpty()) {
-						dataItem.commitUpdatedRanges(dataOp.markedRangesMaskPair());
-					}
-					// Fixed byte ranges: complete() grows the item by its appends on success.
+					// complete() records the UPDATE in the item on success, once: it commits the
+					// random ranges, or grows the item by the fixed ranges' appends.
 					dataOp.countBytesDone(dataOp.markedRangesSize());
 				}
 			}
