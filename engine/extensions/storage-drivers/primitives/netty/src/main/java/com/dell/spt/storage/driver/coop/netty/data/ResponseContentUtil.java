@@ -55,13 +55,9 @@ public abstract class ResponseContentUtil {
 			final var dataItem = (DataItem) dataOp.item();
 			dataOp.countBytesDone(e.getOffset());
 			dataOp.status(Operation.Status.RESP_FAIL_CORRUPT);
-			if (e instanceof DataSizeException) {
-				try {
-					Loggers.MSG.debug(
-									"{}: invalid size, expected: {}, actual: {} ", dataItem.name(), dataItem.size(), e.getOffset());
-				} catch (final IOException ignored) {
-					// Diagnostic size lookup must not replace the recorded corruption outcome.
-				}
+			if (e instanceof DataSizeException ee) {
+				// for a ranged read the sizes are the requested ranges'
+				Loggers.MSG.debug("{}: invalid size, expected: {}, actual: {} ", dataItem.name(), ee.getExpected(), e.getOffset());
 			} else if (e instanceof DataCorruptionException ee) {
 				Loggers.MSG.debug(
 								"{}: content mismatch @ offset {}, expected: {}, actual: {} ", dataItem.name(), ee.getOffset(),
@@ -82,11 +78,10 @@ public abstract class ResponseContentUtil {
 		final List<Range> byteRanges = dataOp.fixedRanges();
 		final DataItem item = dataOp.item();
 		final long actual = dataOp.countBytesDone();
+		final boolean ranged = (byteRanges != null && !byteRanges.isEmpty()) || dataOp.hasMarkedRanges();
 		final long expected;
 		try {
-			expected = (byteRanges != null && !byteRanges.isEmpty()) || dataOp.hasMarkedRanges()
-							? dataOp.markedRangesSize()
-							: item.size();
+			expected = ranged ? dataOp.markedRangesSize() : item.size();
 		} catch (final IOException e) {
 			// A body whose expected size is unknown is not verified.
 			dataOp.status(Operation.Status.RESP_FAIL_CORRUPT);
@@ -95,7 +90,13 @@ public abstract class ResponseContentUtil {
 		}
 		if (actual != expected) {
 			dataOp.status(Operation.Status.RESP_FAIL_CORRUPT);
-			Loggers.MSG.debug("{}: invalid size, expected: {}, actual: {} ", item.name(), expected, actual);
+			if (ranged) {
+				// a ranged read counts the bytes of the range it is in until the last range ends
+				Loggers.MSG.debug("{}: invalid size, expected: {} bytes of ranges, actual: the body ended {} bytes into "
+								+ "range index {}", item.name(), expected, actual, dataOp.currRangeIdx());
+			} else {
+				Loggers.MSG.debug("{}: invalid size, expected: {}, actual: {} ", item.name(), expected, actual);
+			}
 		}
 	}
 
@@ -161,7 +162,10 @@ public abstract class ResponseContentUtil {
 			if (rangeBytesDone == rangeSize) {
 				// current byte range verification is finished
 				if (currRangeIdx == byteRanges.size() - 1) {
-					// current byte range was last in the list
+					// current byte range was last in the list: no byte may follow it
+					if (chunkOffset < chunkSize) {
+						throw new DataSizeException(rangesSizeSum, rangesSizeSum + chunkSize - chunkOffset);
+					}
 					dataOp.countBytesDone(rangesSizeSum);
 					break;
 				} else {
@@ -194,8 +198,9 @@ public abstract class ResponseContentUtil {
 			if (!markedRangesMaskPair[0].get(currRangeIdx) && !markedRangesMaskPair[1].get(currRangeIdx)) {
 				if (-1 == markedRangesMaskPair[0].nextSetBit(currRangeIdx)
 								&& -1 == markedRangesMaskPair[1].nextSetBit(currRangeIdx)) {
-					dataOp.countBytesDone(dataOp.markedRangesSize());
-					return;
+					// no range is left, but the chunk is not
+					throw new DataSizeException(
+									dataOp.markedRangesSize(), dataOp.markedRangesSize() + chunkSize - chunkOffset);
 				}
 				dataOp.currRangeIdx(currRangeIdx + 1);
 				continue;
@@ -213,7 +218,11 @@ public abstract class ResponseContentUtil {
 				// current byte range verification is finished
 				if (-1 == markedRangesMaskPair[0].nextSetBit(currRangeIdx + 1)
 								&& -1 == markedRangesMaskPair[1].nextSetBit(currRangeIdx + 1)) {
-					// current byte range was last in the list
+					// current byte range was last in the list: no byte may follow it
+					if (chunkOffset < chunkSize) {
+						throw new DataSizeException(
+										dataOp.markedRangesSize(), dataOp.markedRangesSize() + chunkSize - chunkOffset);
+					}
 					dataOp.countBytesDone(dataOp.markedRangesSize());
 					return;
 				} else {

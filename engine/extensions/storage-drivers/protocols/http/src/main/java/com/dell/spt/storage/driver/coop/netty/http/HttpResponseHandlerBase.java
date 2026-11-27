@@ -170,8 +170,9 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 	 * that driver's transport.
 	 */
 	private void verifyReadSize(final O op) {
+		// No null check on the driver: complete() runs on it next, so a response cannot end without one.
 		if (op instanceof DataOperation<?> dataOp && OpType.READ.equals(op.type()) && SUCC.equals(op.status())
-						&& (httpDriver == null || !httpDriver.observesReadBodyOutOfBand(op))) {
+						&& !httpDriver.observesReadBodyOutOfBand(op)) {
 			verifyFinish(dataOp);
 		}
 	}

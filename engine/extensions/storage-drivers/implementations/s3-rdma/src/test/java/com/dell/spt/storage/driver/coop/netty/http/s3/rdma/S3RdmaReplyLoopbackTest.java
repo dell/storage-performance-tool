@@ -127,6 +127,8 @@ final class S3RdmaReplyLoopbackTest {
 	private static final byte SERVER_GET_FILL = 0x5a;
 	/** Extra headers on object responses, such as integrity metadata. */
 	private volatile Map<String, String> objectResponseHeaders = Map.of();
+	/** When set, the object response's body as bytes, in place of the reply's text body. */
+	private volatile byte[] objectBodyBytes;
 	private final List<Integer> serverReadSizes = new CopyOnWriteArrayList<>();
 
 	/**
@@ -361,6 +363,14 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	/*
+	 * With item.data.verify on, a GET whose reply the driver does not accept as an RDMA transfer is
+	 * an HTTP read, and its HTTP body's size is checked when the response ends, before the driver
+	 * classifies the reply. An empty or short body then fails there as corrupt, so the reply is
+	 * counted as rdmaHttpError and its once-per-step warning is not logged. With verification off,
+	 * or with a full valid body, the reply is classified as before.
+	 */
+
 	/** A declined GET is served over HTTP, so its HTTP body is checked like any HTTP read's. */
 	@Test
 	void aVerifiedDeclinedGetWithAnEmptyHttpBodyIsCorrupt() throws Exception {
@@ -370,7 +380,96 @@ final class S3RdmaReplyLoopbackTest {
 
 			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
 			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaHttpError.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedServedOverHttp.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedFailed.sum());
 		}
+	}
+
+	/** Without verification this GET fails as declined (RESP_FAIL_SVC, rdmaDeclinedFailed). */
+	@Test
+	void aVerifiedDeclinedGetWithAnEmptyHttpBodyAndNoFallbackIsCorrupt() throws Exception {
+		reply = new Reply(200, "501", null, null, false);
+		try (final var driver = newVerifyingDriver(false)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaHttpError.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedFailed.sum());
+		}
+	}
+
+	/** Without verification this GET is a protocol error (RESP_FAIL_CORRUPT, rdmaProtocolError). */
+	@Test
+	void aVerifiedGetWithAMalformedReplyAndAnEmptyHttpBodyIsCorrupt() throws Exception {
+		assertVerifiedEmptyBodyIsAnHttpError("abc");
+	}
+
+	/** Without verification this GET is a protocol error (RESP_FAIL_CORRUPT, rdmaProtocolError). */
+	@Test
+	void aVerifiedGetWithAnUnexpectedReplyAndAnEmptyHttpBodyIsCorrupt() throws Exception {
+		assertVerifiedEmptyBodyIsAnHttpError("500");
+	}
+
+	private void assertVerifiedEmptyBodyIsAnHttpError(final String rdmaReply) throws Exception {
+		reply = new Reply(200, rdmaReply, null, null, false);
+		try (final var driver = newVerifyingDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaHttpError.sum());
+			assertEquals(0, driver.pathStats().rdmaProtocolError.sum());
+		}
+	}
+
+	@Test
+	void aVerifiedDeclinedGetWithTheObjectOverHttpSucceedsWithFallback() throws Exception {
+		reply = new Reply(200, "501", null, null, false);
+		final Operation<DataItem> read = verifiableReadOp();
+		objectBodyBytes = objectBytes(read);
+		try (final var driver = newVerifyingDriver(true)) {
+			final var result = execute(driver, read);
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaDeclinedServedOverHttp.sum());
+			assertEquals(0, driver.pathStats().rdmaHttpError.sum());
+		}
+	}
+
+	@Test
+	void aVerifiedDeclinedGetWithTheObjectOverHttpFailsAsDeclinedWithoutFallback() throws Exception {
+		reply = new Reply(200, "501", null, null, false);
+		final Operation<DataItem> read = verifiableReadOp();
+		objectBodyBytes = objectBytes(read);
+		try (final var driver = newVerifyingDriver(false)) {
+			final var result = execute(driver, read);
+
+			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaDeclinedFailed.sum());
+			assertEquals(0, driver.pathStats().rdmaHttpError.sum());
+		}
+	}
+
+	/** A READ whose item holds the driver's data, so a verified body can match it. */
+	private static Operation<DataItem> verifiableReadOp() throws Exception {
+		final Operation<DataItem> read = op(OpType.READ, SIZE);
+		read.item().dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true));
+		return read;
+	}
+
+	/** The bytes {@code read}'s item holds: the body a verified read of it expects. */
+	private static byte[] objectBytes(final Operation<DataItem> read) throws Exception {
+		final var item = new DataItemImpl(read.item().name(), 0, SIZE);
+		item.dataInput(read.item().dataInput());
+		final ByteBuffer bb = ByteBuffer.allocate(SIZE);
+		while (bb.hasRemaining()) {
+			item.read(bb);
+		}
+		return bb.array();
 	}
 
 	@Test
@@ -2018,7 +2117,8 @@ final class S3RdmaReplyLoopbackTest {
 			exchange.getResponseHeaders().set(
 							RdmaReplyContract.BYTES_TRANSFERRED_HEADER, current.bytesTransferred());
 		}
-		final byte[] body = current.body() == null ? null : current.body().getBytes(StandardCharsets.UTF_8);
+		final byte[] body = objectBodyBytes != null ? objectBodyBytes
+						: current.body() == null ? null : current.body().getBytes(StandardCharsets.UTF_8);
 		// A zero length makes the JDK server use chunked transfer encoding (no Content-Length).
 		exchange.sendResponseHeaders(current.httpStatus(), body == null ? -1 : chunkedReplies ? 0 : body.length);
 		if (body != null) {

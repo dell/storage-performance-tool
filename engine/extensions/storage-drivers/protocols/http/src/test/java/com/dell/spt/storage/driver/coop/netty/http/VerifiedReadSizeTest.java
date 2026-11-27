@@ -9,6 +9,8 @@ import static org.mockito.Mockito.when;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.PathItemImpl;
+import com.dell.spt.base.item.TokenItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
@@ -16,12 +18,15 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+import com.dell.spt.base.item.op.path.PathOperationImpl;
+import com.dell.spt.base.item.op.token.TokenOperationImpl;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.system.SizeInBytes;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
@@ -33,11 +38,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 
@@ -93,6 +100,20 @@ class VerifiedReadSizeTest {
 		assertEquals(new Outcome(Operation.Status.SUCC, SIZE), read(true, readOp(item), bytes(item, 0, SIZE), chunks));
 	}
 
+	/** A response Netty aggregates into one message: status line, body and end at once. */
+	@Test
+	void aFullResponseWithAShortBodyIsCorrupt() throws Exception {
+		final var item = item(SIZE);
+		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, SIZE - SHORT_BY),
+						readFull(readOp(item), bytes(item, 0, SIZE - SHORT_BY)));
+	}
+
+	@Test
+	void aFullResponseOfExactlyTheItemSucceeds() throws Exception {
+		final var item = item(SIZE);
+		assertEquals(new Outcome(Operation.Status.SUCC, SIZE), readFull(readOp(item), bytes(item, 0, SIZE)));
+	}
+
 	@Test
 	void anUnverifiedReadEndingShortStillSucceeds() throws Exception {
 		final var item = item(SIZE);
@@ -129,6 +150,21 @@ class VerifiedReadSizeTest {
 		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, read(true, op, bytes(item, 512, 256), 1).status());
 	}
 
+	/** {@code 900-}: from offset 900 to the item's end. */
+	@Test
+	void anOpenEndedRangeReadEndingShortIsCorrupt() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, List.of(new Range(900, -1, -1)), 0);
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, read(true, op, bytes(item, 900, 100), 1).status());
+	}
+
+	@Test
+	void anOpenEndedRangeReadOfExactlyTheRangeSucceeds() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, List.of(new Range(900, -1, -1)), 0);
+		assertEquals(new Outcome(Operation.Status.SUCC, 124), read(true, op, bytes(item, 900, 124), 2));
+	}
+
 	/** Cut at a range boundary the count is the next range's, 0, so this is the shape most easily missed. */
 	@Test
 	void aMultiRangeReadCutAtARangeBoundaryIsCorrupt() throws Exception {
@@ -147,12 +183,47 @@ class VerifiedReadSizeTest {
 		assertEquals(new Outcome(Operation.Status.SUCC, 200), read(true, op, body.toByteArray(), 2));
 	}
 
+	/**
+	 * Bytes past the last range, in the chunk that ends it: the chunk's size is within the ranges'
+	 * size counted from the current range's start, so only the end of the last range can see them.
+	 */
+	@Test
+	void aMultiRangeReadWithBytesPastItsLastRangeInTheSameChunkIsCorrupt() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, List.of(new Range(0, 99, -1), new Range(200, 299, -1)), 0);
+		final var lastChunk = new ByteArrayOutputStream();
+		lastChunk.write(bytes(item, 200, 100));
+		lastChunk.write(bytes(item, 300, 50));
+		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, 250),
+						readChunks(op, bytes(item, 0, 100), lastChunk.toByteArray()));
+	}
+
+	@Test
+	void aMultiRangeReadWithBytesPastItsLastRangeInTheirOwnChunkIsCorrupt() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, List.of(new Range(0, 99, -1), new Range(200, 299, -1)), 0);
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT,
+						readChunks(op, bytes(item, 0, 100), bytes(item, 200, 100), bytes(item, 300, 50)).status());
+	}
+
+	@Test
+	void aRandomRangeReadWithBytesPastItsLastRangeInTheSameChunkIsCorrupt() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, null, 3);
+		final byte[] body = markedRangesBody(item, op);
+		final int lastRangeSize = (int) item.rangeSize(op.markedRangesMaskPair()[0].length() - 1);
+		final byte[] firstRanges = Arrays.copyOf(body, body.length - lastRangeSize);
+		final byte[] lastRangeAndOneMore = Arrays.copyOfRange(body, body.length - lastRangeSize, body.length + 1);
+		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, body.length + 1),
+						readChunks(op, firstRanges, lastRangeAndOneMore));
+	}
+
 	@Test
 	void aRandomRangeReadEndingShortIsCorrupt() throws Exception {
 		final var item = item(SIZE);
 		final var op = readOp(item, null, 3);
 		final byte[] body = markedRangesBody(item, op);
-		final byte[] cut = java.util.Arrays.copyOf(body, body.length / 2);
+		final byte[] cut = Arrays.copyOf(body, body.length / 2);
 		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, read(true, op, cut, 1).status());
 	}
 
@@ -229,7 +300,11 @@ class VerifiedReadSizeTest {
 		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, 0), read(true, op, new byte[0], 0));
 	}
 
-	/** Some handler tests build a handler without a driver. */
+	/**
+	 * Some handler tests build a handler without a driver. Only its construction and chunks are
+	 * reachable: the end of a response calls {@code complete()} on the driver, so the size check
+	 * needs no null check of its own.
+	 */
 	@Test
 	void aVerifyingHandlerWithoutADriverCanBeBuiltAndCountsChunks() throws Exception {
 		final var item = item(SIZE);
@@ -253,7 +328,7 @@ class VerifiedReadSizeTest {
 		final byte[] partBody = bytes(item, 512, 512);
 
 		assertEquals(Operation.Status.RESP_FAIL_CORRUPT,
-						read(true, part, java.util.Arrays.copyOf(partBody, 256), 1).status());
+						read(true, part, Arrays.copyOf(partBody, 256), 1).status());
 
 		// what CoopStorageDriverBase does before a part retry
 		part.status(Operation.Status.PENDING);
@@ -270,6 +345,53 @@ class VerifiedReadSizeTest {
 						0, OpType.READ, item, null, "/bucket/", Credential.NONE, null, 0, 512);
 		final PartialDataOperation<DataItem> part = parent.subOperations().get(0);
 		assertEquals(new Outcome(Operation.Status.SUCC, 512), read(true, part, bytes(item, 0, 512), 1));
+	}
+
+	/** A part of an updated item is verified against its parent's cells; cell 3 is in part 0. */
+	@Test
+	void aSplitReadPartOfAnUpdatedItemEndingShortIsCorrupt() throws Exception {
+		final var item = updatedItem(SIZE);
+		final var parent = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.READ, item, null, "/bucket/", Credential.NONE, null, 0, 512);
+		final PartialDataOperation<DataItem> part = parent.subOperations().get(0);
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, read(true, part, bytes(item, 0, 256), 1).status());
+	}
+
+	@Test
+	void aSplitReadPartOfAnUpdatedItemOfExactlyThePartSucceeds() throws Exception {
+		final var item = updatedItem(SIZE);
+		final var parent = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.READ, item, null, "/bucket/", Credential.NONE, null, 0, 512);
+		final PartialDataOperation<DataItem> part = parent.subOperations().get(0);
+		assertEquals(new Outcome(Operation.Status.SUCC, 512), read(true, part, bytes(item, 0, 512), 2));
+	}
+
+	// ---------- operations the check leaves alone ----------
+
+	/** Only a READ's body is item data: a write's or a delete's response body is not counted or checked. */
+	@ParameterizedTest
+	@EnumSource(value = OpType.class, names = {"CREATE", "UPDATE", "DELETE"})
+	void aVerifiedNonReadDataOperationWithAnEmptyBodySucceeds(final OpType type) throws Exception {
+		final var item = item(SIZE);
+		final var op = new DataOperationImpl<DataItem>(0, type, item, null, "/bucket/", Credential.NONE, null, 0);
+		assertEquals(new Outcome(Operation.Status.SUCC, 0), read(true, op, new byte[0], 0));
+	}
+
+	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	void aVerifiedPathReadIsNotFailedByTheCheck() throws Exception {
+		final var empty = new PathOperationImpl<>(0, OpType.READ, new PathItemImpl("/bucket/dir"), Credential.NONE);
+		assertEquals(Operation.Status.SUCC, readAny(empty, new byte[0]));
+		final var listing = new PathOperationImpl<>(0, OpType.READ, new PathItemImpl("/bucket/dir"), Credential.NONE);
+		assertEquals(Operation.Status.SUCC, readAny(listing, new byte[]{1, 2, 3}));
+		assertEquals(3, listing.countBytesDone());
+	}
+
+	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	void aVerifiedTokenReadIsNotFailedByTheCheck() throws Exception {
+		final var op = new TokenOperationImpl<>(0, OpType.READ, new TokenItemImpl("token"), Credential.NONE);
+		assertEquals(Operation.Status.SUCC, readAny(op, new byte[0]));
 	}
 
 	// ---------- helpers ----------
@@ -347,6 +469,51 @@ class VerifiedReadSizeTest {
 	private Outcome read(final boolean verify, final DataOperation<DataItem> op, final byte[] body, final int chunks)
 					throws Exception {
 		return read(verify, op, HttpResponseStatus.OK, body, chunks);
+	}
+
+	/** Answers a verified {@code op} with 200 and the given chunks, one message each. */
+	private Outcome readChunks(final DataOperation<DataItem> op, final byte[]... chunks) throws Exception {
+		op.startRequest();
+		op.finishRequest();
+		final var handler = handler(driver, true);
+		final Channel channel = mock(Channel.class);
+		handler.handle(channel, op, new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+		for (final byte[] chunk : chunks) {
+			handler.handle(channel, op, new DefaultHttpContent(Unpooled.wrappedBuffer(chunk)));
+		}
+		handler.handle(channel, op, LastHttpContent.EMPTY_LAST_CONTENT);
+		verify(driver).complete(channel, op);
+		return new Outcome(op.status(), op.countBytesDone());
+	}
+
+	/** Answers a verified {@code op} with one {@code FullHttpResponse}: 200 and {@code body}. */
+	private Outcome readFull(final DataOperation<DataItem> op, final byte[] body) throws Exception {
+		op.startRequest();
+		op.finishRequest();
+		final var handler = handler(driver, true);
+		final Channel channel = mock(Channel.class);
+		handler.handle(channel, op, new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(body)));
+		verify(driver).complete(channel, op);
+		return new Outcome(op.status(), op.countBytesDone());
+	}
+
+	/** Answers a verified operation of any kind with 200 and {@code body}; returns its status. */
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	private Operation.Status readAny(final Operation op, final byte[] body) throws Exception {
+		final HttpStorageDriverBase anyDriver = mock(HttpStorageDriverBase.class);
+		final HttpResponseHandlerBase handler = new HttpResponseHandlerBase(anyDriver, true) {
+			@Override
+			protected void handleResponseHeaders(final Channel channel, final Operation operation, final HttpHeaders headers) {}
+		};
+		final Channel channel = mock(Channel.class);
+		op.startRequest();
+		op.finishRequest();
+		handler.handle(channel, op, new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+		handler.handle(channel, op, new DefaultHttpContent(Unpooled.wrappedBuffer(body)));
+		handler.handle(channel, op, LastHttpContent.EMPTY_LAST_CONTENT);
+		verify(anyDriver).complete(channel, op);
+		return op.status();
 	}
 
 	/** Answers {@code op} through {@link HttpResponseHandlerBase#handle} with {@code body} in {@code chunks}. */
