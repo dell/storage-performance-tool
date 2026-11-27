@@ -193,7 +193,7 @@ func TestLoaderReadsStepLimitsFromConfig(t *testing.T) {
 	t.Run("fixture", func(t *testing.T) {
 		t.Parallel()
 		got := load(t, fixture).Limits
-		want := StepLimits{FailCount: 20, TimeSeconds: 12}
+		want := StepLimits{FailCount: 20, TimeSeconds: 12, OpType: "create"}
 		if got == nil || *got != want {
 			t.Fatalf("limits = %+v, want %+v", got, want)
 		}
@@ -204,7 +204,7 @@ func TestLoaderReadsStepLimitsFromConfig(t *testing.T) {
 			"count: 0\n", "count: 5000\n", "rate: false", "rate: true", `time: "12s"`, `time: "5m"`,
 		).Replace(string(fixture))
 		got := load(t, []byte(config)).Limits
-		want := StepLimits{FailCount: 20, FailRate: true, OpCount: 5000, TimeSeconds: 300}
+		want := StepLimits{FailCount: 20, FailRate: true, OpCount: 5000, TimeSeconds: 300, OpType: "create"}
 		if got == nil || *got != want {
 			t.Fatalf("limits = %+v, want %+v", got, want)
 		}
