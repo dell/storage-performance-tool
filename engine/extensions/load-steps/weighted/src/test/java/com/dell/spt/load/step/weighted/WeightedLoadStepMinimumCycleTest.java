@@ -1,5 +1,6 @@
 package com.dell.spt.load.step.weighted;
 
+import static com.dell.spt.load.step.weighted.WeightedLoadStepLocal.MIN_WEIGHT_CYCLE;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,6 +23,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -38,7 +40,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedConstruction;
 
-/** A weight cycle shorter than the minimum is lengthened, keeping the ratio, before the throttle. */
+/** The step gives its throttle the written weights and the minimum cycle, which the throttle applies. */
 @Timeout(120)
 class WeightedLoadStepMinimumCycleTest {
 
@@ -52,56 +54,23 @@ class WeightedLoadStepMinimumCycleTest {
 	}
 
 	@Test
-	void aShortCycleIsScaledByOneInteger() {
-		assertScaled(ints(1, 1), 50, 50);
-		assertScaled(ints(1, 4), 20, 80);
-		assertScaled(ints(1, 2), 34, 68);
-		assertScaled(ints(1, 1, 1), 34, 34, 34);
-		assertScaled(ints(0, 1), 0, 100);
-		assertScaled(ints(49, 50), 98, 100);
-		assertScaled(ints(99), 198);
+	void theStepGivesTheThrottleTheWrittenWeightsAndTheMinimum() throws Exception {
+		assertEquals(List.of(List.of(1, 4), MIN_WEIGHT_CYCLE), throttleArguments(1, 4));
+		assertEquals(List.of(List.of(30, 70), MIN_WEIGHT_CYCLE), throttleArguments(30, 70));
 	}
 
 	@Test
-	void aCycleAtTheMinimumIsUnchanged() {
-		assertUnchanged(20, 80);
-		assertUnchanged(50, 50);
-		assertUnchanged(100, 100);
-		assertUnchanged(1000, 4000);
-		assertUnchanged(100, 0);
-		assertUnchanged(Integer.MAX_VALUE, Integer.MAX_VALUE);
+	void aShortCycleStartsScaledByOneInteger() throws Exception {
+		assertFirstCycle(ints(1, 1), 50, 50);
+		assertFirstCycle(ints(1, 4), 20, 80);
+		assertFirstCycle(ints(1, 2), 34, 68);
+		assertFirstCycle(ints(1, 1, 1), 34, 34, 34);
 	}
 
 	@Test
-	void aCycleWithoutPositiveWeightsIsUnchanged() {
-		assertUnchanged(0, 0);
-		assertUnchanged(-1, -1);
-		assertUnchanged(-1, 0);
-	}
-
-	@Test
-	void aNegativeWeightStaysAsWrittenAndDoesNotCount() {
-		assertArrayEquals(ints(-1, 100), WeightedLoadStepLocal.withMinimumCycle(ints(-1, 1)));
-		assertArrayEquals(
-						ints(Integer.MIN_VALUE, 100),
-						WeightedLoadStepLocal.withMinimumCycle(ints(Integer.MIN_VALUE, 1)));
-	}
-
-	@Test
-	void theWrittenArrayIsNotChanged() {
-		final int[] weights = ints(1, 4);
-		WeightedLoadStepLocal.withMinimumCycle(weights);
-		assertArrayEquals(ints(1, 4), weights);
-	}
-
-	@Test
-	void theStepGivesTheThrottleTheScaledWeights() throws Exception {
-		assertArrayEquals(ints(20, 80), throttleWeights(1, 4));
-	}
-
-	@Test
-	void theStepGivesTheThrottleWeightsAtTheMinimumAsWritten() throws Exception {
-		assertArrayEquals(ints(30, 70), throttleWeights(30, 70));
+	void aCycleAtTheMinimumStartsAsWritten() throws Exception {
+		assertFirstCycle(ints(30, 70), 30, 70);
+		assertFirstCycle(ints(1, 1, 98), 1, 1, 98);
 	}
 
 	@Test
@@ -120,16 +89,32 @@ class WeightedLoadStepMinimumCycleTest {
 		return values;
 	}
 
-	private static void assertScaled(final int[] weights, final int... expected) {
-		assertArrayEquals(expected, WeightedLoadStepLocal.withMinimumCycle(weights));
-	}
-
-	private static void assertUnchanged(final int... weights) {
-		assertArrayEquals(weights.clone(), WeightedLoadStepLocal.withMinimumCycle(weights));
+	/** Each sub-load takes all it can of the first cycle of the step's throttle, in order: its share. */
+	private void assertFirstCycle(final int[] weights, final int... expected) throws Exception {
+		final RetiringWeightsThrottle throttle = initialized(weights).weightThrottle();
+		final int[] permits = new int[expected.length];
+		for (int i = 0; i < permits.length; i++) {
+			permits[i] = throttle.tryAcquire(i, Integer.MAX_VALUE);
+		}
+		assertArrayEquals(expected, permits);
 	}
 
 	/** Initializes a real step over the mock driver and returns what its throttle was built with. */
-	private int[] throttleWeights(final int... weights) throws Exception {
+	private List<Object> throttleArguments(final int... weights) throws Exception {
+		final List<List<Object>> built = new ArrayList<>();
+		try (MockedConstruction<RetiringWeightsThrottle> ignored = mockConstruction(
+						RetiringWeightsThrottle.class,
+						(throttle, construction) -> built.add(List.of(
+										Arrays.stream((int[]) construction.arguments().get(0)).boxed().toList(),
+										construction.arguments().get(1))))) {
+			initialized(weights);
+		}
+		assertEquals(1, built.size());
+		return built.get(0);
+	}
+
+	/** A real step over the mock driver, initialized and closed. */
+	private WeightedLoadStepLocal initialized(final int... weights) throws Exception {
 		ThreadContext.put("home_dir", home.toString());
 		final Config config = defaultConfig();
 		config.val("load-step-id", "weighted-minimum-cycle-" + UUID.randomUUID());
@@ -148,17 +133,12 @@ class WeightedLoadStepMinimumCycleTest {
 			context.val("load-op-weight", weight);
 			contexts.add(context);
 		}
-		final List<int[]> built = new ArrayList<>();
 		final List<Extension> extensions = List.of(new WeightedLoadStepExtension(), new DummyStorageDriverMockExtension<>());
-		try (MockedConstruction<RetiringWeightsThrottle> ignored = mockConstruction(
-						RetiringWeightsThrottle.class,
-						(throttle, construction) -> built.add((int[]) construction.arguments().get(0)));
-						WeightedLoadStepLocal step = new WeightedLoadStepLocal(
-										config, extensions, contexts, new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR))) {
+		try (WeightedLoadStepLocal step = new WeightedLoadStepLocal(
+						config, extensions, contexts, new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR))) {
 			step.init();
+			return step;
 		}
-		assertEquals(1, built.size());
-		return built.get(0);
 	}
 
 	/** The INFO messages about the weights that the step logs while it initializes. */
@@ -175,7 +155,7 @@ class WeightedLoadStepMinimumCycleTest {
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
 		logger.addAppender(appender);
 		try {
-			throttleWeights(weights);
+			initialized(weights);
 			// The logger is asynchronous: wait for a marker sent after the step's messages.
 			final String marker = "weighted-minimum-cycle-marker-" + UUID.randomUUID();
 			Loggers.MSG.info(marker);

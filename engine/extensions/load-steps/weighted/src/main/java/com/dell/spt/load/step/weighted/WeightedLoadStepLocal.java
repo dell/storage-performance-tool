@@ -32,7 +32,6 @@ import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
-import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static com.github.akurilov.confuse.Config.deepToMap;
@@ -57,11 +56,14 @@ import java.util.Map;
 public class WeightedLoadStepLocal extends LoadStepLocalBase {
 
 	/**
-	 * The fewest permits one cycle of the weight throttle gives out. A generator refused by the
-	 * throttle parks before it asks again, so a short cycle limits the step's throughput however fast
-	 * the target is.
+	 * The fewest permits one cycle of the weight throttle gives out to the sub-loads still running,
+	 * at the start and after each one finishes. A generator refused by the throttle parks before it
+	 * asks again, so a short cycle limits the step's throughput however fast the target is.
 	 */
 	static final int MIN_WEIGHT_CYCLE = 100;
+
+	/** The weight throttle that {@link #init()} built, shared by the sub-loads' generators. */
+	private RetiringWeightsThrottle weightThrottle;
 
 	public WeightedLoadStepLocal(
 					final Config baseConfig, final List<Extension> extensions, final List<Config> contextConfigs,
@@ -112,15 +114,15 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 			weights[originIndex] = weight;
 		}
 
-		final int[] cycle = withMinimumCycle(weights);
-		if (cycle != weights) {
+		weightThrottle = new RetiringWeightsThrottle(weights, MIN_WEIGHT_CYCLE);
+		final int[] cycle = weightThrottle.cycleWeights();
+		if (!Arrays.equals(cycle, weights)) {
 			Loggers.MSG.info(
 							"Weights {}: the positive ones sum below {}, so the weight throttle uses {}",
 							Arrays.toString(weights),
 							MIN_WEIGHT_CYCLE,
 							Arrays.toString(cycle));
 		}
-		final IndexThrottle weightThrottle = new RetiringWeightsThrottle(cycle);
 
 		// 2nd pass: initialize the sub steps
 		for (int originIndex = 0; originIndex < subStepCount; originIndex++) {
@@ -269,29 +271,8 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 		}
 	}
 
-	/**
-	 * Lengthens a cycle shorter than {@link #MIN_WEIGHT_CYCLE}, keeping the ratio: when the positive
-	 * weights sum above 0 and below the minimum, each is multiplied by the smallest integer that brings
-	 * the sum to it. Any other array comes back as it is. A weight of 0 or below never gets a permit,
-	 * so it stays as written.
-	 */
-	static int[] withMinimumCycle(final int[] weights) {
-		long sum = 0;
-		for (final int weight : weights) {
-			if (weight > 0) {
-				sum += weight;
-			}
-		}
-		if (sum == 0 || sum >= MIN_WEIGHT_CYCLE) {
-			return weights;
-		}
-		final int factor = (int) ((MIN_WEIGHT_CYCLE + sum - 1) / sum);
-		final int[] scaled = weights.clone();
-		for (int i = 0; i < scaled.length; i++) {
-			if (scaled[i] > 0) {
-				scaled[i] *= factor;
-			}
-		}
-		return scaled;
+	/** The weight throttle of the last {@link #init()}, or null before it. */
+	RetiringWeightsThrottle weightThrottle() {
+		return weightThrottle;
 	}
 }
