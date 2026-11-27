@@ -74,7 +74,12 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 			if (dstPath == null || dstPath.isEmpty() || ItemNamePaths.startsWithPath(fileItemName, dstPath)) {
 				itemPath = FsConstants.FS.getPath(fileItemName);
 			} else {
-				dstParentDirs.computeIfAbsent(dstPath, DirIoHelper::createParentDir);
+				if (!dstParentDirs.containsKey(dstPath)) {
+					final var parentDir = DirIoHelper.createParentDir(dstPath);
+					if (parentDir != null) {
+						dstParentDirs.putIfAbsent(dstPath, parentDir);
+					}
+				}
 				itemPath = FsConstants.FS.getPath(dstPath, fileItemName);
 			}
 			if (OpType.CREATE.equals(opType)) {
@@ -211,6 +216,40 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	// The opens run outside the map locks: computeIfAbsent would hold the monitor of the key's map
+	// bin across the open, and every other operation in that bin would wait behind a slow open.
+	// With JDK 25 virtual threads that wait can also pin every carrier for good. One I/O worker
+	// owns an operation at a time, so two opens for one operation do not race; if they ever did,
+	// the later one closes its channel and takes the one already in the map.
+	private <F extends DataItem, D extends DataOperation<F>> FileChannel srcChannelOf(final D op) {
+		final var channel = srcOpenFiles.get(op);
+		return channel != null ? channel : putOpened(srcOpenFiles, op, FileIoHelper.openSrcFile(op));
+	}
+
+	private <F extends DataItem, D extends DataOperation<F>> FileChannel dstChannelOf(final D op) {
+		final var channel = dstOpenFiles.get(op);
+		return channel != null ? channel : putOpened(dstOpenFiles, op, openDstFile(op));
+	}
+
+	// A null channel (the open failed with the operation's status set, or there is nothing to
+	// open) leaves no entry, as computeIfAbsent did.
+	static FileChannel putOpened(
+					final Map<DataOperation, FileChannel> openFiles, final DataOperation op, final FileChannel opened) {
+		if (opened == null) {
+			return null;
+		}
+		final var winner = openFiles.putIfAbsent(op, opened);
+		if (winner == null) {
+			return opened;
+		}
+		try {
+			opened.close();
+		} catch (final IOException e) {
+			Loggers.ERR.warn("Failed to close a duplicate file channel");
+		}
+		return winner;
+	}
+
 	protected final <F extends DataItem, D extends DataOperation<F>> void invokeFileNio(final D op) {
 
 		FileChannel srcChannel = null;
@@ -228,8 +267,8 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				break;
 
 			case CREATE:
-				dstChannel = dstOpenFiles.computeIfAbsent(op, this::openDstFile);
-				srcChannel = srcOpenFiles.computeIfAbsent(op, FileIoHelper::openSrcFile);
+				dstChannel = dstChannelOf(op);
+				srcChannel = srcChannelOf(op);
 				if (dstChannel == null) {
 					break;
 				}
@@ -249,7 +288,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				break;
 
 			case READ:
-				srcChannel = srcOpenFiles.computeIfAbsent(op, FileIoHelper::openSrcFile);
+				srcChannel = srcChannelOf(op);
 				if (srcChannel == null) {
 					break;
 				}
@@ -308,7 +347,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				break;
 
 			case UPDATE:
-				dstChannel = dstOpenFiles.computeIfAbsent(op, this::openDstFile);
+				dstChannel = dstChannelOf(op);
 				if (dstChannel == null) {
 					break;
 				}
@@ -405,11 +444,11 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected final void doClose()
 					throws IOException {
-		// Close the open channels but do not clear the maps: an I/O worker that outlived the stop
-		// (for example one blocked in a file open inside computeIfAbsent) holds its map slot, and
-		// clear() would wait on that slot for good. Iterating the values does not wait; the maps go
-		// with the driver. A late READ, UPDATE or CREATE open closes its own channel when its
-		// operation ends.
+		// Close the open channels but do not clear the maps: the opens run outside the map locks,
+		// so an I/O worker that outlived the stop (for example one blocked in a file open) holds no
+		// map slot, but it may add its channel after this close. Iterating the values does not wait;
+		// the maps go with the driver. A late READ, UPDATE or CREATE open closes its own channel when
+		// its operation ends.
 		srcOpenFiles
 						.values()
 						.stream()
