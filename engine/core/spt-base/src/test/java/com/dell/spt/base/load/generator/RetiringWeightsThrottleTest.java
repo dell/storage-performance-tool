@@ -197,6 +197,37 @@ class RetiringWeightsThrottleTest {
 	}
 
 	@Test
+	void retiringAFirstOrMiddleOriginScalesTheOthers() {
+		final var middle = floored(1, 48, 1);
+		middle.retire(1);
+		drainCycle(middle, new boolean[]{false, true, false
+		});
+		assertArrayEquals(ints(50, 0, 50), middle.cycleWeights());
+		assertEquals(50, middle.tryAcquire(0, ANY));
+		assertEquals(50, middle.tryAcquire(2, ANY));
+		final var first = floored(48, 1, 1);
+		first.retire(0);
+		drainCycle(first, new boolean[]{true, false, false
+		});
+		assertArrayEquals(ints(0, 50, 50), first.cycleWeights());
+		assertEquals(50, first.tryAcquire(1, ANY));
+		assertEquals(50, first.tryAcquire(2, ANY));
+	}
+
+	@Test
+	void aScaledWeightIsCappedAtTheLargestInt() {
+		assertArrayEquals(ints(Integer.MAX_VALUE), new RetiringWeightsThrottle(ints(3), Integer.MAX_VALUE).cycleWeights());
+	}
+
+	@Test
+	void aNegativeMinimumLengthensNoCycle() {
+		final var throttle = new RetiringWeightsThrottle(ints(1, 1, 48), -100);
+		assertArrayEquals(ints(1, 1, 48), throttle.cycleWeights());
+		throttle.retire(2);
+		assertArrayEquals(ints(1, 1, 0), throttle.cycleWeights());
+	}
+
+	@Test
 	void aLiveSumAtTheMinimumKeepsTheWrittenWeights() {
 		final var throttle = floored(50, 50, 2400);
 		throttle.retire(2);

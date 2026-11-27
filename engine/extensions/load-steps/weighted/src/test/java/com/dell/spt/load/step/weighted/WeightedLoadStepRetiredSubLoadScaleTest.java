@@ -16,6 +16,7 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.dell.spt.base.svc.ServiceUtil;
+import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,6 +46,7 @@ import org.junit.jupiter.api.io.TempDir;
 class WeightedLoadStepRetiredSubLoadScaleTest {
 
 	private static final long WAIT_SECONDS = 30;
+	private static final String COUNTED_ITEM_SIZE = "2KB";
 	private static final int[] SURVIVORS_SCALED = {50, 50, 0
 	};
 
@@ -82,8 +85,11 @@ class WeightedLoadStepRetiredSubLoadScaleTest {
 	void aSubLoadAtItsCountLimitLeavesTheOthersScaledByTheirOwnWeights() throws Exception {
 		final Config counted = context(48);
 		counted.val("load-op-limit-count", 1000L);
+		// Its own item size tells its context apart from the two unlimited creates.
+		counted.val("item-data-size", COUNTED_ITEM_SIZE);
 		assertSurvivorsScaled(counted);
-		assertEquals(List.of(1000L), successCounts(OpType.CREATE).subList(0, 1));
+		assertEquals(List.of(1000L), successCounts(context -> context.opType() == OpType.CREATE
+						&& context.itemDataSize().get() == new SizeInBytes(COUNTED_ITEM_SIZE).get()));
 	}
 
 	@Test
@@ -92,7 +98,7 @@ class WeightedLoadStepRetiredSubLoadScaleTest {
 		finite.val("load-op-type", "read");
 		finite.val("item-input-file", items(20).toString());
 		assertSurvivorsScaled(finite);
-		assertEquals(List.of(20L), successCounts(OpType.READ));
+		assertEquals(List.of(20L), successCounts(context -> context.opType() == OpType.READ));
 	}
 
 	private void assertSurvivorsScaled(final Config third) throws Exception {
@@ -125,12 +131,11 @@ class WeightedLoadStepRetiredSubLoadScaleTest {
 		return Files.writeString(home.resolve("items.csv"), lines);
 	}
 
-	/** The success counts of the local contexts of one operation type, smallest first. */
-	private List<Long> successCounts(final OpType opType) {
+	/** The success counts of the local contexts that match. */
+	private List<Long> successCounts(final Predicate<MetricsContext<?>> match) {
 		return metrics.contexts.stream()
-						.filter(context -> context.opType() == opType)
+						.filter(match)
 						.map(context -> context.lastSnapshot().successSnapshot().count())
-						.sorted()
 						.toList();
 	}
 

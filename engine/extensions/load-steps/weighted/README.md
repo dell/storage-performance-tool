@@ -101,14 +101,14 @@ cycle starts when those shares are used up. A sub-load finishes scheduling when
 it reaches its count limit or, if it does not recycle its operations, when its
 item input runs out. It then leaves the cycle: the other sub-loads carry on to
 their own limits and share the cycle by their weights, so the configured ratio
-no longer applies to the finished sub-load. When the written weights of the
-sub-loads still running sum to between 1 and 99, they are multiplied by the
-smallest integer that brings their sum to at least 100, as for a step written
-with only them: at 1/1/48, the first two run at 50/50 once the third has
+no longer applies to the finished sub-load. When the positive written weights
+of the sub-loads still running sum to between 1 and 99, they are multiplied by
+the smallest integer that brings their sum to at least 100, as for a step
+written with only them: at 1/1/48, the first two run at 50/50 once the third has
 finished. This holds even when the weights at the start summed to 100 or more,
 as at 1/1/98. Shares already given out in the current cycle are used first; the
-new weights apply from the next cycle. A retry of one of its operations still
-runs, outside the cycle.
+new weights apply from the next cycle. A retry of an operation of the finished
+sub-load still runs, outside the cycle.
 
 A sub-load that recycles, which includes every path listing (`list` with
 `item.type=path`), finishes only at its count limit. If it has nothing left to
