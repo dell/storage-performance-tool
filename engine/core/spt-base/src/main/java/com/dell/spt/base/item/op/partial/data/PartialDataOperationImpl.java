@@ -13,6 +13,8 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 	private int partNumber;
 	private CompositeDataOperation<I> parent;
 	private int retryCount;
+	/** Read and written only through {@link PartialDataOperationFailureMark}. */
+	boolean failureRecorded;
 
 	public PartialDataOperationImpl() {
 		super();

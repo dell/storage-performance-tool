@@ -19,12 +19,12 @@ func TestUnresolvedOperationsSkipANamedPipe(t *testing.T) {
 		t.Skipf("no named pipes here: %v", err)
 	}
 	step := &results.StepManifest{StepID: lifecycleStep, Files: []results.FileStatus{{Name: lifecycleFile, Status: fileStatusOK}}}
-	got := make(chan int64, 1)
-	go func() { got <- loadUnresolvedOperations(dir, step) }()
+	got := make(chan *OperationLifecycle, 1)
+	go func() { got <- loadOperationLifecycle(dir, step) }()
 	select {
-	case count := <-got:
-		if count != 0 {
-			t.Fatalf("count = %d", count)
+	case lifecycle := <-got:
+		if lifecycle != nil {
+			t.Fatalf("lifecycle = %+v", lifecycle)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the summary waited on a named pipe")
