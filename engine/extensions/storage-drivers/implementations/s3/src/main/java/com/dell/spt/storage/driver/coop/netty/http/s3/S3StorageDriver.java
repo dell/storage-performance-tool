@@ -1878,11 +1878,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		recordTerminalFailure(failure);
 	}
 
-	/** Extension hook for transports which deliver a successful GET body outside HTTP. */
-	protected boolean observesReadBodyOutOfBand(final O op) {
-		return false;
-	}
-
 	final boolean observesIntegrityReadBodyOutOfBand(final O op) {
 		return observesReadBodyOutOfBand(op);
 	}
