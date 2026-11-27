@@ -71,6 +71,34 @@ public abstract class ResponseContentUtil {
 		}
 	}
 
+	/**
+	 * Fails a verified READ whose body has ended with a byte count other than the one it asked for:
+	 * the requested ranges' size for a ranged read, otherwise the item's (for a part of a split read,
+	 * the part's). {@link #verifyChunk} rejects bytes past the expected end only, and not every such
+	 * byte of an updated item, so a short, empty or overlong body is caught here. Call it once, when
+	 * the body has ended, for a READ that is still {@code SUCC}.
+	 */
+	public static void verifyFinish(final DataOperation<?> dataOp) {
+		final List<Range> byteRanges = dataOp.fixedRanges();
+		final DataItem item = dataOp.item();
+		final long actual = dataOp.countBytesDone();
+		final long expected;
+		try {
+			expected = (byteRanges != null && !byteRanges.isEmpty()) || dataOp.hasMarkedRanges()
+							? dataOp.markedRangesSize()
+							: item.size();
+		} catch (final IOException e) {
+			// A body whose expected size is unknown is not verified.
+			dataOp.status(Operation.Status.RESP_FAIL_CORRUPT);
+			Loggers.MSG.debug("{}: expected size unknown, actual: {} ", item.name(), actual);
+			return;
+		}
+		if (actual != expected) {
+			dataOp.status(Operation.Status.RESP_FAIL_CORRUPT);
+			Loggers.MSG.debug("{}: invalid size, expected: {}, actual: {} ", item.name(), expected, actual);
+		}
+	}
+
 	private static void verifyChunkDataAndSize(
 					final DataOperation dataOp, final DataItem dataItem, final long countBytesDone, final ByteBuf chunkData,
 					final int chunkSize, final List<Range> byteRanges) throws DataCorruptionException, IOException {

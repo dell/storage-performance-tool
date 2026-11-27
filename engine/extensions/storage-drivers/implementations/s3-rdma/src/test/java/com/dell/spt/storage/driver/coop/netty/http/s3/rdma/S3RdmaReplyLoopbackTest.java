@@ -333,6 +333,46 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	/**
+	 * A verified READ's HTTP body size is checked when its response ends, before the driver completes
+	 * it. An RDMA-accepted GET has no HTTP body: the check leaves it to the reply contract.
+	 */
+	@Test
+	void aVerifiedRdmaGetIsNotFailedByTheHttpBodySizeCheck() throws Exception {
+		reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
+		try (final var driver = newVerifyingDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaTransferred.sum());
+		}
+	}
+
+	@Test
+	void aVerifiedRdmaGetShortTransferIsStillAProtocolError() throws Exception {
+		reply = new Reply(200, "200", Integer.toString(SIZE - 1), null, true);
+		try (final var driver = newVerifyingDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaProtocolError.sum());
+		}
+	}
+
+	/** A declined GET is served over HTTP, so its HTTP body is checked like any HTTP read's. */
+	@Test
+	void aVerifiedDeclinedGetWithAnEmptyHttpBodyIsCorrupt() throws Exception {
+		reply = new Reply(200, "501", null, null, false);
+		try (final var driver = newVerifyingDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+		}
+	}
+
 	@Test
 	void getShortTransferIsProtocolError() throws Exception {
 		reply = new Reply(200, "200", Integer.toString(SIZE - 1), null, true);
@@ -2087,6 +2127,17 @@ final class S3RdmaReplyLoopbackTest {
 
 	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(
 					final boolean fallback, final Consumer<Config> customize) throws Exception {
+		return newDriver(fallback, false, customize);
+	}
+
+	/** A driver with {@code item.data.verify} on. */
+	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newVerifyingDriver(final boolean fallback)
+					throws Exception {
+		return newDriver(fallback, true, config -> {});
+	}
+
+	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(
+					final boolean fallback, final boolean verify, final Consumer<Config> customize) throws Exception {
 		final Config config = config(fallback);
 		customize.accept(config);
 		final RdmaConfig rdmaConfig = new RdmaConfig(config.configVal("storage").configVal("rdma"));
@@ -2096,7 +2147,7 @@ final class S3RdmaReplyLoopbackTest {
 						STEP_ID,
 						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),
 						config.configVal("storage"),
-						false,
+						verify,
 						config.intVal("load-batch-size"),
 						ignored -> transport);
 	}
