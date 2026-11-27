@@ -139,6 +139,10 @@ def launcherRequiredJavaOptions = [
 	'-Dsun.rmi.transport.tcp.responseTimeout=10000',
 	'-Dsun.rmi.transport.tcp.handshakeTimeout=10000',
 ]
+// Options the image and launchers must not pass. On Java 25, -XX:-DoJVMTIVirtualThreadTransitions
+// lets a carrier stay pinned after a contended monitor, which deadlocks the engine's virtual-thread
+// carriers once its virtual threads outnumber them.
+def launcherRefusedJavaOptions = ['DoJVMTIVirtualThreadTransitions']
 
 def readImageJavaOptions = {
 	def entrypoint = imageEntrypoint.asFile
@@ -173,6 +177,11 @@ def readImageJavaOptions = {
 		if (defaults.count(required) != 1) {
 			throw new GradleException("${entrypoint}: DEFAULT_JAVA_OPTS must contain ${required} once")
 		}
+	}
+	def refused = (x86 + defaults).findAll { option -> launcherRefusedJavaOptions.any { option.contains(it) } }
+	if (refused) {
+		throw new GradleException("${entrypoint}: the default JVM options must not contain ${refused} " +
+			"(see launcherRefusedJavaOptions in engine/bundle/build.gradle)")
 	}
 	if (dockerfile.readLines('UTF-8').count { it ==~ /\s*ENV\s+GLIBC_TUNABLES\b.*/ } != 1) {
 		throw new GradleException("${dockerfile}: GLIBC_TUNABLES must be set on one ENV line")
