@@ -959,7 +959,8 @@ class HttpStorageDriverBaseTest {
 	private static DataItemImpl randomRangeItem(final int updated) throws Exception {
 		final var item = appendItem();
 		if (updated > 0) {
-			final var preset = new BitSet[]{new BitSet(), new BitSet()};
+			final var preset = new BitSet[]{new BitSet(), new BitSet()
+			};
 			preset[0].set(0, updated);
 			item.commitUpdatedRanges(preset);
 		}
@@ -971,7 +972,8 @@ class HttpStorageDriverBaseTest {
 	}
 
 	private static BitSet[] copyOf(final BitSet[] pair) {
-		return new BitSet[]{(BitSet) pair[0].clone(), (BitSet) pair[1].clone()};
+		return new BitSet[]{(BitSet) pair[0].clone(), (BitSet) pair[1].clone()
+		};
 	}
 
 	/** The item's layer and updated-range mask. */
@@ -1004,7 +1006,8 @@ class HttpStorageDriverBaseTest {
 	 * each layer) and a full one (11 of 11 recorded).
 	 */
 	@ParameterizedTest
-	@CsvSource({"false, 0, 1", "false, 0, 4", "false, 10, 2", "false, 11, 1", "true, 0, 1", "true, 10, 2"})
+	@CsvSource({"false, 0, 1", "false, 0, 4", "false, 10, 2", "false, 11, 1", "true, 0, 1", "true, 10, 2"
+	})
 	void aRandomRangeUpdateRecordsItsRangesOnceWhenItSucceeds(
 					final boolean ssl, final int preset, final int count) throws Exception {
 		final var drv = driver(ssl);
@@ -1035,7 +1038,8 @@ class HttpStorageDriverBaseTest {
 	 * retry's success then records them once. Rows as above.
 	 */
 	@ParameterizedTest
-	@CsvSource({"false, 0, 1", "false, 0, 4", "false, 10, 2", "false, 11, 1", "true, 0, 1", "true, 10, 2"})
+	@CsvSource({"false, 0, 1", "false, 0, 4", "false, 10, 2", "false, 11, 1", "true, 0, 1", "true, 10, 2"
+	})
 	void aFailedRandomRangeUpdateLeavesTheItemAndTheRetrySendsTheSameRanges(
 					final boolean ssl, final int preset, final int count) throws Exception {
 		final var drv = driver(ssl);
@@ -1077,7 +1081,8 @@ class HttpStorageDriverBaseTest {
 	 * records the same ranges once.
 	 */
 	@ParameterizedTest
-	@CsvSource({"0, 1", "10, 2", "11, 1"})
+	@CsvSource({"0, 1", "10, 2", "11, 1"
+	})
 	void aRandomRangeUpdateFailedOnAClosedChannelLeavesTheItem(final int preset, final int count) throws Exception {
 		final var drv = driver(false);
 		final var item = randomRangeItem(preset);
@@ -1110,7 +1115,8 @@ class HttpStorageDriverBaseTest {
 	 * leaves the item, whatever its status, though it holds marked ranges.
 	 */
 	@ParameterizedTest
-	@CsvSource({"SUCC", "RESP_FAIL_SVC"})
+	@CsvSource({"SUCC", "RESP_FAIL_SVC"
+	})
 	void aRandomRangeUpdateThatQueuedNoBodyLeavesTheItem(final Operation.Status status) throws Exception {
 		final var drv = driver(false);
 		final var item = randomRangeItem(0);

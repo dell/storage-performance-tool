@@ -239,7 +239,8 @@ class DataOperationImplTest {
 	private static DataItemImpl rangedItem(final int updated) {
 		final var item = newItem("obj", 1024);
 		if (updated > 0) {
-			final var preset = new BitSet[]{new BitSet(), new BitSet()};
+			final var preset = new BitSet[]{new BitSet(), new BitSet()
+			};
 			preset[0].set(0, updated);
 			item.commitUpdatedRanges(preset);
 		}
@@ -247,7 +248,8 @@ class DataOperationImplTest {
 	}
 
 	private static BitSet[] copyOf(final BitSet[] pair) {
-		return new BitSet[]{(BitSet) pair[0].clone(), (BitSet) pair[1].clone()};
+		return new BitSet[]{(BitSet) pair[0].clone(), (BitSet) pair[1].clone()
+		};
 	}
 
 	/**
@@ -256,7 +258,8 @@ class DataOperationImplTest {
 	 * and a partial layer switch (10 of 11 recorded, 2 ranges, one in each layer).
 	 */
 	@org.junit.jupiter.params.ParameterizedTest
-	@org.junit.jupiter.params.provider.CsvSource({"0, 3, RESP_FAIL_SVC", "0, 3, FAIL_IO", "10, 2, FAIL_TIMEOUT"})
+	@org.junit.jupiter.params.provider.CsvSource({"0, 3, RESP_FAIL_SVC", "0, 3, FAIL_IO", "10, 2, FAIL_TIMEOUT"
+	})
 	void aFailedRandomRangeUpdateKeepsItsRangesThroughResultAndRetryReset(
 					final int preset, final int count, final com.dell.spt.base.item.op.Operation.Status status) {
 		final var item = rangedItem(preset);
