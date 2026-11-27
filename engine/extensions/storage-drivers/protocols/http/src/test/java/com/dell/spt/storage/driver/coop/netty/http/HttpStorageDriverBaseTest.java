@@ -953,6 +953,178 @@ class HttpStorageDriverBaseTest {
 		ch.finishAndReleaseAll();
 	}
 
+	// --- random-range UPDATE: ranges recorded on success only, the same ranges on retry ---
+
+	/** A 1 KiB item (11 ranges) whose first {@code updated} ranges are already recorded as updated. */
+	private static DataItemImpl randomRangeItem(final int updated) throws Exception {
+		final var item = appendItem();
+		if (updated > 0) {
+			final var preset = new BitSet[]{new BitSet(), new BitSet()};
+			preset[0].set(0, updated);
+			item.commitUpdatedRanges(preset);
+		}
+		return item;
+	}
+
+	private static DataOperationImpl<DataItemImpl> randomRangeUpdate(final DataItemImpl item, final int count) {
+		return new DataOperationImpl<>(0, OpType.UPDATE, item, null, "/bucket", null, null, count);
+	}
+
+	private static BitSet[] copyOf(final BitSet[] pair) {
+		return new BitSet[]{(BitSet) pair[0].clone(), (BitSet) pair[1].clone()};
+	}
+
+	/** The item's layer and updated-range mask. */
+	private record ItemState(int layer, BitSet updated) {}
+
+	private static ItemState stateOf(final DataItemImpl item) {
+		final var updated = new BitSet();
+		for (int i = 0; i < com.dell.spt.base.item.DataItem.rangeCount(ITEM_SIZE); i++) {
+			if (item.isRangeUpdated(i)) {
+				updated.set(i);
+			}
+		}
+		return new ItemState(item.layer(), updated);
+	}
+
+	/** The state {@code commitUpdatedRanges(pair)} gives once on {@code before}. */
+	private static ItemState committedOnce(final ItemState before, final BitSet[] pair) {
+		if (pair[1].isEmpty()) {
+			final var updated = (BitSet) before.updated().clone();
+			updated.or(pair[0]);
+			return new ItemState(before.layer(), updated);
+		}
+		return new ItemState(before.layer() + 1, (BitSet) pair[1].clone());
+	}
+
+	/**
+	 * The item records a random-range UPDATE's ranges once, when it succeeds: queueing the body
+	 * changes nothing, and a second complete() for the same attempt commits nothing more. Rows:
+	 * 1 and 4 ranges on a fresh item, a partial layer switch (10 of 11 recorded, 2 ranges: one in
+	 * each layer) and a full one (11 of 11 recorded).
+	 */
+	@ParameterizedTest
+	@CsvSource({"false, 0, 1", "false, 0, 4", "false, 10, 2", "false, 11, 1", "true, 0, 1", "true, 10, 2"})
+	void aRandomRangeUpdateRecordsItsRangesOnceWhenItSucceeds(
+					final boolean ssl, final int preset, final int count) throws Exception {
+		final var drv = driver(ssl);
+		final var item = randomRangeItem(preset);
+		final var before = stateOf(item);
+		final var op = randomRangeUpdate(item, count);
+		final var marked = copyOf(op.markedRangesMaskPair());
+		final var ch = new EmbeddedChannel();
+
+		final var sent = sendUpdate(drv, ch, op);
+		assertEquals(op.markedRangesSize(), op.countBytesDone());
+		assertFalse(sent.bodies().isEmpty());
+		assertEquals(before, stateOf(item), "queueing the body leaves the item");
+
+		op.status(Operation.Status.SUCC);
+		drv.complete(ch, op);
+		final var expected = committedOnce(before, marked);
+		assertEquals(expected, stateOf(item));
+		drv.complete(ch, op);
+		assertEquals(expected, stateOf(item), "a second complete() commits nothing more");
+		assertEquals(1, drv.releasedTransports);
+		ch.finishAndReleaseAll();
+	}
+
+	/**
+	 * A failed random-range UPDATE attempt leaves the item, and its retry (the result copy, reset
+	 * with a retry count as the step context does) sends the same ranges with the same bytes; the
+	 * retry's success then records them once. Rows as above.
+	 */
+	@ParameterizedTest
+	@CsvSource({"false, 0, 1", "false, 0, 4", "false, 10, 2", "false, 11, 1", "true, 0, 1", "true, 10, 2"})
+	void aFailedRandomRangeUpdateLeavesTheItemAndTheRetrySendsTheSameRanges(
+					final boolean ssl, final int preset, final int count) throws Exception {
+		final var drv = driver(ssl);
+		final var item = randomRangeItem(preset);
+		final var before = stateOf(item);
+		final var op = randomRangeUpdate(item, count);
+		final var marked = copyOf(op.markedRangesMaskPair());
+		final var ch = new EmbeddedChannel();
+		final var first = sendUpdate(drv, ch, op);
+
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		drv.complete(ch, op);
+		drv.complete(ch, op);
+		assertEquals(before, stateOf(item), "a failed attempt leaves the item");
+
+		final var retry = op.result();
+		retry.incrementOpRetryCount();
+		retry.reset();
+		assertArrayEquals(marked, retry.markedRangesMaskPair(), "the retry keeps the failed attempt's ranges");
+		final var retryCh = new EmbeddedChannel();
+		final var second = sendUpdate(drv, retryCh, retry);
+		assertEquals(first.request().headers().get(HttpHeaderNames.RANGE),
+						second.request().headers().get(HttpHeaderNames.RANGE));
+		assertEquals(first.bodies().size(), second.bodies().size());
+		for (int i = 0; i < first.bodies().size(); i++) {
+			assertArrayEquals(first.bodies().get(i), second.bodies().get(i), "body " + i);
+		}
+		retry.status(Operation.Status.SUCC);
+		drv.complete(retryCh, retry);
+		drv.complete(retryCh, retry);
+		assertEquals(committedOnce(before, marked), stateOf(item));
+		ch.finishAndReleaseAll();
+		retryCh.finishAndReleaseAll();
+	}
+
+	/**
+	 * On a closed channel the header write fails at once and complete() runs before the body is
+	 * queued: the attempt must leave the item (a layer switch included), and the retry's success
+	 * records the same ranges once.
+	 */
+	@ParameterizedTest
+	@CsvSource({"0, 1", "10, 2", "11, 1"})
+	void aRandomRangeUpdateFailedOnAClosedChannelLeavesTheItem(final int preset, final int count) throws Exception {
+		final var drv = driver(false);
+		final var item = randomRangeItem(preset);
+		final var before = stateOf(item);
+		final var op = randomRangeUpdate(item, count);
+		final var marked = copyOf(op.markedRangesMaskPair());
+		final var closed = new EmbeddedChannel();
+		final var unusedClose = closed.close();
+		drv.leaseFor(closed, op);
+		op.startRequest();
+		drv.exposeSendRequest(closed, op);
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+		assertEquals(1, drv.releasedTransports, "complete() ran for the failed write");
+		assertEquals(before, stateOf(item), "the failed attempt leaves the item");
+
+		final var retry = op.result();
+		retry.incrementOpRetryCount();
+		retry.reset();
+		final var ch = new EmbeddedChannel();
+		sendUpdate(drv, ch, retry);
+		assertArrayEquals(marked, retry.markedRangesMaskPair());
+		retry.status(Operation.Status.SUCC);
+		drv.complete(ch, retry);
+		assertEquals(committedOnce(before, marked), stateOf(item));
+		ch.finishAndReleaseAll();
+	}
+
+	/**
+	 * A random-range UPDATE that queued no body (a tagging UPDATE sends {@code PUT ?tagging} only)
+	 * leaves the item, whatever its status, though it holds marked ranges.
+	 */
+	@ParameterizedTest
+	@CsvSource({"SUCC", "RESP_FAIL_SVC"})
+	void aRandomRangeUpdateThatQueuedNoBodyLeavesTheItem(final Operation.Status status) throws Exception {
+		final var drv = driver(false);
+		final var item = randomRangeItem(0);
+		final var op = randomRangeUpdate(item, 1);
+		assertTrue(op.hasMarkedRanges());
+		final var ch = new EmbeddedChannel();
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		op.status(status);
+		drv.complete(ch, op);
+		assertEquals(new ItemState(0, new BitSet()), stateOf(item));
+		ch.finishAndReleaseAll();
+	}
+
 	private static final int DEFAULT_CAP = HttpStorageDriverBase.CONTROL_RESPONSE_MAX_CONTENT_LENGTH;
 
 	@Test

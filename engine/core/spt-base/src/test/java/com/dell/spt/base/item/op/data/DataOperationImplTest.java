@@ -232,4 +232,110 @@ class DataOperationImplTest {
 		op.reset();
 		assertEquals(3, op.opRetryCount(), "opRetryCount must survive reset() on the original");
 	}
+
+	// --- a retried random-range UPDATE keeps the failed attempt's ranges ---
+
+	/** A 1 KiB item: 11 ranges, the first {@code updated} already recorded as updated. */
+	private static DataItemImpl rangedItem(final int updated) {
+		final var item = newItem("obj", 1024);
+		if (updated > 0) {
+			final var preset = new BitSet[]{new BitSet(), new BitSet()};
+			preset[0].set(0, updated);
+			item.commitUpdatedRanges(preset);
+		}
+		return item;
+	}
+
+	private static BitSet[] copyOf(final BitSet[] pair) {
+		return new BitSet[]{(BitSet) pair[0].clone(), (BitSet) pair[1].clone()};
+	}
+
+	/**
+	 * A failed random-range UPDATE keeps its ranges through result() and the retry's reset(),
+	 * however often it is retried. Rows: 3 ranges of 11 (a redraw matches by chance once in 165),
+	 * and a partial layer switch (10 of 11 recorded, 2 ranges, one in each layer).
+	 */
+	@org.junit.jupiter.params.ParameterizedTest
+	@org.junit.jupiter.params.provider.CsvSource({"0, 3, RESP_FAIL_SVC", "0, 3, FAIL_IO", "10, 2, FAIL_TIMEOUT"})
+	void aFailedRandomRangeUpdateKeepsItsRangesThroughResultAndRetryReset(
+					final int preset, final int count, final com.dell.spt.base.item.op.Operation.Status status) {
+		final var item = rangedItem(preset);
+		DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, "/b", null, null, count);
+		final var marked = copyOf(op.markedRangesMaskPair());
+		assertTrue(op.hasMarkedRanges());
+		if (preset == 10) {
+			assertFalse(marked[0].isEmpty(), "one range in the current layer");
+			assertFalse(marked[1].isEmpty(), "one range in the next layer");
+		}
+		for (int attempt = 1; attempt <= 3; attempt++) {
+			op.status(status);
+			final var copy = op.result();
+			assertArrayEquals(marked, copy.markedRangesMaskPair(), "the result copy of attempt " + attempt);
+			copy.incrementOpRetryCount();
+			copy.reset();
+			assertArrayEquals(marked, copy.markedRangesMaskPair(), "the retry of attempt " + attempt);
+			assertEquals(copy.markedRangesSize(), copy.contentSize, "the retry sends the same bytes");
+			op = copy;
+		}
+	}
+
+	/** A successful random-range UPDATE is copied without its ranges. */
+	@Test
+	void aSuccessfulRandomRangeUpdateIsCopiedWithoutItsRanges() {
+		final var op = new DataOperationImpl<>(0, OpType.UPDATE, rangedItem(0), null, "/b", null, null, 3);
+		assertTrue(op.hasMarkedRanges());
+		op.status(com.dell.spt.base.item.op.Operation.Status.SUCC);
+		assertFalse(op.result().hasMarkedRanges());
+	}
+
+	/**
+	 * A recycled UPDATE after a success (the step context resets the retry count) draws new ranges:
+	 * none of the ones the item now records as updated.
+	 */
+	@Test
+	void aRecycledRandomRangeUpdateAfterSuccessDrawsNewRanges() {
+		final var item = rangedItem(0);
+		final var op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, "/b", null, null, 3);
+		op.status(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_SVC);
+		final var retry = op.result();
+		retry.incrementOpRetryCount();
+		retry.reset();
+		retry.status(com.dell.spt.base.item.op.Operation.Status.SUCC);
+		item.commitUpdatedRanges(retry.markedRangesMaskPair());
+		retry.resetOpRetryCount();
+		final var recycled = retry.result();
+		recycled.reset();
+		assertEquals(3, recycled.markedRangesMaskPair()[0].cardinality());
+		assertTrue(recycled.markedRangesMaskPair()[1].isEmpty());
+		for (int i = 0; i < DataItem.rangeCount(item.size()); i++) {
+			if (item.isRangeUpdated(i)) {
+				assertFalse(recycled.markedRangesMaskPair()[0].get(i), "range " + i + " is already updated");
+			}
+		}
+	}
+
+	/**
+	 * Without a retry, reset() draws new ranges even when the operation still holds marks: here the
+	 * constructor's, which the item has since recorded (as a dispatch after a success would see).
+	 */
+	@Test
+	void aResetWithoutARetryDrawsNewRangesOverHeldMarks() {
+		final var item = rangedItem(0);
+		final var op = new DataOperationImpl<>(0, OpType.UPDATE, item, null, "/b", null, null, 3);
+		final var held = copyOf(op.markedRangesMaskPair());
+		item.commitUpdatedRanges(held);
+		assertEquals(0, op.opRetryCount());
+		op.reset();
+		assertEquals(3, op.markedRangesMaskPair()[0].cardinality());
+		assertFalse(op.markedRangesMaskPair()[0].intersects(held[0]), "the recorded ranges are not drawn again");
+	}
+
+	/** Only an UPDATE keeps its ranges: a failed random-range READ is copied without them. */
+	@Test
+	void aFailedRandomRangeReadIsCopiedWithoutItsRanges() {
+		final var op = new DataOperationImpl<>(0, OpType.READ, rangedItem(0), "/b", null, null, null, 3);
+		assertTrue(op.hasMarkedRanges());
+		op.status(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_SVC);
+		assertFalse(op.result().hasMarkedRanges());
+	}
 }

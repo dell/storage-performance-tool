@@ -73,6 +73,12 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 		this.srcItemsToConcat = other.srcItemsToConcat;
 		this.countBytesDone = other.countBytesDone;
 		this.respDataTimeStart = other.respDataTimeStart;
+		if (other.randomRangesCount > 0 && other.opType == OpType.UPDATE && other.status != Status.SUCC) {
+			// The result copy is the operation a load-op-retry dispatches again: keep the failed
+			// attempt's ranges, which the item did not record, so that reset() can send them again.
+			markedRangesMaskPair[0].or(other.markedRangesMaskPair[0]);
+			markedRangesMaskPair[1].or(other.markedRangesMaskPair[1]);
+		}
 	}
 
 	@Override
@@ -90,8 +96,16 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 		respDataTimeStart = 0;
 		currRange = null;
 		currRangeIdx = 0;
-		markedRangesMaskPair[0].clear();
-		markedRangesMaskPair[1].clear();
+		// A retried random-range UPDATE sends the failed attempt's ranges again: the item records
+		// ranges only when an UPDATE succeeds, and the target may hold the failed attempt's bytes.
+		final boolean retryMarkedRanges = opType == OpType.UPDATE
+						&& opRetryCount() > 0
+						&& (fixedRanges == null || fixedRanges.isEmpty())
+						&& hasMarkedRanges();
+		if (!retryMarkedRanges) {
+			markedRangesMaskPair[0].clear();
+			markedRangesMaskPair[1].clear();
+		}
 
 		try {
 			switch (opType) {
@@ -121,7 +135,9 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 				break;
 			case UPDATE:
 				if (fixedRanges == null || fixedRanges.isEmpty()) {
-					if (randomRangesCount > 0) {
+					if (retryMarkedRanges) {
+						// keep the ranges of the failed attempt
+					} else if (randomRangesCount > 0) {
 						markRandomRanges(randomRangesCount);
 					} else {
 						// overwrite the entire data item
