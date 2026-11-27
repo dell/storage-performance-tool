@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
@@ -95,7 +96,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	private final Map<ContextProgressKey, TerminalStepEntry> lastProgressByContext = new ConcurrentHashMap<>();
 	// Contexts whose unregister ran without the output lock: the sweep that held it may record one
 	// again after the unregister removed its entries, so the sweep removes them once more at its end.
-	private final java.util.Queue<MetricsContext<?>> progressLeftByUnlockedUnregister = new ConcurrentLinkedQueue<>();
+	private final Queue<MetricsContext<?>> progressLeftByUnlockedUnregister = new ConcurrentLinkedQueue<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 	private static final List<Double> STANDARD_TIMING_QUANTILES = List.of(0.5, 0.9, 0.99, 0.999);
 
@@ -378,10 +379,10 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 				} catch (final InterruptedException e) {
 					throwUnchecked(e);
 				} finally {
-					removeProgress(metricsCtx);
 					if (!lockAcquired) {
 						progressLeftByUnlockedUnregister.add(metricsCtx);
 					}
+					removeProgress(metricsCtx);
 					if (lockAcquired && outputLock.isHeldByCurrentThread()) {
 						outputLock.unlock();
 					}
@@ -670,11 +671,13 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	 * keyed by step. Entries of registered siblings stay.
 	 */
 	private void clearStaleProgress(final MetricsContext<?> metricsCtx) {
+		// A context registered again is no longer its earlier unregister's to clean up after.
+		progressLeftByUnlockedUnregister.removeIf(queued -> queued == metricsCtx);
 		removeProgress(metricsCtx);
 		final String stepId = metricsCtx.loadStepId();
 		final boolean distributed = metricsCtx instanceof DistributedMetricsContext;
 		lastProgressByContext.entrySet().removeIf(e -> e.getKey().distributed == distributed
-						&& stepId.equals(e.getValue().stepId)
+						&& Objects.equals(stepId, e.getValue().stepId)
 						&& !isRegistered(e.getKey().context));
 	}
 

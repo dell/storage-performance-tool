@@ -1014,6 +1014,34 @@ public class MetricsManagerImplTest {
 		awaitSweep();
 
 		assertTrue(lastProgressEntries().isEmpty(), "no entry outlives its unregistered context");
+		assertTrue(unlockedUnregisters().isEmpty(), "the sweep's end drained the timed-out unregister");
+	}
+
+	@Test
+	void registeringAContextAgainTakesItOffTheTimedOutUnregisterQueue() throws Exception {
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-requeued", OpType.READ, 0, 0);
+		unlockedUnregisters().add(ctx);
+		final java.lang.reflect.Field lockField = MetricsManagerImpl.class.getDeclaredField("outputLock");
+		lockField.setAccessible(true);
+		final java.util.concurrent.locks.ReentrantLock lock = (java.util.concurrent.locks.ReentrantLock) lockField.get(mgr);
+		// Held so that no sweep drains the queue meanwhile: only register() can take the context off.
+		lock.lock();
+		try {
+			mgr.register(ctx);
+
+			assertTrue(unlockedUnregisters().isEmpty(), "a context registered again is not drained");
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	@Test
+	void closeEmptiesTheTimedOutUnregisterQueue() throws Exception {
+		unlockedUnregisters().add(progressContext("step-queued-at-close", OpType.READ, 0, 0));
+
+		mgr.close();
+
+		assertTrue(unlockedUnregisters().isEmpty(), "close drops the queued contexts");
 	}
 
 	@Test
@@ -1042,11 +1070,14 @@ public class MetricsManagerImplTest {
 
 		final Thread unregister = Thread.ofPlatform().start(() -> mgr.unregister(ctx));
 		// The unregister has taken the context out of the set and waits for the sweep's lock.
+		final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
 		while (mgr.getAllContexts().stream().anyMatch(c -> c == ctx)) {
+			assertTrue(System.nanoTime() < deadline, "the unregister took the context out of the set");
 			Thread.onSpinWait();
 		}
 		release.countDown();
 		unregister.join(10_000);
+		assertFalse(unregister.isAlive(), "the unregister ended");
 
 		final TerminalStepEntry terminal = mgr.getTerminalSteps().stream()
 						.filter(e -> "step-race-waiting".equals(e.stepId))
@@ -1255,6 +1286,13 @@ public class MetricsManagerImplTest {
 		Method record = MetricsManagerImpl.class.getDeclaredMethod("recordProgressSnapshot", MetricsContext.class, AllMetricsSnapshot.class);
 		record.setAccessible(true);
 		record.invoke(mgr, ctx, snapshot);
+	}
+
+	@SuppressWarnings("unchecked")
+	private java.util.Queue<MetricsContext<?>> unlockedUnregisters() throws Exception {
+		java.lang.reflect.Field queueField = MetricsManagerImpl.class.getDeclaredField("progressLeftByUnlockedUnregister");
+		queueField.setAccessible(true);
+		return (java.util.Queue<MetricsContext<?>>) queueField.get(mgr);
 	}
 
 	@SuppressWarnings("unchecked")
