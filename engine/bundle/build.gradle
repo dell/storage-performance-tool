@@ -1860,7 +1860,7 @@ task dockerBuildImage(type: DockerBuildImage) {
     group = 'docker'
     description = 'Builds the Spt Docker image'
 
-    dependsOn assembleDist, copyScenarios
+    dependsOn assembleDist, copyScenarios, tasks.named('verifyLauncherJavaOptions')
 
     inputDir = projectDir
     images.add(dockerImageFullName)
