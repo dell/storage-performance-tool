@@ -126,16 +126,16 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * Eight threads read 5 KB objects in five 1 KB ranges. The stub holds the first range's answer until
-	 * the stop has closed admission, so that read has ranges or its local finalization still to run at the stop; others may
-	 * too. Each is unresolved as soon as the stop refuses it, and the step ends at its limit.
+	 * One thread reads 5 KB objects in five 1 KB ranges. The stub holds the first range's answer until
+	 * the stop has closed admission, so that read's other four ranges are still unsent at the stop. It
+	 * is unresolved as soon as the stop refuses them, and the step ends at its limit.
 	 */
 	@Test
 	void aTimeLimitedMultiRangeReadEndsAtItsLimit() throws Exception {
 		final var hold = new HoldUntilStopped(request -> request.range() != null);
 		stub.answerDelayMillis = hold;
 
-		read(8);
+		read(1);
 
 		hold.assertHeld();
 		assertEndedNearItsLimit();

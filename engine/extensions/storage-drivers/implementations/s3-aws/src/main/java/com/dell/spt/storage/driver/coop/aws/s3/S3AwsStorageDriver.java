@@ -1256,23 +1256,38 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	/**
 	 * A pass of a read split by the size threshold, which sends no request of its own: its parts are
 	 * ranged GETs, as on the Netty driver. The initial pass ends SUCC, so that the driver base sends
-	 * the parts; the finalization pass, once every part has ended, ends SUCC, or with the status of
-	 * a part that ran out of retries. The read is counted once, by its finalization, from the
-	 * initial pass's request start to the finalization's response end, and counts no bytes: each
-	 * part counts its own.
+	 * the parts. The read normally ends in {@link #finishCompositeRead}, on the worker that completed
+	 * its last part; this finalization pass runs only when the driver base queued the read, because
+	 * a part could not be queued. The read is counted once, when it ends, from the initial pass's
+	 * request start to its response end, and counts no bytes: each part counts its own.
 	 */
 	private static CompletableFuture<Void> compositeReadPass(final CompositeDataOperation op) {
 		// A recycled read is a result() copy, which has no parts and counts them all done. Asking for
 		// the parts makes them again, so that only a read whose parts have run is finalized.
 		op.subOperations();
 		if (op.allSubOperationsDone()) {
-			final String partFailure = op.get(KEY_MPU_FAILURE);
-			op.status(partFailure == null ? Status.SUCC : Status.valueOf(partFailure));
-			op.finishResponse();
+			endCompositeRead(op);
 		} else {
 			op.startResponse();
 		}
 		return CompletableFuture.completedFuture(null);
+	}
+
+	/** Every part has ended: the read ends SUCC, or with the status of a part out of retries. */
+	private static void endCompositeRead(final CompositeDataOperation op) {
+		final String partFailure = op.get(KEY_MPU_FAILURE);
+		op.status(partFailure == null ? Status.SUCC : Status.valueOf(partFailure));
+		op.finishResponse();
+	}
+
+	@Override
+	protected boolean finishCompositeRead(final O compositeRead) {
+		if (!(compositeRead instanceof CompositeDataOperation)) {
+			return false;
+		}
+		endCompositeRead((CompositeDataOperation) compositeRead);
+		handleCompleted(compositeRead);
+		return true;
 	}
 
 	/**
