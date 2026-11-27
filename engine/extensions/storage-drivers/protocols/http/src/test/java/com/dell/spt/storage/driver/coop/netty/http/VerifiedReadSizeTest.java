@@ -370,7 +370,8 @@ class VerifiedReadSizeTest {
 
 	/** Only a READ's body is item data: a write's or a delete's response body is not counted or checked. */
 	@ParameterizedTest
-	@EnumSource(value = OpType.class, names = {"CREATE", "UPDATE", "DELETE"})
+	@EnumSource(value = OpType.class, names = {"CREATE", "UPDATE", "DELETE"
+	})
 	void aVerifiedNonReadDataOperationWithAnEmptyBodySucceeds(final OpType type) throws Exception {
 		final var item = item(SIZE);
 		final var op = new DataOperationImpl<DataItem>(0, type, item, null, "/bucket/", Credential.NONE, null, 0);
@@ -378,17 +379,20 @@ class VerifiedReadSizeTest {
 	}
 
 	@Test
-	@SuppressWarnings({"unchecked", "rawtypes"})
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
 	void aVerifiedPathReadIsNotFailedByTheCheck() throws Exception {
 		final var empty = new PathOperationImpl<>(0, OpType.READ, new PathItemImpl("/bucket/dir"), Credential.NONE);
 		assertEquals(Operation.Status.SUCC, readAny(empty, new byte[0]));
 		final var listing = new PathOperationImpl<>(0, OpType.READ, new PathItemImpl("/bucket/dir"), Credential.NONE);
-		assertEquals(Operation.Status.SUCC, readAny(listing, new byte[]{1, 2, 3}));
+		assertEquals(Operation.Status.SUCC, readAny(listing, new byte[]{1, 2, 3
+		}));
 		assertEquals(3, listing.countBytesDone());
 	}
 
 	@Test
-	@SuppressWarnings({"unchecked", "rawtypes"})
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
 	void aVerifiedTokenReadIsNotFailedByTheCheck() throws Exception {
 		final var op = new TokenOperationImpl<>(0, OpType.READ, new TokenItemImpl("token"), Credential.NONE);
 		assertEquals(Operation.Status.SUCC, readAny(op, new byte[0]));
@@ -499,7 +503,8 @@ class VerifiedReadSizeTest {
 	}
 
 	/** Answers a verified operation of any kind with 200 and {@code body}; returns its status. */
-	@SuppressWarnings({"unchecked", "rawtypes"})
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
 	private Operation.Status readAny(final Operation op, final byte[] body) throws Exception {
 		final HttpStorageDriverBase anyDriver = mock(HttpStorageDriverBase.class);
 		final HttpResponseHandlerBase handler = new HttpResponseHandlerBase(anyDriver, true) {
