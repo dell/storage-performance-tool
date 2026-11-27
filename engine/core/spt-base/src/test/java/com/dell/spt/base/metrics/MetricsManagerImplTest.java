@@ -1018,8 +1018,9 @@ public class MetricsManagerImplTest {
 
 	@Test
 	void registerClearsTheContextsOwnEntry() throws Exception {
-		final FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-own", OpType.READ, 5, 5_120);
-		invokeRecordProgressSnapshot(ctx, ctx.snapshot);
+		// No progress in its own snapshot, so the manager's sweep records nothing after the register.
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-own", OpType.READ, 0, 0);
+		invokeRecordProgressSnapshot(ctx, progressSnapshot(5, 5_120));
 		assertEquals(1, lastProgressEntries().size());
 
 		mgr.register(ctx);
@@ -1033,12 +1034,12 @@ public class MetricsManagerImplTest {
 		// Left as a sweep that raced an unregister could leave it: the context is not registered.
 		final FakeMetricsContext<AllMetricsSnapshot> stale = progressContext("step-reused", OpType.CREATE, 900, 921_600);
 		invokeRecordProgressSnapshot(stale, stale.snapshot);
-		final FakeMetricsContext<AllMetricsSnapshot> next = progressContext("step-reused", OpType.CREATE, 3, 3_072);
+		final FakeMetricsContext<AllMetricsSnapshot> next = progressContext("step-reused", OpType.CREATE, 0, 0);
 
 		mgr.register(next);
 
 		assertTrue(lastProgressEntries().isEmpty(), "the stale entry of the step goes");
-		invokeRecordProgressSnapshot(next, next.snapshot);
+		invokeRecordProgressSnapshot(next, progressSnapshot(3, 3_072));
 		assertEquals(3L, mgr.getLastProgressSnapshot("step-reused").orElseThrow().successCount);
 		assertEquals(3L, mgr.getLastProgressSnapshot("step-reused", false).orElseThrow().successCount);
 	}
@@ -1111,6 +1112,10 @@ public class MetricsManagerImplTest {
 		assertEquals(70L, mgr.getLastProgressSnapshot("step-scopes", true).orElseThrow().successCount);
 		assertEquals(35L, mgr.getLastProgressSnapshot(node).orElseThrow().successCount);
 		assertEquals(70L, mgr.getLastProgressSnapshot(fleet).orElseThrow().successCount);
+	}
+
+	private static AllMetricsSnapshot progressSnapshot(final long successCount, final long bytes) {
+		return new CountingSnapshot(successCount, 0, bytes, 100.0, 110.0, new FakeConcurrencySnapshot(1), 2_000L);
 	}
 
 	private static FakeDistributedMetricsContext distributedProgressContext(
