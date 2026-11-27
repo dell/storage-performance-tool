@@ -1,9 +1,13 @@
 package com.dell.spt.base.load.step.client;
 
+import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
+import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -23,9 +27,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
+import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.ThreadContext;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.Logger;
 import org.apache.logging.log4j.core.LoggerContext;
@@ -34,8 +43,8 @@ import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests {@link OpTraceLogFileAggregator#transferToLocal(FileManager, String, LongAdder)} via
- * reflection.
+ * Tests the operation trace collection of {@link OpTraceLogFileAggregator}, and its
+ * {@link OpTraceLogFileAggregator#transferToLocal(FileManager, String, LongAdder)} via reflection.
  */
 public class OpTraceLogFileAggregatorTest {
 
@@ -114,6 +123,158 @@ public class OpTraceLogFileAggregatorTest {
 		assertEquals(2, warnings.size(), warnings.toString());
 		assertTrue(warnings.get(0).startsWith("ERROR Unexpected I/O exception"), warnings.toString());
 		assertTrue(warnings.get(1).startsWith("WARN " + stepId + ": failed to delete the file"), warnings.toString());
+	}
+
+	/**
+	 * Collecting a step's worker traces called directly, from a thread whose log context is left over from an
+	 * earlier step, writes every trace row and every warning under this step's id and the aggregator's name.
+	 */
+	@Test
+	public void collectToLocalRoutesEveryRowAndWarningToItsOwnStep() throws Exception {
+		assertTracesAndWarningsGoToTheirStep(OpTraceLogFileAggregator::collectToLocal);
+	}
+
+	/** The same for the close at the end of the step. */
+	@Test
+	public void closeRoutesEveryRowAndWarningToItsOwnStep() throws Exception {
+		assertTracesAndWarningsGoToTheirStep(OpTraceLogFileAggregator::close);
+	}
+
+	/**
+	 * Two workers: the first returns three rows, then fails a read (an ERROR); the second returns three rows in
+	 * two parts, then fails the delete (a WARN). Each worker's first read waits up to 2 s for the other's, so that
+	 * transfers made in parallel overlap and one of them runs off the calling thread, whatever the scheduling;
+	 * transfers made one after another pass after the first wait times out. On a common pool thread the log
+	 * context is the one the thread inherited from whichever thread created it, so no transfer may run there.
+	 */
+	private static void assertTracesAndWarningsGoToTheirStep(final Consumer<OpTraceLogFileAggregator> collect)
+					throws Exception {
+		final String stepId = "routed-step-" + UUID.randomUUID();
+		final String className = OpTraceLogFileAggregator.class.getSimpleName();
+		final String fileA = "/w1/" + stepId + "/op.trace.csv";
+		final String fileB = "/w2/" + stepId + "/op.trace.csv";
+		final byte[] rowsA = rows(stepId, "a", 3);
+		final byte[] rowsB1 = rows(stepId, "b1", 2);
+		final byte[] rowsB2 = rows(stepId, "b2", 1);
+		final CountDownLatch bothReading = new CountDownLatch(2);
+		final List<String> calls = new CopyOnWriteArrayList<>();
+		final FileManagerService workerA = mock(FileManagerService.class);
+		when(workerA.logFileName(Loggers.OP_TRACES.getName(), stepId)).thenReturn(fileA);
+		doAnswer(invocation -> {
+			recordCall(calls, "read " + fileA);
+			bothReading.countDown();
+			bothReading.await(2, TimeUnit.SECONDS);
+			return rowsA;
+		}).when(workerA).readFromFile(fileA, 0L);
+		when(workerA.readFromFile(fileA, rowsA.length)).thenThrow(new IOException(stepId + " read failed"));
+		doAnswer(invocation -> {
+			recordCall(calls, "delete " + fileA);
+			return null;
+		}).when(workerA).deleteFile(fileA);
+		final FileManagerService workerB = mock(FileManagerService.class);
+		when(workerB.logFileName(Loggers.OP_TRACES.getName(), stepId)).thenReturn(fileB);
+		doAnswer(invocation -> {
+			recordCall(calls, "read " + fileB);
+			bothReading.countDown();
+			bothReading.await(2, TimeUnit.SECONDS);
+			return rowsB1;
+		}).when(workerB).readFromFile(fileB, 0L);
+		when(workerB.readFromFile(fileB, rowsB1.length)).thenReturn(rowsB2);
+		when(workerB.readFromFile(fileB, rowsB1.length + rowsB2.length)).thenThrow(new EOFException());
+		doAnswer(invocation -> {
+			recordCall(calls, "delete " + fileB);
+			throw new IOException(stepId + " delete failed");
+		}).when(workerB).deleteFile(fileB);
+		final var aggregator = new OpTraceLogFileAggregator(stepId, List.of(FileManager.INSTANCE, workerA, workerB));
+
+		final List<CapturedEvent> events;
+		try (var levels = LoggerLevels.atMost(Level.WARN, Loggers.MSG.getName(), Loggers.ERR.getName());
+						var stale = CloseableThreadContext.put(KEY_STEP_ID, "stale-step-" + UUID.randomUUID())
+										.put(KEY_CLASS_NAME, "LinearLoadStepClient")) {
+			events = eventsWhile(stepId, () -> collect.accept(aggregator));
+		}
+
+		verify(workerA).deleteFile(fileA);
+		verify(workerB).deleteFile(fileB);
+		final String expectedContext = " step " + stepId + " class " + className;
+		assertEquals(4, calls.size(), calls.toString());
+		for (final String call : calls) {
+			assertFalse(call.contains(" on common pool "), call);
+			assertTrue(call.endsWith(expectedContext), call);
+		}
+		final List<CapturedEvent> traces = events.stream().filter(e -> e.logger.equals(Loggers.OP_TRACES.getName())).toList();
+		final List<CapturedEvent> warnings = events.stream().filter(e -> !e.logger.equals(Loggers.OP_TRACES.getName())).toList();
+		assertEquals(6, traces.stream().mapToLong(e -> e.message.chars().filter(c -> c == '\n').count()).sum(), traces.toString());
+		assertEquals(2, warnings.size(), warnings.toString());
+		assertTrue(warnings.stream().anyMatch(e -> Level.ERROR.equals(e.level) && e.message.contains(stepId + " read failed")), warnings.toString());
+		assertTrue(warnings.stream().anyMatch(e -> Level.WARN.equals(e.level) && e.message.contains(stepId + ": failed to delete")), warnings.toString());
+		for (final CapturedEvent event : events) {
+			assertEquals(stepId, event.stepId, event.toString());
+			assertEquals(className, event.className, event.toString());
+		}
+	}
+
+	private static byte[] rows(final String stepId, final String part, final int count) {
+		final var rows = new StringBuilder();
+		for (var i = 0; i < count; i++) {
+			rows.append(stepId).append(',').append(part).append('-').append(i).append('\n');
+		}
+		return rows.toString().getBytes(StandardCharsets.UTF_8);
+	}
+
+	private static void recordCall(final List<String> calls, final String call) {
+		calls.add(call
+						+ (Thread.currentThread() instanceof ForkJoinWorkerThread ? " on common pool " : " on ")
+						+ Thread.currentThread().getName()
+						+ " step " + ThreadContext.get(KEY_STEP_ID)
+						+ " class " + ThreadContext.get(KEY_CLASS_NAME));
+	}
+
+	private record CapturedEvent(String logger, Level level, String message, String stepId, String className) {}
+
+	/**
+	 * The trace rows, and the WARN and ERROR messages, about {@code token} that the trace, message and error
+	 * loggers received while {@code action} ran, with the step id and class name of their log context.
+	 */
+	private static List<CapturedEvent> eventsWhile(final String token, final Runnable action) throws InterruptedException {
+		final var context = LoggerContext.getContext(false);
+		final List<Logger> loggers = List.of(
+						context.getLogger(Loggers.OP_TRACES.getName()),
+						context.getLogger(Loggers.MSG.getName()),
+						context.getLogger(Loggers.ERR.getName()));
+		final String endOfLog = token + ": end of log";
+		final List<CapturedEvent> events = new CopyOnWriteArrayList<>();
+		final var capture = new AbstractAppender("opTraceAggregatorRoutingCapture", null, null, true, Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final LogEvent event) {
+				final boolean trace = Loggers.OP_TRACES.getName().equals(event.getLoggerName());
+				final String message = event.getMessage().getFormattedMessage();
+				if ((trace || event.getLevel().isMoreSpecificThan(Level.WARN)) && message.contains(token)) {
+					events.add(new CapturedEvent(
+									event.getLoggerName(),
+									event.getLevel(),
+									message,
+									event.getContextData().getValue(KEY_STEP_ID),
+									event.getContextData().getValue(KEY_CLASS_NAME)));
+				}
+			}
+		};
+		capture.start();
+		loggers.forEach(logger -> logger.addAppender(capture));
+		try {
+			action.run();
+			// The loggers may be asynchronous: this line comes after everything the action logged.
+			Loggers.ERR.error(endOfLog);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+			while (events.stream().noneMatch(e -> e.message.equals(endOfLog))) {
+				assertTrue(System.nanoTime() < deadline, "the log did not reach its end: " + events);
+				Thread.sleep(10);
+			}
+			return events.stream().filter(e -> !e.message.equals(endOfLog)).toList();
+		} finally {
+			loggers.forEach(logger -> logger.removeAppender(capture));
+			capture.stop();
+		}
 	}
 
 	/** The capture keeps the messages about its token only, not another test's warning in the same JVM. */

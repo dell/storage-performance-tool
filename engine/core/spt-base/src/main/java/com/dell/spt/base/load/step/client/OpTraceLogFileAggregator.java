@@ -73,7 +73,20 @@ public class OpTraceLogFileAggregator implements Closeable {
 		collectToLocal(remoteSlicesByIndex);
 	}
 
+	/**
+	 * Copies the remote slices' trace files one after another, on a worker thread that takes the log context of
+	 * this step: the operation traces log writes each row to the file of the step id in its log context, so
+	 * every row, warning and error of the copy goes to this step, whichever thread calls. A parallel stream would
+	 * run part of the copy on common pool threads, which keep the log context they inherited from whichever
+	 * thread created them, often an earlier step's.
+	 */
 	private void collectToLocal(final List<Map.Entry<FileManager, String>> remoteSlices) {
+		try (final Instance logCtx = put(KEY_STEP_ID, loadStepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+			collectToLocalInStepContext(remoteSlices);
+		}
+	}
+
+	private void collectToLocalInStepContext(final List<Map.Entry<FileManager, String>> remoteSlices) {
 
 		final LongAdder byteCounter = new LongAdder();
 		final ScheduledExecutorService executor = Executors.newScheduledThreadPool(
@@ -84,7 +97,7 @@ public class OpTraceLogFileAggregator implements Closeable {
 						() -> {
 							try {
 								remoteSlices
-												.parallelStream()
+												.stream()
 												// don't transfer the local file data
 												.filter(entry -> entry != null && entry.getKey() instanceof FileManagerService)
 												.forEach(
