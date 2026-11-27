@@ -73,7 +73,9 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 		this.srcItemsToConcat = other.srcItemsToConcat;
 		this.countBytesDone = other.countBytesDone;
 		this.respDataTimeStart = other.respDataTimeStart;
-		if (other.randomRangesCount > 0 && other.opType == OpType.UPDATE && other.status != Status.SUCC) {
+		// Decide from this copy's own fields, which super(other) and the lines above set: one read of
+		// other's volatile status, so the decision always matches the status the copy carries.
+		if (randomRangesCount > 0 && opType == OpType.UPDATE && status != Status.SUCC) {
 			// The result copy is the operation a load-op-retry dispatches again: keep the failed
 			// attempt's ranges, which the item did not record, so that reset() can send them again.
 			markedRangesMaskPair[0].or(other.markedRangesMaskPair[0]);
