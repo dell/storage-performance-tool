@@ -1017,6 +1017,46 @@ public class MetricsManagerImplTest {
 	}
 
 	@Test
+	void aSweepFinishingAContextWhoseUnregisterWaitsForTheLockKeepsItsEntryForTheTerminalRow() throws Exception {
+		final Thread testThread = Thread.currentThread();
+		final java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		final java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean(true);
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-race-waiting");
+		// No progress in the final snapshot, so the terminal row comes from the cached entry.
+		ctx.snapshot = new CountingSnapshot(0, 0, 0, 100.0, 110.0, new FakeConcurrencySnapshot(1), 2_000L) {
+			@Override
+			public RateMetricSnapshot successSnapshot() {
+				// The sweep blocks here inside its record of the context, while it is still registered.
+				if (Thread.currentThread() != testThread && armed.compareAndSet(true, false)) {
+					entered.countDown();
+					awaitQuietly(release);
+				}
+				return super.successSnapshot();
+			}
+		};
+		mgr.register(progressContext("step-race-keeper", OpType.READ, 0, 0));
+		mgr.register(ctx);
+		assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS), "the sweep reached the record");
+		invokeRecordProgressSnapshot(ctx, progressSnapshot(6_000, 6_144_000));
+
+		final Thread unregister = Thread.ofPlatform().start(() -> mgr.unregister(ctx));
+		// The unregister has taken the context out of the set and waits for the sweep's lock.
+		while (mgr.getAllContexts().stream().anyMatch(c -> c == ctx)) {
+			Thread.onSpinWait();
+		}
+		release.countDown();
+		unregister.join(10_000);
+
+		final TerminalStepEntry terminal = mgr.getTerminalSteps().stream()
+						.filter(e -> "step-race-waiting".equals(e.stepId))
+						.findFirst()
+						.orElseThrow(() -> new AssertionError("the cached entry became the terminal row"));
+		assertEquals(6_000L, terminal.successCount);
+		assertTrue(lastProgressEntries().isEmpty(), "unregister leaves no entry behind");
+	}
+
+	@Test
 	void registerClearsTheContextsOwnEntry() throws Exception {
 		// No progress in its own snapshot, so the manager's sweep records nothing after the register.
 		final FakeMetricsContext<AllMetricsSnapshot> ctx = progressContext("step-own", OpType.READ, 0, 0);

@@ -51,6 +51,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
@@ -92,6 +93,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	// Live progress per metrics context: a step with several contexts (mixed, weighted, pipeline)
 	// keeps one entry for each, so a live row never takes a sibling context's counts.
 	private final Map<ContextProgressKey, TerminalStepEntry> lastProgressByContext = new ConcurrentHashMap<>();
+	// Contexts whose unregister ran without the output lock: the sweep that held it may record one
+	// again after the unregister removed its entries, so the sweep removes them once more at its end.
+	private final java.util.Queue<MetricsContext<?>> progressLeftByUnlockedUnregister = new ConcurrentLinkedQueue<>();
 	private volatile long terminalRetentionMillis = TimeUnit.SECONDS.toMillis(20);
 	private static final List<Double> STANDARD_TIMING_QUANTILES = List.of(0.5, 0.9, 0.99, 0.999);
 
@@ -182,6 +186,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			throwUncheckedIfInterrupted(cause);
 			LogUtil.exception(Level.DEBUG, cause, "Metrics manager failure");
 		} finally {
+			dropProgressLeftByUnlockedUnregister();
 			outputLock.unlock();
 		}
 		Thread.sleep(10); // 100 Hz iteration rate
@@ -374,6 +379,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 					throwUnchecked(e);
 				} finally {
 					removeProgress(metricsCtx);
+					if (!lockAcquired) {
+						progressLeftByUnlockedUnregister.add(metricsCtx);
+					}
 					if (lockAcquired && outputLock.isHeldByCurrentThread()) {
 						outputLock.unlock();
 					}
@@ -648,6 +656,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		allMetrics.clear();
 		distributedMetrics.clear();
 		lastProgressByContext.clear();
+		progressLeftByUnlockedUnregister.clear();
 	}
 
 	private void removeProgress(final MetricsContext<?> metricsCtx) {
@@ -670,17 +679,27 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	/**
-	 * Records a sweep's snapshot of a context that is still registered. An unregister that timed out
-	 * on the output lock runs beside the sweep and removes the context's entries; an entry the sweep
-	 * recorded after that would hold the context until the manager closes, so it goes again.
+	 * Records a sweep's snapshot of a context that is still registered. A context being unregistered
+	 * leaves the set before its unregister takes the output lock; its entry stays for the unregister
+	 * to read and remove.
 	 */
 	private void recordSweepProgress(final MetricsContext<?> metricsCtx, final AllMetricsSnapshot snapshot) {
-		if (!isRegistered(metricsCtx)) {
-			return;
+		if (isRegistered(metricsCtx)) {
+			recordProgressSnapshot(metricsCtx, snapshot);
 		}
-		recordProgressSnapshot(metricsCtx, snapshot);
-		if (!isRegistered(metricsCtx)) {
-			removeProgress(metricsCtx);
+	}
+
+	/**
+	 * Removes, at the end of a sweep, the entries of contexts whose unregister timed out on the output
+	 * lock and ran beside the sweep. That unregister has removed them and read what it needed; an entry
+	 * the sweep recorded after the removal would hold its context until the manager closes.
+	 */
+	private void dropProgressLeftByUnlockedUnregister() {
+		MetricsContext<?> metricsCtx;
+		while ((metricsCtx = progressLeftByUnlockedUnregister.poll()) != null) {
+			if (!isRegistered(metricsCtx)) {
+				removeProgress(metricsCtx);
+			}
 		}
 	}
 
