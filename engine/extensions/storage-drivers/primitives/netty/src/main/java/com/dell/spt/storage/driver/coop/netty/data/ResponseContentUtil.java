@@ -106,7 +106,8 @@ public abstract class ResponseContentUtil {
 
 		final long rangesSizeSum = dataOp.markedRangesSize();
 		if (chunkSize > rangesSizeSum - countBytesDone) {
-			throw new DataSizeException(dataOp.markedRangesSize(), countBytesDone + chunkSize);
+			throw new DataSizeException(
+							rangesSizeSum, bytesArrived(dataOp, byteRanges, dataItem, countBytesDone, rangesSizeSum) + chunkSize);
 		}
 		final long baseItemSize = dataItem.size();
 
@@ -181,8 +182,10 @@ public abstract class ResponseContentUtil {
 					final DataOperation dataOp, final DataItem dataItem, final long countBytesDone, final ByteBuf chunkData,
 					final int chunkSize, final BitSet markedRangesMaskPair[]) throws DataCorruptionException, IOException {
 
-		if (chunkSize > dataOp.markedRangesSize() - countBytesDone) {
-			throw new DataSizeException(dataOp.markedRangesSize(), countBytesDone + chunkSize);
+		final long rangesSizeSum = dataOp.markedRangesSize();
+		if (chunkSize > rangesSizeSum - countBytesDone) {
+			throw new DataSizeException(rangesSizeSum,
+							bytesArrived(dataOp, markedRangesMaskPair, dataItem, countBytesDone, rangesSizeSum) + chunkSize);
 		}
 
 		DataItem currRange;
@@ -232,6 +235,49 @@ public abstract class ResponseContentUtil {
 			}
 			dataOp.countBytesDone(rangeBytesDone);
 		}
+	}
+
+	/**
+	 * The bytes a fixed-range read has received before the current chunk, for a failure's count only:
+	 * {@code countBytesDone} counts the current range until the last range ends, then the ranges' size.
+	 */
+	private static long bytesArrived(
+					final DataOperation dataOp, final List<Range> byteRanges, final DataItem dataItem,
+					final long countBytesDone, final long rangesSizeSum) throws IOException {
+		if (countBytesDone >= rangesSizeSum) {
+			return countBytesDone;
+		}
+		final long baseItemSize = dataItem.size();
+		long done = countBytesDone;
+		final int currRangeIdx = dataOp.currRangeIdx();
+		for (int i = 0; i < currRangeIdx; i++) {
+			final Range r = byteRanges.get(i);
+			if (r.getBeg() == -1) {
+				done += r.getEnd();
+			} else if (r.getEnd() == -1) {
+				done += baseItemSize - r.getBeg();
+			} else {
+				done += r.getEnd() - r.getBeg() + 1;
+			}
+		}
+		return done;
+	}
+
+	/** As {@link #bytesArrived(DataOperation, List, DataItem, long, long)}, for a random-range read. */
+	private static long bytesArrived(
+					final DataOperation dataOp, final BitSet[] markedRangesMaskPair, final DataItem dataItem,
+					final long countBytesDone, final long rangesSizeSum) throws IOException {
+		if (countBytesDone >= rangesSizeSum) {
+			return countBytesDone;
+		}
+		long done = countBytesDone;
+		final int currRangeIdx = dataOp.currRangeIdx();
+		for (int i = 0; i < currRangeIdx; i++) {
+			if (markedRangesMaskPair[0].get(i) || markedRangesMaskPair[1].get(i)) {
+				done += dataItem.rangeSize(i);
+			}
+		}
+		return done;
 	}
 
 	private static void verifyChunkUpdatedData(

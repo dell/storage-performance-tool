@@ -202,8 +202,33 @@ class VerifiedReadSizeTest {
 	void aMultiRangeReadWithBytesPastItsLastRangeInTheirOwnChunkIsCorrupt() throws Exception {
 		final var item = item(SIZE);
 		final var op = readOp(item, List.of(new Range(0, 99, -1), new Range(200, 299, -1)), 0);
-		assertEquals(Operation.Status.RESP_FAIL_CORRUPT,
-						readChunks(op, bytes(item, 0, 100), bytes(item, 200, 100), bytes(item, 300, 50)).status());
+		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, 250),
+						readChunks(op, bytes(item, 0, 100), bytes(item, 200, 100), bytes(item, 300, 50)));
+	}
+
+	/**
+	 * A chunk longer than every byte left of the ranges fails on entry; the count is every byte that
+	 * arrived, 100 + 250, not the current range's count plus the chunk.
+	 */
+	@Test
+	void aMultiRangeReadWithAChunkPastItsRangesCountsEveryByteThatArrived() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, List.of(new Range(0, 99, -1), new Range(200, 299, -1)), 0);
+		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, 350),
+						readChunks(op, bytes(item, 0, 100), bytes(item, 200, 250)));
+	}
+
+	@Test
+	void aRandomRangeReadWithAChunkPastItsRangesCountsEveryByteThatArrived() throws Exception {
+		final var item = item(SIZE);
+		final var op = readOp(item, null, 3);
+		final byte[] body = markedRangesBody(item, op);
+		final int lastRangeSize = (int) item.rangeSize(op.markedRangesMaskPair()[0].length() - 1);
+		final byte[] firstRanges = Arrays.copyOf(body, body.length - lastRangeSize);
+		// the last range, then as many bytes again as the whole body
+		final byte[] tooLong = Arrays.copyOfRange(body, body.length - lastRangeSize, 2 * body.length);
+		assertEquals(new Outcome(Operation.Status.RESP_FAIL_CORRUPT, 2L * body.length),
+						readChunks(op, firstRanges, tooLong));
 	}
 
 	@Test
