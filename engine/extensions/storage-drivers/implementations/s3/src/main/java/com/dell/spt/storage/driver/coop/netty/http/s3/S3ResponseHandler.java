@@ -623,8 +623,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					// this is an MPU init response
 					final String contentStr = content.toString(UTF_8);
 					final Matcher m = PATTERN_UPLOAD_ID.matcher(contentStr);
-					if (m.find() && !m.group(1).isBlank()) {
-						channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).set(m.group(1));
+					final String uploadId = m.find() ? m.group(1) : null;
+					if (uploadId != null && !uploadId.isBlank()) {
+						channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).set(uploadId);
 					} else if (isSucceededInitiation(mpuOp)) {
 						logUploadIdNotFound(op, content);
 					}
