@@ -2386,7 +2386,6 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 		}()
 		params = prepared.Params()
-		writeIgnoredFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 		scenarioContent := string(prepared.ScenarioJS())
 		expectedStepIDs := prepared.ExpectedStepIDs()
 		verificationRun := scenario.IsIntegrityWorkload(params)
@@ -2418,6 +2417,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 
 		// Check if generate-only flag is set
 		if generateOnly {
+			writeIgnoredFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 			fmt.Printf("Generated scenario file: %s\n", scenarioPath)
 			fmt.Printf("\nSelected Options:\n%s\n", formatScenarioParams(params))
 			fmt.Printf("\nScenario content:\n%s\n", scenarioContent)
@@ -2709,6 +2709,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			endpoint = "dummy-mock"
 		}
 
+		writeIgnoredFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 		fmt.Printf("Launching %s workload against %s...\n", workloadType, endpoint)
 		fmt.Printf("Container: %s\n", sptImage)
 
