@@ -2939,6 +2939,28 @@ public class S3AwsStorageDriverTest {
 			verify(mockS3Client, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
 		}
 
+		/** A part upload whose client answers no response at all fails as a part without an ETag, not with an NPE. */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void uploadPart_withoutAResponseFailsAsAPartWithoutAnETag() throws Exception {
+			when(mockS3Client.uploadPart(any(UploadPartRequest.class), any(AsyncRequestBody.class)))
+							.thenReturn(CompletableFuture.completedFuture(null));
+			final DataItem parentItem = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 2048);
+			parentItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
+			final CompositeDataOperation parentOp = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<>(
+							0, OpType.CREATE, parentItem, "/test-bucket", null, TEST_CRED, null, 0, 1024);
+			parentOp.put(KEY_UPLOAD_ID, "upload-id-789");
+			final PartialDataOperation partialOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<>(
+							0, OpType.CREATE, parentItem.slice(0, 1024), "/test-bucket", null, TEST_CRED, 0, parentOp);
+
+			final CompletionException thrown = assertThrows(CompletionException.class, () -> callUploadPart(drv, partialOp));
+
+			assertEquals("MissingPartETagException", thrown.getCause().getClass().getSimpleName(), String.valueOf(thrown));
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, S3AwsStorageDriver.classifyFailure(thrown));
+			assertNull(parentOp.get("1"));
+		}
+
 		@SuppressWarnings("unchecked")
 		@Test
 		void initiateMultipartUpload_includesChecksumWhenEnabled() throws Exception {

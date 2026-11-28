@@ -106,6 +106,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		 * An informational response does not end the request.
 		 */
 		boolean finalResponseObserved;
+		/**
+		 * A successful part reply had a missing, empty or blank ETag. The part fails as not found once
+		 * the reply proves a transfer; a declined or malformed reply keeps its own status.
+		 */
+		boolean partETagUnusable;
+		/** With {@link #partETagUnusable}: the reply had an ETag header, empty or blank. */
+		boolean partETagHeaderPresent;
 		/** Pool buffer backing this request, or {@code null} for a per-operation buffer. */
 		RdmaBufferPool.PooledBuffer pooled;
 		/** Stale content was invalidated; the buffer is reusable only after a verified fill. */
@@ -1046,6 +1053,22 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * A part reply of an RDMA request without a usable ETag is judged after the RDMA reply contract, in
+	 * {@link #complete}: a declined or malformed RDMA reply keeps its own status, and only a transfer
+	 * fails as not found. A part sent over HTTP fails at once.
+	 */
+	@Override
+	protected boolean defersPartETagCheck(final Channel channel, final O op, final boolean headerPresent) {
+		final RdmaContext ctx = channel == null ? null : channel.attr(RDMA_CONTEXT_ATTR_KEY).get();
+		if (ctx == null) {
+			return false;
+		}
+		ctx.partETagUnusable = true;
+		ctx.partETagHeaderPresent = headerPresent;
+		return true;
+	}
+
+	/**
 	 * A GET body is out of band only when the server reported an RDMA transfer; a declined GET
 	 * carries the object in the HTTP body and is verified in band like any HTTP read.
 	 */
@@ -1132,6 +1155,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			switch (result.outcome()) {
 			case TRANSFERRED -> {
 				stats.rdmaTransferred.increment();
+				if (ctx.partETagUnusable) {
+					// The payload moved, but the completion could not name the part.
+					failPartWithoutETag(op, ctx.partETagHeaderPresent);
+				}
 				if (result.bytesAssumed()) {
 					stats.rdmaBytesAssumed.increment();
 					if (bytesAssumedWarned.compareAndSet(false, true)) {

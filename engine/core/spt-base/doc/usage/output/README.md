@@ -431,7 +431,7 @@ It maps 401, 403, 404, 504, 507 and the other 5xx codes as the table does, and a
 | `RESP_FAIL_UNKNOWN`              | Unrecognized storage response     |                      |
 | `RESP_FAIL_CLIENT`               | Client failure or invalid request | 1xx, 3xx, other 4xx  |
 | `RESP_FAIL_SVC`                  | Internal storage failure          | 413, 414, other 5xx  |
-| `RESP_FAIL_NOT_FOUND`            | Item not found on the storage     | 404                  |
+| `RESP_FAIL_NOT_FOUND`            | Item not found on the storage     | 404; on the S3 drivers also a 2xx multipart reply without the upload ID or part ETag |
 | `RESP_FAIL_AUTH`                 | Authentication/access failure     | 401, 403             |
 | `RESP_FAIL_CORRUPT`              | Data item corrupted               | 2xx                  |
 | `RESP_FAIL_SPACE`                | Not enough space on the storage   | 507                  |

@@ -543,6 +543,11 @@ final class S3MultipartStepCountsTest {
 	}
 
 	@Test
+	void uploadsWhosePartsHaveAnEmptyETagAreEachOneFailure() throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure("", false, "(empty)");
+	}
+
+	@Test
 	void uploadsWhosePartsHaveAnEmptyETagAreEachOneFailureWithRetry() throws Exception {
 		uploadsWhosePartsHaveNoETagAreEachOneFailure("", true, "(empty)");
 	}
@@ -557,16 +562,19 @@ final class S3MultipartStepCountsTest {
 	 * Every part is answered 200 with {@code eTag} as its {@code ETag} header ({@code null}: none).
 	 * Each attempt of the upload's first part fails as {@code RESP_FAIL_NOT_FOUND}, so the upload is
 	 * aborted with no completion and counted once as a failure, and {@code load-op-retry} does not
-	 * start it again. The step's {@code errors.log} names the missing ETag once at WARN.
+	 * start it again. The step's {@code errors.log} names the missing ETag once at WARN, and each
+	 * later attempt at DEBUG.
 	 */
 	private void uploadsWhosePartsHaveNoETagAreEachOneFailure(final String eTag, final boolean retry, final String shown)
 					throws Exception {
 		stub.partETag = request -> eTag;
 		final Map<String, List<Long>> outcomes;
 		final List<ErrorsLogCapture.Line> lines;
+		final List<String> debugMessages;
 		try (final var errors = new ErrorsLogCapture()) {
 			outcomes = write(3, 1, retry, null);
 			lines = errors.drained();
+			debugMessages = errors.drainedDebugMessages();
 		}
 
 		assertEquals(List.of(0L, 3L), outcomes.get("CREATE-1"), outcomes::toString);
@@ -576,6 +584,9 @@ final class S3MultipartStepCountsTest {
 		final var warnings = lines.stream().filter(line -> line.message().contains(MISSING_PART_ETAG)).toList();
 		assertEquals(1, warnings.size(), lines::toString);
 		assertTrue(warnings.get(0).message().contains("(part number 1, ETag header: " + shown + ")"), warnings::toString);
+		final var debugLines = debugMessages.stream().filter(message -> message.contains(MISSING_PART_ETAG)).toList();
+		assertEquals(3 * PART_ATTEMPTS - 1, debugLines.size(), debugMessages::toString);
+		assertTrue(debugLines.stream().allMatch(message -> message.endsWith("(part number 1)")), debugLines::toString);
 		assertEquals(3 * (PART_ATTEMPTS - 1), lines.stream()
 						.filter(line -> line.message().contains("failed (RESP_FAIL_NOT_FOUND), retry")).count(), lines::toString);
 		assertEnded();

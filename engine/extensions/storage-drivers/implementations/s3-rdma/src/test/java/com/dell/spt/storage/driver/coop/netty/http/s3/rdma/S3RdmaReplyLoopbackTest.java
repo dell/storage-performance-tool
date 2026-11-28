@@ -130,6 +130,8 @@ final class S3RdmaReplyLoopbackTest {
 	/** When set, the object response's body as bytes, in place of the reply's text body. */
 	private volatile byte[] objectBodyBytes;
 	private final List<Integer> serverReadSizes = new CopyOnWriteArrayList<>();
+	/** While set, a part reply that performed its transfer carries no ETag either. */
+	private volatile boolean partETagOmitted;
 
 	/**
 	 * How the emulated server answers an object request carrying an RDMA token. An
@@ -1567,15 +1569,24 @@ final class S3RdmaReplyLoopbackTest {
 		private final List<String> captured = Collections.synchronizedList(new ArrayList<>());
 		/** Whether the start marker arrived; set on the logger's thread. */
 		private volatile boolean opened;
-		private final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
-		private final Level previousLevel = logger.getLevel();
+		private final org.apache.logging.log4j.Logger source;
+		private final org.apache.logging.log4j.core.Logger logger;
+		private final Level previousLevel;
 
 		MessageLog() {
+			this(Loggers.MSG);
+		}
+
+		/** Collects the records of {@code source}, such as the engine's Errors logger, at INFO and above. */
+		MessageLog(final org.apache.logging.log4j.Logger source) {
 			super("s3RdmaLoopbackMessageLog", null, null, true, Property.EMPTY_ARRAY);
+			this.source = source;
+			logger = LoggerContext.getContext(false).getLogger(source.getName());
+			previousLevel = logger.getLevel();
 			start();
 			logger.addAppender(this);
 			logger.setLevel(Level.INFO);
-			Loggers.MSG.warn(startMarker);
+			source.warn(startMarker);
 		}
 
 		@Override
@@ -1590,19 +1601,23 @@ final class S3RdmaReplyLoopbackTest {
 
 		/** The one record that contains the text. */
 		String only(final String text) throws InterruptedException {
+			final List<String> matching = matching(text);
+			assertEquals(1, matching.size(), captured.toString());
+			return matching.get(0);
+		}
+
+		/** Every record logged so far that contains the text. */
+		List<String> matching(final String text) throws InterruptedException {
 			final String marker = nextMarker();
-			Loggers.MSG.warn(marker);
+			source.warn(marker);
 			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
 			while (!captured.contains(marker)) {
 				assertFalse(System.nanoTime() > deadline, "log marker did not arrive: " + captured);
 				Thread.sleep(5);
 			}
-			final List<String> matching;
 			synchronized (captured) {
-				matching = captured.stream().filter(message -> message.contains(text)).toList();
+				return captured.stream().filter(message -> message.contains(text)).toList();
 			}
-			assertEquals(1, matching.size(), captured.toString());
-			return matching.get(0);
 		}
 
 		@Override
@@ -2056,6 +2071,82 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	@Test
+	void aDeclinedPartWithoutAnETagKeepsItsDeclinedStatus() throws Exception {
+		// As ECS 4.5 answers a part while its RDMA server cannot start: 200, reply 501, no ETag.
+		assertPartWithoutAnETagKeepsItsRdmaStatus(
+						new Reply(200, "501", null, DECLINE_BODY, false), Operation.Status.RESP_FAIL_SVC, true,
+						"server declined RDMA (reply 501) for CREATE; operations fail",
+						stats -> stats.rdmaDeclinedFailed.sum());
+	}
+
+	@Test
+	void aPartWithAnUnexpectedRdmaReplyAndNoETagStaysAProtocolError() throws Exception {
+		assertPartWithoutAnETagKeepsItsRdmaStatus(
+						new Reply(200, "299", null, null, false), Operation.Status.RESP_FAIL_CORRUPT, false,
+						"RDMA reply contract violated for CREATE: unexpected reply 299",
+						stats -> stats.rdmaProtocolError.sum());
+	}
+
+	/**
+	 * A part whose RDMA reply fails the reply contract and has no ETag fails as the contract says,
+	 * with its RDMA warning and no bytes, and its upload with no completion; nothing is said of the
+	 * ETag. Whether {@code load.op.retry} retries the upload follows the status, as before.
+	 */
+	private void assertPartWithoutAnETagKeepsItsRdmaStatus(
+					final Reply partReply, final Operation.Status expected, final boolean retryable, final String rdmaWarning,
+					final java.util.function.ToLongFunction<RdmaPathStats> outcomeCount) throws Exception {
+		reply = partReply;
+		try (final MessageLog messages = new MessageLog();
+						final MessageLog errors = new MessageLog(Loggers.ERR);
+						final var driver = newDriver(false)) {
+			final var upload = multipartUpload(2048, 1);
+			final var result = executeUntil(driver, upload, S3RdmaReplyLoopbackTest::uploadTerminal);
+
+			assertEquals(expected, result.status(), "requests: " + requests);
+			assertEquals(retryable, com.dell.spt.base.item.op.OperationRetryPolicy.isRetryableStatus(result.status()));
+			assertEquals(1L + MAX_PART_RETRIES, outcomeCount.applyAsLong(driver.pathStats()));
+			assertEquals(0, driver.pathStats().rdmaHttpError.sum());
+			assertEquals(0, driver.pathStats().rdmaTransferred.sum());
+			for (final var part : ((CompositeDataOperation<?>) upload).subOperations()) {
+				assertEquals(0, ((DataOperation<?>) part).countBytesDone(), part::toString);
+			}
+			messages.only(rdmaWarning);
+			assertEquals(List.of(), errors.matching("ETag not found"));
+			assertTrue(abortRequested(), "upload must be aborted: " + requests);
+			assertFalse(completionRequested(), "no completion may be sent: " + requests);
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void aTransferredPartWithoutAnETagFailsAsNotFound() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		partETagOmitted = true;
+		try (final MessageLog errors = new MessageLog(Loggers.ERR); final var driver = newDriver(false)) {
+			final var upload = multipartUpload(2048, 1);
+			final var result = executeUntil(driver, upload, S3RdmaReplyLoopbackTest::uploadTerminal);
+
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, result.status(), "requests: " + requests);
+			assertFalse(com.dell.spt.base.item.op.OperationRetryPolicy.isRetryableStatus(result.status()));
+			assertEquals(1L + MAX_PART_RETRIES, driver.pathStats().rdmaTransferred.sum());
+			assertEquals(0, driver.pathStats().rdmaHttpError.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedFailed.sum());
+			final List<String> eTagLines = errors.matching("ETag not found");
+			assertEquals(1, eTagLines.size(), eTagLines::toString);
+			assertTrue(eTagLines.get(0).contains("(part number 1, ETag header: (missing)) (logged once per step)"),
+							eTagLines::toString);
+			assertTrue(abortRequested(), "upload must be aborted: " + requests);
+			assertFalse(completionRequested(), "no completion may be sent: " + requests);
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	private boolean completionRequested() {
+		return objectRequests().stream().anyMatch(r -> "POST".equals(r.method())
+						&& r.rawQuery() != null && r.rawQuery().startsWith("uploadId="));
+	}
+
 	/** An upload is terminal when every part is done or it failed (an abort need not wait for parts). */
 	private static boolean uploadTerminal(final Operation<DataItem> result) {
 		return result instanceof CompositeDataOperation<?> composite
@@ -2129,7 +2220,8 @@ final class S3RdmaReplyLoopbackTest {
 		if (current.rdmaReply() != null) {
 			exchange.getResponseHeaders().set(RdmaReplyContract.REPLY_HEADER, current.rdmaReply());
 		}
-		if (query != null && query.contains("partNumber=")) {
+		// A declined part stored nothing, so it has no ETag, as on ECS 4.5.
+		if (query != null && query.contains("partNumber=") && current.performTransfer() && !partETagOmitted) {
 			exchange.getResponseHeaders().set("ETag", "\"etag-" + query.hashCode() + "\"");
 		}
 		if (current.bytesTransferred() != null) {

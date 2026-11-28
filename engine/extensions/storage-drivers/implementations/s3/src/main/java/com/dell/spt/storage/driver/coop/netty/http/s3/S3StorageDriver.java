@@ -2648,6 +2648,30 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * Whether this driver judges a successful multipart part reply that {@code channel} carries, and
+	 * whose {@code ETag} header is missing, empty or blank, once it has classified the reply itself,
+	 * instead of the part failing at once as {@code RESP_FAIL_NOT_FOUND}. A driver that returns true
+	 * calls {@link #failPartWithoutETag} if the reply is otherwise a success. It is called only for
+	 * such a reply, never for a part reply with an ETag. False by default.
+	 *
+	 * @param headerPresent whether the reply had an {@code ETag} header, empty or blank
+	 */
+	protected boolean defersPartETagCheck(final Channel channel, final O op, final boolean headerPresent) {
+		return false;
+	}
+
+	/**
+	 * Fails a part attempt whose successful reply had no usable {@code ETag} as {@code
+	 * RESP_FAIL_NOT_FOUND}, and logs it as the S3 response handler does: the step's first one at WARN,
+	 * later ones at DEBUG.
+	 *
+	 * @param headerPresent whether the reply had an {@code ETag} header, empty or blank
+	 */
+	protected final void failPartWithoutETag(final O op, final boolean headerPresent) {
+		S3ResponseHandler.failPartWithoutETag(this, op, headerPresent);
+	}
+
+	/**
 	 * An abort sent outside the child queue, still pending: its upload, why the upload is aborted (the
 	 * text its multipart lifecycle record starts with) and when the abort was scheduled ({@link
 	 * System#nanoTime()}).

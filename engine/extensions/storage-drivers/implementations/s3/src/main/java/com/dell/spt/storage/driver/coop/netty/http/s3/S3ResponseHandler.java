@@ -318,10 +318,10 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						mpuTask.put(S3Api.KEY_PART_CHECKSUM_PREFIX + partNum, checksumVal);
 					}
 				}
-			} else if (!responseFailed && Operation.Status.SUCC.equals(op.status())) {
+			} else if (!responseFailed && Operation.Status.SUCC.equals(op.status())
+							&& (s3Driver == null || !s3Driver.defersPartETagCheck(channel, op, eTag != null))) {
 				// A 2xx part reply without an ETag cannot be named in the completion, so the part fails.
-				op.status(Operation.Status.RESP_FAIL_NOT_FOUND);
-				logPartETagNotFound((PartialDataOperation<?>) op, eTag);
+				failPartWithoutETag(s3Driver, op, eTag != null);
 			}
 		}
 		final String versionId = respHeaders.get("x-amz-version-id");
@@ -692,23 +692,26 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Logs a 2xx part reply whose {@code ETag} header is missing, empty or blank: the first one of the
-	 * driver's step at WARN, with the part's S3 part number and the header value made safe by {@link
-	 * #loggableText}; later ones at DEBUG. Each such part attempt already fails, and its upload with it
-	 * once the part runs out of retries.
+	 * Fails a part attempt answered 2xx with an {@code ETag} header that is missing, empty or blank as
+	 * {@code RESP_FAIL_NOT_FOUND}, and logs it: the first one of the driver's step at WARN, with the
+	 * part's S3 part number and whether the header was missing or empty (the decoder trims a blank
+	 * value to empty); later ones at DEBUG. Without a driver each is logged at WARN. The upload fails
+	 * with the part once the part runs out of retries.
 	 */
-	private void logPartETagNotFound(final PartialDataOperation<?> op, final String eTag) {
-		if (s3Driver == null || s3Driver.claimPartETagNotFoundWarning()) {
-			final String value = eTag == null ? MISSING_ERROR_CODE : loggableText(eTag, true);
+	static void failPartWithoutETag(
+					final S3StorageDriver<?, ?> driver, final Operation<?> op, final boolean headerPresent) {
+		op.status(Operation.Status.RESP_FAIL_NOT_FOUND);
+		final int partNumber = ((PartialDataOperation<?>) op).partNumber() + 1;
+		if (driver == null || driver.claimPartETagNotFoundWarning()) {
 			Loggers.ERR.warn(
 							"{}: ETag not found in the multipart part upload response (part number {}, ETag header: {}) (logged once per step)",
 							op.toString(),
-							op.partNumber() + 1,
-							value.isEmpty() ? "(empty)" : value);
+							partNumber,
+							headerPresent ? "(empty)" : MISSING_ERROR_CODE);
 		} else {
 			Loggers.ERR.debug(
 							"{}: ETag not found in the multipart part upload response (part number {})",
-							op.toString(), op.partNumber() + 1);
+							op.toString(), partNumber);
 		}
 	}
 

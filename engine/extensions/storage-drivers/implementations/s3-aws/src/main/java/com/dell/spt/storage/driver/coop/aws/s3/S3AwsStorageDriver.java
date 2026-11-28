@@ -2308,7 +2308,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final var response = awaitRequest(s3AsyncClient.uploadPart(
 								reqBuilder.build(),
 								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor)));
-				final String eTag = response.eTag();
+				final String eTag = response == null ? null : response.eTag();
 				if (unusablePartETag(eTag)) {
 					return CompletableFuture.failedFuture(new MissingPartETagException(partNumber));
 				}
