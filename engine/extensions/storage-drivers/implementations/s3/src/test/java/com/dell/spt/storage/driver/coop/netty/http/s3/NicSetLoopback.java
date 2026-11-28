@@ -67,6 +67,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
 import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
@@ -161,6 +162,11 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile String completionErrorBody = "<Error><Code>InternalError</Code></Error>";
 	/** How long the stub waits before it answers each object request, chosen by the request itself; none by default. */
 	volatile ToLongFunction<Request> answerDelayMillis = request -> 0;
+	/**
+	 * The upload ID each 200 initiation reply carries, given the one the stub opened; {@code null}
+	 * answers with no body at all. The opened one by default.
+	 */
+	volatile UnaryOperator<String> initiationUploadId = uploadId -> uploadId;
 	/**
 	 * Which copies (a PUT with {@code x-amz-copy-source}) the stub answers 200 with {@link
 	 * #copyErrorBody}, as S3 may answer a copy that fails after its status line; such a copy writes
@@ -640,8 +646,13 @@ final class NicSetLoopback implements AutoCloseable {
 				final var uploadId = "upload-" + uploadIds.incrementAndGet();
 				uploads.put(uploadId, new ConcurrentSkipListMap<>());
 				peakOpenUploads.accumulateAndGet(uploads.size(), Math::max);
+				final var sentId = initiationUploadId.apply(uploadId);
+				if (sentId == null) {
+					exchange.sendResponseHeaders(200, -1);
+					return;
+				}
 				respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key><UploadId>"
-								+ uploadId + "</UploadId></InitiateMultipartUploadResult>");
+								+ sentId + "</UploadId></InitiateMultipartUploadResult>");
 			} else if (uploads.containsKey(param(query, "uploadId")) && failCompletionWithErrorBody.test(request)) {
 				respondInTwoChunks(exchange, completionErrorBody);
 			} else {

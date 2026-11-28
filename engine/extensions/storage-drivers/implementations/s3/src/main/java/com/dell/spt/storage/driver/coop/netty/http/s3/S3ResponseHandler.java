@@ -610,10 +610,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			} else {
 				finishOrdinaryListResponse(channel, (ListOperation<?>) op);
 			}
-		} else {
-			final Attribute<ByteBuf> contentAttr = channel.attr(MULTIPART_RESPONSE_ATTR_KEY);
-			final ByteBuf content = contentAttr.get();
-			if (content != null && content.readableBytes() > 0 && op instanceof CompositeDataOperation mpuOp) {
+		} else if (op instanceof CompositeDataOperation mpuOp) {
+			// a multipart response's body is only ever kept in its own buffer
+			final ByteBuf content = channel.hasAttr(MULTIPART_RESPONSE_ATTR_KEY)
+							? channel.attr(MULTIPART_RESPONSE_ATTR_KEY).get()
+							: null;
+			if (content != null && content.readableBytes() > 0) {
 				if (responseFailed) {
 					logFailedResponse(op, content);
 				}
@@ -621,10 +623,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					// this is an MPU init response
 					final String contentStr = content.toString(UTF_8);
 					final Matcher m = PATTERN_UPLOAD_ID.matcher(contentStr);
-					if (m.find()) {
+					if (m.find() && !m.group(1).isBlank()) {
 						channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).set(m.group(1));
-					} else if (!responseFailed && mpuOp.get(S3Api.KEY_MPU_ABORT) == null && OpType.CREATE.equals(op.type())) {
-						// a refusal has logged its status and code lines, and an abort or a ranged update is not an initiation
+					} else if (isSucceededInitiation(mpuOp)) {
 						logUploadIdNotFound(op, content);
 					}
 				} else {
@@ -635,13 +636,25 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					}
 				}
 				content.clear();
-			} else if (responseFailed) {
-				finishFailedResponse(channel, op);
-			} else if (copyResponse) {
-				finishCopyResponse(channel, op);
+			} else if (!mpuOp.allSubOperationsDone() && isSucceededInitiation(mpuOp)) {
+				logUploadIdNotFound(op, null);
 			}
+		} else if (responseFailed) {
+			finishFailedResponse(channel, op);
+		} else if (copyResponse) {
+			finishCopyResponse(channel, op);
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	/**
+	 * Whether the response of {@code mpuOp}, whose parts are not done, answered its initiation with
+	 * success. A refusal has logged its status and code lines, and an abort or a ranged update is not
+	 * an initiation.
+	 */
+	private boolean isSucceededInitiation(final CompositeDataOperation<?> mpuOp) {
+		return !responseFailed && mpuOp.get(S3Api.KEY_MPU_ABORT) == null && OpType.CREATE.equals(mpuOp.type())
+						&& Operation.Status.SUCC.equals(mpuOp.status());
 	}
 
 	/**
@@ -668,16 +681,22 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Logs a 2xx initiation response without an upload ID: the first one of the driver's step at WARN,
-	 * as one line with the operation and an excerpt of the body's first {@link
-	 * #FAILED_RESPONSE_SCAN_BYTES} bytes after any leading XML whitespace, made safe by {@link #loggableText}; later ones at DEBUG with
-	 * the operation only. Each such operation already fails, so the step's counts name them all.
+	 * Logs a 2xx initiation response without an upload ID, or with a blank one: the first one of the
+	 * driver's step at WARN, as one line with the operation and an excerpt of the body's first {@link
+	 * #FAILED_RESPONSE_SCAN_BYTES} bytes after any leading XML whitespace, made safe by {@link #loggableText}, or {@value
+	 * #MISSING_ERROR_CODE} for a {@code null} or empty body; later ones at DEBUG with the operation only.
+	 * Each such operation already fails, so the step's counts name them all.
 	 */
 	private void logUploadIdNotFound(final Operation<?> op, final ByteBuf content) {
 		if (s3Driver == null || s3Driver.claimUploadIdNotFoundWarning()) {
-			final int start = skipXmlWhitespace(content, content.readerIndex(), content.writerIndex());
-			final int end = Math.min(content.writerIndex(), start + FAILED_RESPONSE_SCAN_BYTES);
-			final String excerpt = loggableText(content.toString(start, end - start, UTF_8), end == content.writerIndex());
+			final String excerpt;
+			if (content == null) {
+				excerpt = "";
+			} else {
+				final int start = skipXmlWhitespace(content, content.readerIndex(), content.writerIndex());
+				final int end = Math.min(content.writerIndex(), start + FAILED_RESPONSE_SCAN_BYTES);
+				excerpt = loggableText(content.toString(start, end - start, UTF_8), end == content.writerIndex());
+			}
 			Loggers.ERR.warn(
 							"{}: Upload id not found in the multipart initiation response, which starts: {} (logged once per step)",
 							op.toString(),

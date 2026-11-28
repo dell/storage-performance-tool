@@ -23,6 +23,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.util.AttributeKey;
 
 import java.lang.management.ManagementFactory;
@@ -219,6 +221,107 @@ final class S3ResponseHandlerBufferTest {
 			assertEquals(List.of(), errors.drained());
 			assertEquals(List.of(), errors.drainedDebugMessages().stream()
 							.filter(message -> message.contains(UPLOAD_ID_NOT_FOUND)).toList());
+		}
+	}
+
+	/**
+	 * An initiation answered 200 with a blank upload ID, which no part URI can carry, fails not-found
+	 * as one without an upload ID does: the ID is not kept, and the step's first one is warned about
+	 * with its body, the rest at DEBUG.
+	 */
+	@Test
+	void anInitiationWithABlankUploadIdFailsNotFound() throws Exception {
+		final var setUpDriver = driver;
+		final var setUpHandler = handler;
+		// a driver warns once per step, so each form gets a driver of its own
+		for (final String blank : List.of(" ", "\t", "\n", "\r\n", " \t\r\n ", "\u2003")) {
+			final var fresh = newDriver();
+			try {
+				driver = fresh;
+				handler = new S3ResponseHandler<>(fresh, false, false, null);
+				anInitiationWithABlankUploadIdFailsNotFound(blank);
+			} finally {
+				driver = setUpDriver;
+				handler = setUpHandler;
+				fresh.close();
+			}
+		}
+	}
+
+	private void anInitiationWithABlankUploadIdFailsNotFound(final String blank) throws Exception {
+		setOpResultOut(driver);
+		final var ops = new ArrayList<String>();
+		try (final var errors = new ErrorsLogCapture()) {
+			for (int i = 0; i < 2; i++) {
+				final var op = upload();
+				op.status(Operation.Status.SUCC);
+				channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE); // no connection pool here
+				respond(op, "<InitiateMultipartUploadResult><UploadId>" + blank + "</UploadId></InitiateMultipartUploadResult>");
+				assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status(), blank::toString);
+				assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+				assertNull(channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get());
+				ops.add(op.toString());
+			}
+			final List<String> warnings = uploadIdWarnings(errors);
+			assertEquals(1, warnings.size(), warnings::toString);
+			assertTrue(excerpt(ops.get(0), warnings.get(0)).startsWith("<InitiateMultipartUploadResult><UploadId>"), warnings::toString);
+			final List<String> debug = errors.drainedDebugMessages().stream()
+							.filter(message -> message.contains(UPLOAD_ID_NOT_FOUND)).toList();
+			assertEquals(List.of(ops.get(1) + ": " + UPLOAD_ID_NOT_FOUND + " in the multipart initiation response"), debug);
+		}
+	}
+
+	/** An upload ID with spaces around or inside it is kept as sent: it is not blank, and is not trimmed. */
+	@Test
+	void anUploadIdWithSpacesIsKeptAsSent() throws Exception {
+		driver.suppressCompletionForResponseTest();
+		for (final String uploadId : List.of(" abc ", "u 1")) {
+			final var op = upload();
+			op.status(Operation.Status.SUCC);
+			try (final var errors = new ErrorsLogCapture()) {
+				respond(op, "<InitiateMultipartUploadResult><UploadId>" + uploadId + "</UploadId></InitiateMultipartUploadResult>");
+				assertEquals(Operation.Status.SUCC, op.status());
+				assertEquals(uploadId, channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).getAndSet(null));
+				assertEquals(List.of(), uploadIdWarnings(errors));
+			}
+		}
+	}
+
+	/** An initiation answered 200 with no body fails not-found and is warned about once, as one without an upload ID. */
+	@Test
+	void anInitiationWithAnEmptyBodyIsWarnedAboutOncePerDriver() throws Exception {
+		setOpResultOut(driver);
+		final var ops = new ArrayList<String>();
+		try (final var errors = new ErrorsLogCapture()) {
+			for (int i = 0; i < 2; i++) {
+				final var op = upload();
+				op.status(Operation.Status.SUCC);
+				channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE); // no connection pool here
+				handler.handleResponseContentFinish(channel, asItemOperation(op));
+				assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+				ops.add(op.toString());
+			}
+			final List<String> warnings = uploadIdWarnings(errors);
+			assertEquals(1, warnings.size(), warnings::toString);
+			assertEquals(S3ResponseHandler.MISSING_ERROR_CODE, excerpt(ops.get(0), warnings.get(0)));
+			final List<String> debug = errors.drainedDebugMessages().stream()
+							.filter(message -> message.contains(UPLOAD_ID_NOT_FOUND)).toList();
+			assertEquals(List.of(ops.get(1) + ": " + UPLOAD_ID_NOT_FOUND + " in the multipart initiation response"), debug);
+		}
+	}
+
+	/** Guard: an initiation refused with 403, whose error document carries an upload ID, keeps its own status and is not warned about. */
+	@Test
+	void aRefusedInitiationCarryingAnUploadIdKeepsItsStatus() throws Exception {
+		setOpResultOut(driver);
+		final var op = upload();
+		op.status(Operation.Status.SUCC);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE); // no connection pool here
+		try (final var errors = new ErrorsLogCapture()) {
+			handler.handleResponseStatus(asItemOperation(op), HttpStatusClass.CLIENT_ERROR, HttpResponseStatus.FORBIDDEN);
+			respond(op, "<Error><Code>AccessDenied</Code><Message>no</Message><UploadId>u-1</UploadId></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, op.status());
+			assertEquals(List.of(), uploadIdWarnings(errors));
 		}
 	}
 

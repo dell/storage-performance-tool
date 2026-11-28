@@ -1462,6 +1462,12 @@ class HttpStorageDriverBaseTest {
 
 	/** The WARN and higher messages of the Messages logger while {@code action} runs. */
 	private static List<String> captureMessages(final Action action) throws Exception {
+		return captureMessages(com.dell.spt.base.logging.Loggers.MSG, action);
+	}
+
+	/** The WARN and higher messages of {@code source} while {@code action} runs. */
+	private static List<String> captureMessages(final org.apache.logging.log4j.Logger source, final Action action)
+					throws Exception {
 		final var marker = "control-response-capture-done:" + System.nanoTime();
 		final var lines = new java.util.concurrent.CopyOnWriteArrayList<String>();
 		final var done = new java.util.concurrent.CountDownLatch(1);
@@ -1480,11 +1486,11 @@ class HttpStorageDriverBaseTest {
 		};
 		appender.start();
 		final var logger = org.apache.logging.log4j.core.LoggerContext.getContext(false)
-						.getLogger(com.dell.spt.base.logging.Loggers.MSG.getName());
+						.getLogger(source.getName());
 		logger.addAppender(appender);
 		try {
 			action.run();
-			com.dell.spt.base.logging.Loggers.MSG.error(marker);
+			source.error(marker);
 			assertTrue(done.await(30, java.util.concurrent.TimeUnit.SECONDS), "the Messages logger drained");
 		} finally {
 			logger.removeAppender(appender);
@@ -1507,5 +1513,177 @@ class HttpStorageDriverBaseTest {
 		return Unpooled.copiedBuffer(
 						"HTTP/1.1 200 OK\r\nContent-Length: " + contentLength + "\r\n\r\n",
 						StandardCharsets.US_ASCII);
+	}
+
+	// --- a request that fails to build or to send completes at once ---
+
+	/** A driver whose requests fail to build with a {@link java.net.URISyntaxException}. */
+	private static final class BadUriDriver extends TestHttpDriver {
+		BadUriDriver(final Config storage) throws Exception {
+			super(storage);
+		}
+
+		@Override
+		protected HttpRequest httpRequest(final DataOperation<DataItemImpl> op, final String nodeAddr)
+						throws java.net.URISyntaxException {
+			throw new java.net.URISyntaxException(op.item().name(), "bad URI");
+		}
+	}
+
+	/** A channel whose write of a {@code failOn} message throws {@code failure} at once, as a broken channel may. */
+	private static final class ThrowingChannel extends EmbeddedChannel {
+		private final Class<?> failOn;
+		private final Throwable failure;
+
+		ThrowingChannel(final Class<?> failOn, final Throwable failure, final io.netty.channel.ChannelHandler handler) {
+			super(handler);
+			this.failOn = failOn;
+			this.failure = failure;
+		}
+
+		@Override
+		public io.netty.channel.ChannelFuture write(final Object msg) {
+			if (failOn.isInstance(msg)) {
+				io.netty.util.ReferenceCountUtil.release(msg);
+				throw HttpStorageDriverBaseTest.<RuntimeException> sneaky(failure);
+			}
+			return super.write(msg);
+		}
+	}
+
+	/** Throws {@code failure}, checked or not, from a method that declares none. */
+	@SuppressWarnings("unchecked")
+	private static <T extends Throwable> T sneaky(final Throwable failure) throws T {
+		throw (T) failure;
+	}
+
+	/** Every message written on a channel, flushed or not. */
+	private static final class WriteRecorder extends io.netty.channel.ChannelOutboundHandlerAdapter {
+		final List<Object> written = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+		@Override
+		public void write(final io.netty.channel.ChannelHandlerContext ctx, final Object msg,
+						final io.netty.channel.ChannelPromise promise) throws Exception {
+			written.add(msg);
+			super.write(ctx, msg, promise);
+		}
+
+		boolean wroteLastContent() {
+			return written.stream().anyMatch(io.netty.handler.codec.http.LastHttpContent.class::isInstance);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static com.github.akurilov.commons.io.Output<DataOperation<DataItemImpl>> results(final TestHttpDriver drv)
+					throws Exception {
+		final com.github.akurilov.commons.io.Output<DataOperation<DataItemImpl>> results = mock(com.github.akurilov.commons.io.Output.class);
+		when(results.put(any(DataOperation.class))).thenReturn(true);
+		drv.operationResultOutput(results);
+		return results;
+	}
+
+	private static DataOperationImpl<DataItemImpl> create(final String name, final String srcPath) throws Exception {
+		final var item = new DataItemImpl(name, 0, ITEM_SIZE);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
+		final var op = new DataOperationImpl<>(0, OpType.CREATE, item, srcPath, "/bucket", null, null, 0);
+		op.reset();
+		return op;
+	}
+
+	/** Sends {@code op} on {@code ch}, leased to it, and checks it completed once, closed, with nothing after its header. */
+	private static void assertFailsAtOnce(final TestHttpDriver drv, final EmbeddedChannel ch, final WriteRecorder recorder,
+					final DataOperationImpl<DataItemImpl> op, final Operation.Status expected) throws Exception {
+		final var results = results(drv);
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		drv.exposeSendRequest(ch, op);
+		assertEquals(expected, op.status());
+		verify(results, times(1)).put(any(DataOperation.class));
+		assertEquals(1, drv.releasedTransports, "complete() returned the transport once");
+		assertFalse(ch.isOpen(), "the failed operation's connection is closed");
+		assertFalse(recorder.wroteLastContent(), () -> "no last content after a request cut short: " + recorder.written);
+		ch.finishAndReleaseAll();
+	}
+
+	/** A URI with a character Netty refuses fails to build: the operation fails at once, not at the network timeout. */
+	@Test
+	void aRequestThatFailsToBuildFailsAtOnce() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var recorder = new WriteRecorder();
+		final var ch = new EmbeddedChannel(recorder);
+		assertFailsAtOnce(drv, ch, recorder, create("a b", null), Operation.Status.FAIL_UNKNOWN);
+		assertEquals(List.of(), recorder.written, "nothing is written");
+	}
+
+	@Test
+	void aRequestWhoseUriFailsToBuildFailsAtOnce() throws Exception {
+		final var drv = new BadUriDriver(baseConfig());
+		final var recorder = new WriteRecorder();
+		final var ch = new EmbeddedChannel(recorder);
+		assertFailsAtOnce(drv, ch, recorder, create("obj", null), Operation.Status.FAIL_UNKNOWN);
+		assertEquals(List.of(), recorder.written, "nothing is written");
+	}
+
+	@Test
+	void aSynchronousThrowFromTheHeaderWriteFailsAtOnce() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var recorder = new WriteRecorder();
+		final var ch = new ThrowingChannel(HttpRequest.class, new IllegalStateException("broken channel"), recorder);
+		assertFailsAtOnce(drv, ch, recorder, create("obj", null), Operation.Status.FAIL_UNKNOWN);
+		assertEquals(List.of(), recorder.written, "nothing is written");
+	}
+
+	/** The data fails after the header was written: the operation fails at once, and its half-written request is not ended. */
+	@Test
+	void anIOExceptionAfterTheHeaderFailsAtOnce() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var recorder = new WriteRecorder();
+		final var ch = new ThrowingChannel(com.dell.spt.storage.driver.coop.netty.data.DataItemFileRegion.class,
+						new java.io.IOException("unreadable data"), recorder);
+		final var warnings = captureMessages(com.dell.spt.base.logging.Loggers.ERR,
+						() -> assertFailsAtOnce(drv, ch, recorder, create("obj", null), Operation.Status.FAIL_IO));
+		assertEquals(List.of(), warnings.stream().filter(line -> line.contains("Failed to send the request")).toList(),
+						"the header's write, failed by the close, is not taken for a second failure");
+		assertEquals(1, recorder.written.size(), () -> "only the header: " + recorder.written);
+		assertTrue(recorder.written.get(0) instanceof HttpRequest, recorder.written::toString);
+	}
+
+	/**
+	 * Guard: the header write fails on a closed channel and its listener completes the operation as
+	 * {@code FAIL_IO}; the data then fails too, and the operation is not completed a second time.
+	 */
+	@Test
+	void aSendFailureAfterTheHeaderWriteFailedCompletesOnce() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var results = results(drv);
+		final var ch = new ThrowingChannel(com.dell.spt.storage.driver.coop.netty.data.DataItemFileRegion.class,
+						new java.io.IOException("unreadable data"), new WriteRecorder());
+		final var unusedClose = ch.close();
+		final var op = create("obj", null);
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		drv.exposeSendRequest(ch, op);
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+		verify(results, times(1)).put(any(DataOperation.class));
+		assertEquals(1, drv.releasedTransports);
+		ch.finishAndReleaseAll();
+	}
+
+	/** Guard: a request that builds and sends is ended with its last content and left to its response. */
+	@Test
+	void aRequestThatSendsIsEndedAndLeftToItsResponse() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var results = results(drv);
+		final var recorder = new WriteRecorder();
+		final var ch = new EmbeddedChannel(recorder);
+		final var op = create("obj", null);
+		drv.leaseFor(ch, op);
+		op.startRequest();
+		drv.exposeSendRequest(ch, op);
+		assertTrue(recorder.wroteLastContent(), recorder.written::toString);
+		verify(results, never()).put(any(DataOperation.class));
+		assertEquals(0, drv.releasedTransports);
+		assertTrue(ch.isOpen());
+		ch.finishAndReleaseAll();
 	}
 }

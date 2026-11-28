@@ -2475,7 +2475,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							&& compositeOp.get(S3Api.KEY_UPLOAD_ID) == null
 							&& !compositeOp.allSubOperationsDone()) {
 				final var initUploadId = channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).getAndSet(null);
-				if (initUploadId == null) {
+				if (initUploadId == null || initUploadId.isBlank()) {
 					// A failed initiation keeps its own status, so load-op-retry retries it when the
 					// failure is transient; only an answer without an upload ID becomes not-found.
 					if (Operation.Status.SUCC.equals(op.status())) {

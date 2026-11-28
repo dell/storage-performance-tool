@@ -730,6 +730,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	@Override
 	protected final void sendRequest(final Channel channel, final O op) {
 		final var nodeAddr = op.nodeAddr();
+		var requestWritten = false;
 		try {
 			if (channel != null) {
 				bindRequestChannel(channel, op);
@@ -738,6 +739,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			if (channel == null) {
 				return;
 			} else {
+				requestWritten = true;
 				channel.write(httpRequest).addListener(httpReqSentCallback);
 				onRequestDispatched(channel, op);
 				if (op.integrityMetadata() != null) {
@@ -753,11 +755,17 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			}
 		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to write the data");
+			if (completeAfterSendFailure(channel, op, Status.FAIL_IO, requestWritten)) {
+				return;
+			}
 		} catch (final URISyntaxException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to build the request URI");
+			if (completeAfterSendFailure(channel, op, Status.FAIL_UNKNOWN, requestWritten)) {
+				return;
+			}
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (completeAfterRequestBuildFailure(channel, op, e)) {
+			if (completeAfterRequestBuildFailure(channel, op, e, requestWritten)) {
 				return;
 			}
 			logRequestBuildFailure(e);
@@ -769,8 +777,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	/**
 	 * Thrown by {@link #httpRequest} for an operation it can't build as asked, for example a versioned
 	 * request whose {@code dataUriPath} override drops the version. Nothing is sent: the operation
-	 * fails at once with {@link Status#FAIL_UNKNOWN}, and {@link #complete} returns its permit and
-	 * closes its connection, as for any failed operation.
+	 * fails at once with {@link Status#FAIL_UNKNOWN}, as for any other request that fails to build on
+	 * a leased connection, and {@link #complete} returns its permit and closes its connection, as for
+	 * any failed operation.
 	 */
 	protected static final class RejectedRequestException extends IllegalStateException {
 
@@ -782,40 +791,70 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * Completes the operation at once after its request failed to build, when the failure has a
-	 * terminal outcome: a reconciled standalone DELETE keeps its protocol status, and a {@link
-	 * RejectedRequestException} on a leased channel fails with {@code FAIL_UNKNOWN}. Returns {@code
-	 * false} for any other failure, which is only logged.
+	 * Completes the operation at once after its request failed to build or to send: a reconciled
+	 * standalone DELETE keeps its protocol status, and any other operation on a leased channel, a
+	 * {@link RejectedRequestException} among them, fails with {@code FAIL_UNKNOWN}, as {@link
+	 * #completeAfterSendFailure} does. Returns {@code false} for any other failure, without a leased
+	 * channel, which is only logged.
 	 */
 	private boolean completeAfterRequestBuildFailure(
-					final Channel channel, final O op, final Throwable requestFailure) {
+					final Channel channel, final O op, final Throwable requestFailure, final boolean requestWritten) {
 		final boolean reconciledDelete = op instanceof DeleteRequestOperation deleteOperation
 						&& deleteOperation.deleteResult() != null;
-		if (!reconciledDelete && !(channel != null && requestFailure instanceof RejectedRequestException)) {
+		if (!reconciledDelete && channel == null) {
 			return false;
 		}
 		logRequestBuildFailure(requestFailure);
-		if (!reconciledDelete) {
-			op.status(Status.FAIL_UNKNOWN);
+		if (reconciledDelete) {
+			finishAndCompleteBuildFailure(channel, op);
+			return true;
 		}
-		try {
-			op.finishRequest();
-		} catch (final IllegalStateException e) {
-			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation request state", op.toString());
+		return completeAfterSendFailure(channel, op, Status.FAIL_UNKNOWN, requestWritten);
+	}
+
+	/**
+	 * Fails the operation on its leased {@code channel} with {@code failureStatus} and completes it at
+	 * once, after its request failed to build or to send, so it never waits for the network timeout
+	 * and nothing more is written on a request cut short. Once the request header was written, its
+	 * write's listener or a response may have completed the operation already, and then it is left
+	 * alone. Returns {@code false} without a channel.
+	 */
+	private boolean completeAfterSendFailure(
+					final Channel channel, final O op, final Status failureStatus, final boolean requestWritten) {
+		if (channel == null) {
+			return false;
 		}
-		if (!reconciledDelete && !channel.eventLoop().inEventLoop()) {
+		if (!channel.eventLoop().inEventLoop()) {
 			// Completing a failed operation closes its channel. Off the event loop the close is only
 			// queued, and the pool could lease the closing channel to the next operation, as it never
 			// does after a failed response. So complete on the event loop, as a response would.
 			try {
-				channel.eventLoop().execute(() -> completeBuildFailure(channel, op));
+				channel.eventLoop().execute(() -> failAndCompleteSendFailure(channel, op, failureStatus, requestWritten));
 				return true;
 			} catch (final RejectedExecutionException e) {
 				LogUtil.exception(Level.DEBUG, e, "{}: completing on the caller's thread", op.toString());
 			}
 		}
-		completeBuildFailure(channel, op);
+		failAndCompleteSendFailure(channel, op, failureStatus, requestWritten);
 		return true;
+	}
+
+	private void failAndCompleteSendFailure(
+					final Channel channel, final O op, final Status failureStatus, final boolean requestWritten) {
+		if (requestWritten && Boolean.TRUE.equals(channel.attr(ATTR_KEY_RELEASED).get())) {
+			return; // already completed, and its transport released
+		}
+		op.status(failureStatus);
+		finishAndCompleteBuildFailure(channel, op);
+	}
+
+	private void finishAndCompleteBuildFailure(final Channel channel, final O op) {
+		try {
+			op.finishRequest();
+		} catch (final IllegalStateException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation request state", op.toString());
+		}
+		completeBuildFailure(channel, op);
 	}
 
 	private void completeBuildFailure(final Channel channel, final O op) {
@@ -849,9 +888,14 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			future.get(1, TimeUnit.NANOSECONDS);
 		} catch (final ExecutionException | TimeoutException e) {
 			final var cause = e.getCause();
-			LogUtil.trace(Loggers.ERR, Level.WARN, cause, "Failed to send the request");
 			final Object rawOp = future.channel().attr(ATTR_KEY_OPERATION).get();
-			if (rawOp != null && !(rawOp instanceof Operation)) {
+			if (rawOp == null) {
+				// Already completed, as after a send failure: its close failed the writes still queued.
+				LogUtil.trace(Loggers.ERR, Level.DEBUG, cause, "Failed to send the request of a completed operation");
+				return;
+			}
+			LogUtil.trace(Loggers.ERR, Level.WARN, cause, "Failed to send the request");
+			if (!(rawOp instanceof Operation)) {
 				LogUtil.trace(Loggers.ERR, Level.ERROR, cause,
 								"sendHttpRequestComplete: ATTR_KEY_OPERATION contains {} instead of Operation",
 								rawOp.getClass().getName());
