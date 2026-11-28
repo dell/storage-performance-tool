@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
@@ -65,6 +66,10 @@ final class S3MultipartStepCountsTest {
 	 * it fails {@link #assertEnded()} instead of ending inside the bound.
 	 */
 	private static final int LONG_WAIT_LIMIT_SECONDS = 60;
+	/** A part's first attempt and the driver's three retries. */
+	private static final int PART_ATTEMPTS = 4;
+	/** How the driver names a part answered without an ETag. */
+	private static final String MISSING_PART_ETAG = "ETag not found in the multipart part upload response";
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private long stepMillis;
@@ -524,6 +529,115 @@ final class S3MultipartStepCountsTest {
 
 		assertEquals(List.of(3L, 1L), outcomes.get("CREATE-1"), outcomes::toString);
 		assertRequests(4, 4, 1);
+		assertEnded();
+	}
+
+	@Test
+	void uploadsWhosePartsHaveNoETagAreEachOneFailure() throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure(null, false, "(missing)");
+	}
+
+	@Test
+	void uploadsWhosePartsHaveNoETagAreEachOneFailureWithRetry() throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure(null, true, "(missing)");
+	}
+
+	@Test
+	void uploadsWhosePartsHaveAnEmptyETagAreEachOneFailureWithRetry() throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure("", true, "(empty)");
+	}
+
+	/** A blank header value reaches the driver empty: the HTTP decoder trims it. */
+	@Test
+	void uploadsWhosePartsHaveABlankETagAreEachOneFailureWithRetry() throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure("   ", true, "(empty)");
+	}
+
+	/**
+	 * Every part is answered 200 with {@code eTag} as its {@code ETag} header ({@code null}: none).
+	 * Each attempt of the upload's first part fails as {@code RESP_FAIL_NOT_FOUND}, so the upload is
+	 * aborted with no completion and counted once as a failure, and {@code load-op-retry} does not
+	 * start it again. The step's {@code errors.log} names the missing ETag once at WARN.
+	 */
+	private void uploadsWhosePartsHaveNoETagAreEachOneFailure(final String eTag, final boolean retry, final String shown)
+					throws Exception {
+		stub.partETag = request -> eTag;
+		final Map<String, List<Long>> outcomes;
+		final List<ErrorsLogCapture.Line> lines;
+		try (final var errors = new ErrorsLogCapture()) {
+			outcomes = write(3, 1, retry, null);
+			lines = errors.drained();
+		}
+
+		assertEquals(List.of(0L, 3L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(3, 0, 3);
+		assertEquals(3 * PART_ATTEMPTS, count(stub.objectRequests(), request -> S3NicSetWorkloadTest.phase(request).equals("PUT part")),
+						() -> "each upload's first part, on each attempt: " + stub.objectRequests());
+		final var warnings = lines.stream().filter(line -> line.message().contains(MISSING_PART_ETAG)).toList();
+		assertEquals(1, warnings.size(), lines::toString);
+		assertTrue(warnings.get(0).message().contains("(part number 1, ETag header: " + shown + ")"), warnings::toString);
+		assertEquals(3 * (PART_ATTEMPTS - 1), lines.stream()
+						.filter(line -> line.message().contains("failed (RESP_FAIL_NOT_FOUND), retry")).count(), lines::toString);
+		assertEnded();
+	}
+
+	/**
+	 * A part answered 200 with a body, as a proxy may send, and no ETag: the body is not taken for an
+	 * S3 error document, so no "S3 error code" line is logged.
+	 */
+	@Test
+	void aPartReplyWithABodyAndNoETagLogsNoS3ErrorCode() throws Exception {
+		stub.partETag = request -> null;
+		stub.partReplyBody = "<html><body>proxy</body></html>";
+		final Map<String, List<Long>> outcomes;
+		final List<ErrorsLogCapture.Line> failedResponses;
+		final List<ErrorsLogCapture.Line> lines;
+		try (final var errors = new ErrorsLogCapture()) {
+			outcomes = write(2, 1, false, null);
+			failedResponses = errors.failedResponseLines();
+			lines = errors.drained();
+		}
+
+		assertEquals(List.of(0L, 2L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(2, 0, 2);
+		assertEquals(List.of(), failedResponses);
+		assertEquals(1, lines.stream().filter(line -> line.message().contains(MISSING_PART_ETAG)).count(), lines::toString);
+		assertEnded();
+	}
+
+	/** Quoted ETags, even of nothing or of spaces, and weak ones are named in the completion as the target sent them. */
+	@Test
+	void quotedOrWeakPartETagsAreUsedAsSent() throws Exception {
+		final var sent = Map.of("1", "\"\"", "2", "\"   \"", "3", "W/\"\"");
+		stub.partETag = request -> sent.getOrDefault(NicSetLoopback.param(request.query(), "partNumber"), "\"etag\"");
+
+		final var outcomes = write(2, 1, false, null);
+
+		assertEquals(List.of(2L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(2, 2, 0);
+		for (final var body : stub.completionBodies) {
+			sent.forEach((part, eTag) -> assertTrue(
+							body.contains(S3Api.COMPLETE_MPU_PART_NUM_START + part + S3Api.COMPLETE_MPU_PART_NUM_END + eTag
+											+ S3Api.COMPLETE_MPU_PART_ETAG_END),
+							body));
+		}
+		assertEnded();
+	}
+
+	/** A part whose first reply lacks its ETag and whose retry has one completes, and its upload with it. */
+	@Test
+	void aPartThatLacksItsETagOnceCompletesOnItsRetry() throws Exception {
+		final var first = new AtomicBoolean(true);
+		stub.partETag = request -> first.getAndSet(false) ? null : "\"etag\"";
+
+		final var outcomes = write(2, 1, true, null);
+
+		assertEquals(List.of(2L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(2, 2, 0);
+		assertEquals(2 * 5 + 1, count(stub.objectRequests(), request -> S3NicSetWorkloadTest.phase(request).equals("PUT part")),
+						() -> "one part retry: " + stub.objectRequests());
+		assertTrue(stub.completionBodies.stream().noneMatch(body -> body.contains("<ETag>null</ETag>") || body.contains("<ETag></ETag>")),
+						stub.completionBodies::toString);
 		assertEnded();
 	}
 

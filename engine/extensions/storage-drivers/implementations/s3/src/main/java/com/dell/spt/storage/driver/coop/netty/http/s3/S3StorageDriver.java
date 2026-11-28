@@ -395,6 +395,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private final AtomicBoolean multipartResponseOverflowWarned = new AtomicBoolean();
 	// One WARN for a 2xx multipart initiation response without an upload ID; the rest go to DEBUG.
 	private final AtomicBoolean uploadIdNotFoundWarned = new AtomicBoolean();
+	// One WARN for a 2xx multipart part response without an ETag; the rest go to DEBUG.
+	private final AtomicBoolean partETagNotFoundWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -2638,6 +2640,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	/** True only the first time it is called: whether this step should warn of an initiation response without an upload ID. */
 	boolean claimUploadIdNotFoundWarning() {
 		return uploadIdNotFoundWarned.compareAndSet(false, true);
+	}
+
+	/** True only the first time it is called: whether this step should warn of a part response without an ETag. */
+	boolean claimPartETagNotFoundWarning() {
+		return partETagNotFoundWarned.compareAndSet(false, true);
 	}
 
 	/**

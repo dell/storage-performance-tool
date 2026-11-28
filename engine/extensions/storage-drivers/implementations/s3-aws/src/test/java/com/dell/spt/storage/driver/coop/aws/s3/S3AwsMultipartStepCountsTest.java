@@ -52,6 +52,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Multipart writes on the {@code s3-aws} driver against a loopback S3 that fails chosen part
@@ -94,6 +95,8 @@ final class S3AwsMultipartStepCountsTest {
 	private static final String INITIATION_RESULT = "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>%s</InitiateMultipartUploadResult>";
 	/** How the driver names the cause of an upload failed for want of an upload ID. */
 	private static final String MISSING_UPLOAD_ID = "upload id not found in the multipart initiation response";
+	/** How the driver names the cause of a part failed for want of an ETag. */
+	private static final String MISSING_PART_ETAG = "etag not found in the multipart part upload response";
 
 	private final MultipartStub stub = new MultipartStub();
 	private long stepMillis;
@@ -445,6 +448,135 @@ final class S3AwsMultipartStepCountsTest {
 		assertRequests(2, 1, 0);
 		assertEquals(List.of("upload-1"), stub.completedUploads);
 		assertEquals(List.of(), stub.nullUploadIdRequests);
+		assertEnded();
+	}
+
+	/** Part replies of a target that does not conform: 200 with no {@code ETag} header, or an empty or blank one. */
+	enum UnusablePartETag {
+		MISSING(null), EMPTY(""), BLANK("   ");
+
+		private final String header;
+
+		UnusablePartETag(final String header) {
+			this.header = header;
+		}
+	}
+
+	/**
+	 * At driver level: a part answered 200 without a usable ETag fails as {@code RESP_FAIL_NOT_FOUND}
+	 * on each of its four attempts, and its upload is aborted with that status, which is not
+	 * retryable. No completion is sent.
+	 */
+	@ParameterizedTest
+	@EnumSource(UnusablePartETag.class)
+	void anUploadWhosePartHasNoETagFailsAsNotFound(final UnusablePartETag eTag) throws Exception {
+		stub.partETag = n -> eTag.header;
+
+		final var upload = upload("part-without-etag");
+
+		final var parent = upload.get(upload.size() - 1);
+		assertTrue(parent instanceof CompositeDataOperation<?>, upload::toString);
+		assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, parent.status(), upload::toString);
+		assertFalse(OperationRetryPolicy.isRetryableStatus(parent.status()));
+		final var parts = upload.stream().filter(result -> result instanceof PartialDataOperation<?>).toList();
+		assertEquals(DRIVER_ATTEMPTS_PER_PART, parts.size(), upload::toString);
+		assertTrue(parts.stream().allMatch(part -> part.status() == Operation.Status.RESP_FAIL_NOT_FOUND), parts::toString);
+		assertEquals(DRIVER_ATTEMPTS_PER_PART, stub.partRequests.get(), "the part and its three retries, sent");
+		assertRequests(1, 0, 1);
+	}
+
+	@ParameterizedTest
+	@EnumSource(UnusablePartETag.class)
+	void uploadsWhosePartsHaveNoETagAreEachOneFailure(final UnusablePartETag eTag) throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure(eTag, false);
+	}
+
+	@ParameterizedTest
+	@EnumSource(UnusablePartETag.class)
+	void uploadsWhosePartsHaveNoETagAreEachOneFailureWithRetry(final UnusablePartETag eTag) throws Exception {
+		uploadsWhosePartsHaveNoETagAreEachOneFailure(eTag, true);
+	}
+
+	/**
+	 * Every part is answered 200 without a usable ETag: each upload is initiated once, its first part
+	 * sent four times, then the upload is aborted and counted once as a failure; with {@code
+	 * load-op-retry} it is not started again.
+	 */
+	private void uploadsWhosePartsHaveNoETagAreEachOneFailure(final UnusablePartETag eTag, final boolean retry)
+					throws Exception {
+		stub.partETag = n -> eTag.header;
+
+		final var outcomes = write(2, retry);
+
+		assertEquals(List.of(0L, 2L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertEquals(2 * DRIVER_ATTEMPTS_PER_PART, stub.partRequests.get(), "each upload's first part and its three retries");
+		assertRequests(2, 0, 2);
+		assertEnded();
+	}
+
+	/**
+	 * Several uploads of a step fail for want of a part ETag: the errors log names the cause once at
+	 * WARN and then at DEBUG, the driver's log warns once, and neither logs an ERROR or the {@code
+	 * NullPointerException} the driver used to fail with.
+	 */
+	@Test
+	void aStepsPartsWithoutAnETagAreWarnedOfOnce() throws Exception {
+		stub.partETag = n -> null;
+		final var uploads = 3;
+		final List<String> errorLines;
+		final List<String> driverLines;
+		try (final var errors = new LogCapture(Loggers.ERR.getName());
+						final var driverLog = new LogCapture(S3AwsStorageDriver.class.getName())) {
+			final var outcomes = write(uploads, false);
+			assertEquals(List.of(0L, (long) uploads), outcomes.get("CREATE-1"), outcomes::toString);
+			errorLines = errors.lines();
+			driverLines = driverLog.lines();
+		}
+
+		final var cause = errorLines.stream().filter(line -> line.contains(MISSING_PART_ETAG)).toList();
+		assertEquals(1, cause.stream().filter(line -> line.startsWith("WARN ")).count(), errorLines::toString);
+		assertEquals(uploads * DRIVER_ATTEMPTS_PER_PART - 1, cause.stream().filter(line -> line.startsWith("DEBUG ")).count(),
+						errorLines::toString);
+		assertTrue(cause.get(0).contains("part number 1"), cause::toString);
+		assertEquals(uploads * (DRIVER_ATTEMPTS_PER_PART - 1), errorLines.stream()
+						.filter(line -> line.startsWith("WARN ") && line.contains("failed (resp_fail_not_found), retry")).count(),
+						errorLines::toString);
+		assertEquals(1, driverLines.stream().filter(line -> line.startsWith("WARN ") && line.contains(MISSING_PART_ETAG)).count(),
+						driverLines::toString);
+		assertEquals(List.of(), driverLines.stream().filter(line -> line.startsWith("ERROR ")).toList());
+		final var npe = "nullpointerexception";
+		assertEquals(List.of(), errorLines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(npe)).toList());
+		assertEquals(List.of(), driverLines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(npe)).toList());
+	}
+
+	/** Quoted ETags, even of nothing or of spaces, and weak ones are used as the target sent them. */
+	@ParameterizedTest
+	@ValueSource(strings = {"\"\"", "\"   \"", "W/\"\""
+	})
+	void aQuotedOrWeakPartETagIsUsedAsSent(final String eTag) throws Exception {
+		stub.partETag = n -> eTag;
+
+		final var upload = upload("quoted-etag");
+
+		assertEquals(Operation.Status.SUCC, upload.get(upload.size() - 1).status(), upload::toString);
+		assertEquals(PARTS, stub.partRequests.get());
+		assertRequests(1, 1, 0);
+		final var named = "<ETag>" + eTag.replace("\"", "&quot;") + "</ETag>";
+		final var body = stub.completionBodies.get(0);
+		assertEquals(PARTS, body.split(java.util.regex.Pattern.quote(named), -1).length - 1, body);
+	}
+
+	/** A part whose first reply lacks its ETag and whose retry has one completes, with no count or failure of its own. */
+	@Test
+	void aPartThatLacksItsETagOnceCompletesOnItsRetry() throws Exception {
+		stub.partETag = n -> n == 1 ? null : "\"etag-" + n + "\"";
+
+		final var outcomes = write(2, true);
+
+		assertEquals(List.of(2L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertEquals(2 * PARTS + 1, stub.partRequests.get(), "one driver retry, sent");
+		assertRequests(2, 2, 0);
+		assertTrue(stub.completionBodies.get(0).contains("<ETag>&quot;etag-2&quot;</ETag>"), stub.completionBodies::toString);
 		assertEnded();
 	}
 

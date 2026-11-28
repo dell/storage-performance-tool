@@ -64,6 +64,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.IntPredicate;
 import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
@@ -168,6 +169,12 @@ final class NicSetLoopback implements AutoCloseable {
 	 */
 	volatile Predicate<Request> failCopyWithErrorBody = request -> false;
 	volatile String copyErrorBody = "<Error><Code>InternalError</Code></Error>";
+	/** The {@code ETag} header of the 200 reply to each part, chosen by the part's request; {@code null} sends none. */
+	volatile Function<Request, String> partETag = request -> "\"etag-" + requests.size() + "\"";
+	/** The body of the 200 reply to each part, as a proxy may send one; none by default. */
+	volatile String partReplyBody;
+	/** The body of each multipart completion request the stub completed, in order. */
+	final List<String> completionBodies = new CopyOnWriteArrayList<>();
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -614,6 +621,17 @@ final class NicSetLoopback implements AutoCloseable {
 					return;
 				}
 				parts.put(Integer.parseInt(param(query, "partNumber")), body);
+				final var eTag = partETag.apply(request);
+				if (eTag != null) {
+					exchange.getResponseHeaders().set("ETag", eTag);
+				}
+				final var reply = partReplyBody;
+				if (reply == null) {
+					exchange.sendResponseHeaders(200, -1);
+				} else {
+					respond(exchange, 200, reply);
+				}
+				return;
 			} else if (exchange.getRequestHeaders().containsKey("x-amz-copy-source")) {
 				if (failCopyWithErrorBody.test(request)) {
 					respondInTwoChunks(exchange, copyErrorBody);
@@ -650,6 +668,7 @@ final class NicSetLoopback implements AutoCloseable {
 					exchange.sendResponseHeaders(404, -1);
 					return;
 				}
+				completionBodies.add(new String(body, StandardCharsets.UTF_8));
 				final var whole = new ByteArrayOutputStream();
 				parts.values().forEach(whole::writeBytes);
 				objects.put(path, whole.toByteArray());

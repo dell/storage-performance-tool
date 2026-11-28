@@ -306,7 +306,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			// On error responses the server omits the ETag header; skip recording in that case
 			// (the part will be retried, and the contextData map rejects null values).
 			final String eTag = respHeaders.get(HttpHeaderNames.ETAG);
-			if (eTag != null) {
+			if (eTag != null && !eTag.isBlank()) {
 				final PartialDataOperation subTask = (PartialDataOperation) op;
 				final CompositeDataOperation mpuTask = subTask.parent();
 				final int partNum = subTask.partNumber() + 1;
@@ -318,6 +318,10 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						mpuTask.put(S3Api.KEY_PART_CHECKSUM_PREFIX + partNum, checksumVal);
 					}
 				}
+			} else if (!responseFailed && Operation.Status.SUCC.equals(op.status())) {
+				// A 2xx part reply without an ETag cannot be named in the completion, so the part fails.
+				op.status(Operation.Status.RESP_FAIL_NOT_FOUND);
+				logPartETagNotFound((PartialDataOperation<?>) op, eTag);
 			}
 		}
 		final String versionId = respHeaders.get("x-amz-version-id");
@@ -684,6 +688,27 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 							excerpt.isEmpty() ? MISSING_ERROR_CODE : excerpt);
 		} else {
 			Loggers.ERR.debug("{}: Upload id not found in the multipart initiation response", op.toString());
+		}
+	}
+
+	/**
+	 * Logs a 2xx part reply whose {@code ETag} header is missing, empty or blank: the first one of the
+	 * driver's step at WARN, with the part's S3 part number and the header value made safe by {@link
+	 * #loggableText}; later ones at DEBUG. Each such part attempt already fails, and its upload with it
+	 * once the part runs out of retries.
+	 */
+	private void logPartETagNotFound(final PartialDataOperation<?> op, final String eTag) {
+		if (s3Driver == null || s3Driver.claimPartETagNotFoundWarning()) {
+			final String value = eTag == null ? MISSING_ERROR_CODE : loggableText(eTag, true);
+			Loggers.ERR.warn(
+							"{}: ETag not found in the multipart part upload response (part number {}, ETag header: {}) (logged once per step)",
+							op.toString(),
+							op.partNumber() + 1,
+							value.isEmpty() ? "(empty)" : value);
+		} else {
+			Loggers.ERR.debug(
+							"{}: ETag not found in the multipart part upload response (part number {})",
+							op.toString(), op.partNumber() + 1);
 		}
 	}
 

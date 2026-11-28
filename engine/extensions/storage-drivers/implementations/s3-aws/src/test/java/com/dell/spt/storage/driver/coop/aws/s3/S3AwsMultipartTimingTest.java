@@ -388,6 +388,13 @@ final class S3AwsMultipartTimingTest {
 		 * {@code Content-Length}, then closes the connection after the body.
 		 */
 		volatile boolean truncateInitiation;
+		/**
+		 * The {@code ETag} header of the 200 reply to each part request, by its number from 1;
+		 * {@code null} sends no {@code ETag} header.
+		 */
+		volatile IntFunction<String> partETag = n -> "\"etag-" + n + "\"";
+		/** The body of each completion request that was answered 200, in order. */
+		final List<String> completionBodies = new CopyOnWriteArrayList<>();
 
 		MultipartStub() {
 			try {
@@ -406,7 +413,7 @@ final class S3AwsMultipartTimingTest {
 
 		private void handle(final HttpExchange exchange) throws IOException {
 			try (exchange) {
-				exchange.getRequestBody().readAllBytes();
+				final var requestBody = exchange.getRequestBody().readAllBytes();
 				final var method = exchange.getRequestMethod();
 				final var query = exchange.getRequestURI().getRawQuery() == null ? "" : exchange.getRequestURI().getRawQuery();
 				if ("null".equals(uploadId(query))) {
@@ -424,7 +431,10 @@ final class S3AwsMultipartTimingTest {
 						respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
 						return;
 					}
-					exchange.getResponseHeaders().set("ETag", "\"etag-" + n + "\"");
+					final var eTag = partETag.apply(n);
+					if (eTag != null) {
+						exchange.getResponseHeaders().set("ETag", eTag);
+					}
 					empty(exchange, 200);
 				} else if ("POST".equals(method) && query.contains("uploads")) {
 					final var n = initiations.incrementAndGet();
@@ -444,6 +454,7 @@ final class S3AwsMultipartTimingTest {
 					respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
 				} else if ("POST".equals(method) && query.contains("uploadId=")) {
 					completions.incrementAndGet();
+					completionBodies.add(new String(requestBody, StandardCharsets.UTF_8));
 					completedUploads.add(uploadId(query));
 					openUploads.remove(uploadId(query));
 					respond(exchange, 200, "<CompleteMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"

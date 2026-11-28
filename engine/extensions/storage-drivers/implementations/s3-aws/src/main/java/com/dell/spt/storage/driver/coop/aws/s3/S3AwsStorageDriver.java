@@ -149,6 +149,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final AtomicBoolean timeoutFailureReported = new AtomicBoolean();
 	private final AtomicBoolean cancellationReported = new AtomicBoolean();
 	private final AtomicBoolean missingUploadIdReported = new AtomicBoolean();
+	private final AtomicBoolean missingPartETagReported = new AtomicBoolean();
 	private final S3AwsClientTimeouts timeouts;
 	/** How long a request may take in all before the driver ends it; 0 for no deadline. */
 	private final long requestTimeoutNanos;
@@ -589,6 +590,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			} else if (failure instanceof MissingUploadIdException) {
 				logUnusableReply(op, originalStatus, failure, missingUploadIdReported);
 				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
+			} else if (failure instanceof MissingPartETagException) {
+				logUnusableReply(op, originalStatus, failure, missingPartETagReported);
+				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			} else {
 				LOG.error(
 								"{} {} requested version {} failed: {}: {}",
@@ -845,6 +849,26 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		MissingUploadIdException(final String detail, final Throwable cause) {
 			super(detail == null ? MESSAGE : MESSAGE + " (" + detail + ")", cause);
 		}
+	}
+
+	/**
+	 * A multipart part answered 2xx with a missing, empty or blank {@code ETag}, or a completion that
+	 * finds such a part: the completion could not name the part.
+	 */
+	static final class MissingPartETagException extends UnusableReplyException {
+
+		private static final long serialVersionUID = 1L;
+
+		static final String MESSAGE = "ETag not found in the multipart part upload response";
+
+		MissingPartETagException(final int partNumber) {
+			super(MESSAGE + " (part number " + partNumber + ")", null);
+		}
+	}
+
+	/** Whether a part's ETag cannot be named in a completion: missing, empty or blank. A quoted value is used as it is. */
+	private static boolean unusablePartETag(final String eTag) {
+		return eTag == null || eTag.isBlank();
 	}
 
 	private static boolean isXmlParseFailure(final Throwable failure) {
@@ -2284,9 +2308,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final var response = awaitRequest(s3AsyncClient.uploadPart(
 								reqBuilder.build(),
 								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor)));
+				final String eTag = response.eTag();
+				if (unusablePartETag(eTag)) {
+					return CompletableFuture.failedFuture(new MissingPartETagException(partNumber));
+				}
 				// Store the ETag in the parent operation context
 				// Key format: part number as string
-				parent.put(String.valueOf(partNumber), response.eTag());
+				parent.put(String.valueOf(partNumber), eTag);
 				return CompletableFuture.completedFuture(null);
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
@@ -2314,12 +2342,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (subOp instanceof PartialDataOperation) {
 				final int partNumber = ((PartialDataOperation) subOp).partNumber() + 1;
 				final String eTag = op.get(String.valueOf(partNumber));
-				if (eTag != null) {
-					completedParts.add(CompletedPart.builder()
-									.partNumber(partNumber)
-									.eTag(eTag)
-									.build());
+				if (unusablePartETag(eTag)) {
+					return CompletableFuture.failedFuture(new MissingPartETagException(partNumber));
 				}
+				completedParts.add(CompletedPart.builder()
+								.partNumber(partNumber)
+								.eTag(eTag)
+								.build());
 			}
 		}
 

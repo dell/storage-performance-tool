@@ -2897,6 +2897,48 @@ public class S3AwsStorageDriverTest {
 			verify(compositeOp, never()).put(eq(KEY_UPLOAD_ID), any());
 		}
 
+		/**
+		 * A completion that finds a part with no usable ETag fails as not found and is not sent, where
+		 * it used to leave the part out of the completion; another part's ETag does not hide it.
+		 */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void completeMultipartUpload_withAPartWithoutAnETagFailsAsNotFound() throws Exception {
+			for (final String stored : new String[]{null, "", "   "
+			}) {
+				final CompositeDataOperation compositeOp = mock(CompositeDataOperation.class);
+				final DataItem item = mock(DataItem.class);
+				when(compositeOp.item()).thenReturn(item);
+				when(compositeOp.type()).thenReturn(OpType.CREATE);
+				when(compositeOp.dstPath()).thenReturn("/test-bucket");
+				when(compositeOp.allSubOperationsDone()).thenReturn(true);
+				when(compositeOp.get(KEY_UPLOAD_ID)).thenReturn("upload-id-complete");
+				when(item.name()).thenReturn("test-key");
+				final PartialDataOperation first = mock(PartialDataOperation.class);
+				final PartialDataOperation second = mock(PartialDataOperation.class);
+				when(first.partNumber()).thenReturn(0);
+				when(second.partNumber()).thenReturn(1);
+				when(compositeOp.subOperations()).thenReturn(List.of(first, second));
+				when(compositeOp.get("1")).thenReturn("\"etag-1\"");
+				when(compositeOp.get("2")).thenReturn(stored);
+
+				Operation.Status status = null;
+				Throwable failure = null;
+				try {
+					drv.execute((Operation) compositeOp).join();
+				} catch (final Exception e) {
+					status = S3AwsStorageDriver.classifyFailure(e);
+					failure = e.getCause() == null ? e : e.getCause();
+				}
+
+				assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, status, "stored ETag: " + stored);
+				assertEquals("MissingPartETagException", failure.getClass().getSimpleName(), String.valueOf(failure));
+				assertTrue(failure.getMessage().contains("part number 2"), failure.getMessage());
+			}
+			verify(mockS3Client, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
+		}
+
 		@SuppressWarnings("unchecked")
 		@Test
 		void initiateMultipartUpload_includesChecksumWhenEnabled() throws Exception {
