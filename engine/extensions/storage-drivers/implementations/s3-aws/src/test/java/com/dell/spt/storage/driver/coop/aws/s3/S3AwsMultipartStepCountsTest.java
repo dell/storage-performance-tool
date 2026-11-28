@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -352,7 +353,7 @@ final class S3AwsMultipartStepCountsTest {
 		final var uploads = 3;
 		final List<String> errorLines;
 		final List<String> driverLines;
-		try (final var errors = new LogCapture("com.dell.spt.base.logging.Errors");
+		try (final var errors = new LogCapture(Loggers.ERR.getName());
 						final var driverLog = new LogCapture(S3AwsStorageDriver.class.getName())) {
 			final var outcomes = write(uploads, false);
 			assertEquals(List.of(0L, (long) uploads), outcomes.get("CREATE-1"), outcomes::toString);
@@ -366,9 +367,9 @@ final class S3AwsMultipartStepCountsTest {
 		assertEquals(1, driverLines.stream().filter(line -> line.startsWith("WARN ") && line.contains(MISSING_UPLOAD_ID)).count(),
 						driverLines::toString);
 		assertEquals(List.of(), driverLines.stream().filter(line -> line.startsWith("ERROR ")).toList());
-		final var npe = "NullPointerException";
-		assertEquals(List.of(), errorLines.stream().filter(line -> line.contains(npe)).toList());
-		assertEquals(List.of(), driverLines.stream().filter(line -> line.contains(npe)).toList());
+		final var npe = "nullpointerexception";
+		assertEquals(List.of(), errorLines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(npe)).toList());
+		assertEquals(List.of(), driverLines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(npe)).toList());
 	}
 
 	/** A valid upload ID with spaces around it is used as the target sent it, not trimmed. */
