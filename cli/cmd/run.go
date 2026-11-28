@@ -2417,6 +2417,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 
 		// Check if generate-only flag is set
 		if generateOnly {
+			writeIgnoredFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 			fmt.Printf("Generated scenario file: %s\n", scenarioPath)
 			fmt.Printf("\nSelected Options:\n%s\n", formatScenarioParams(params))
 			fmt.Printf("\nScenario content:\n%s\n", scenarioContent)
@@ -2708,6 +2709,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			endpoint = "dummy-mock"
 		}
 
+		writeIgnoredFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 		fmt.Printf("Launching %s workload against %s...\n", workloadType, endpoint)
 		fmt.Printf("Container: %s\n", sptImage)
 
@@ -3414,9 +3416,15 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.RangeSize, _ = cmd.Flags().GetString("range-size")
 	params.RangeOffset, _ = cmd.Flags().GetString("range-offset")
 	params.RangeAlign, _ = cmd.Flags().GetString("range-align")
+	// An ignored SPT_PART_SIZE does not conflict with --range-size; a typed --part-size still does.
+	partSizeSource := ignoredPartSizeSource(cmd, workloadType)
+	if partSizeSource == constants.EnvPartSize {
+		params.PartSize = ""
+	}
 	if _, err := scenario.ParseRangePolicy(params); err != nil {
 		return params, err
 	}
+	dropIgnoredRunFlags(&params, partSizeSource)
 	if err := scenario.ValidateEndpointSelection(params.EndpointSelection, scenario.EndpointSelectionTarget{
 		RawEndpoints:   rawEndpointFlags(cmd),
 		S3Driver:       params.S3Driver,

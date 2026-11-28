@@ -133,38 +133,11 @@ final class MetricsJsonResponder {
 					final Set<DistributedMetricsContext> distributed,
 					final Set<MetricsContext> allContexts,
 					final boolean verbose) {
-		final TerminalStepEntry progressEntry = metricsManager.getLastProgressSnapshot(ctx.loadStepId()).orElse(null);
-
-		long successCount = snapshot.successSnapshot().count();
-		long failCount = snapshot.failsSnapshot().count();
-		long corruptCount = corruptCount(snapshot);
-		long bytesTotal = snapshot.byteSnapshot().count();
-		double latencyMean = snapshot.latencySnapshot().mean();
-		double durationMean = snapshot.durationSnapshot().mean();
-		long elapsedMillis = snapshot.elapsedTimeMillis();
-
-		boolean cachedProgress = false;
-		if (progressEntry != null) {
-			successCount = Math.max(successCount, progressEntry.successCount);
-			failCount = Math.max(failCount, progressEntry.failedCount);
-			corruptCount = Math.max(corruptCount, progressEntry.corruptCount);
-			bytesTotal = Math.max(bytesTotal, progressEntry.bytesTotal);
-			if (progressEntry.latencyMeanUs > 0.0) {
-				latencyMean = progressEntry.latencyMeanUs;
-			}
-			if (progressEntry.durationMeanUs > 0.0) {
-				durationMean = progressEntry.durationMeanUs;
-			}
-			elapsedMillis = Math.max(elapsedMillis, progressEntry.elapsedTimeMillis);
-			Loggers.MSG.debug(
-							"{}: node metrics using cached progress (success={}, fails={}, bytes={}, elapsed_ms={})",
-							ctx.loadStepId(),
-							successCount,
-							failCount,
-							bytesTotal,
-							elapsedMillis);
-			cachedProgress = true;
-		}
+		final LiveRow live = liveRow(
+						ctx.loadStepId(), "node", snapshot, metricsManager.getLastProgressSnapshot(ctx).orElse(null));
+		final long successCount = live.successCount();
+		final long failCount = live.failCount();
+		final long elapsedMillis = live.elapsedMillis();
 
 		final int testState = calculateTestState(ctx.metadata(), elapsedMillis, snapshot, successCount, failCount);
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
@@ -185,7 +158,7 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addPreparation(jsonObj, ctx.runId(), ctx.loadStepId());
-		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		addMetrics(jsonObj, snapshot, live);
 		addSteady(jsonObj, snapshot.steadyResult());
 		addDeleteDetailExpectation(jsonObj, ctx.metadata());
 		addListShardMetrics(jsonObj, ctx.metadata());
@@ -195,7 +168,7 @@ final class MetricsJsonResponder {
 						calculateOverallCompletionPercentForStep(ctx.loadStepId(), distributed, allContexts));
 		jsonObj.put("overall_unbounded", calculateOverallUnboundedForStep(ctx.loadStepId(), distributed, allContexts));
 
-		if (verbose && cachedProgress) {
+		if (verbose && live.cachedProgress()) {
 			jsonObj.put("diag_cached_progress", true);
 		}
 		if (verbose) {
@@ -211,38 +184,11 @@ final class MetricsJsonResponder {
 					final Set<DistributedMetricsContext> distributed,
 					final Set<MetricsContext> allContexts,
 					final boolean verbose) {
-		final TerminalStepEntry progressEntry = metricsManager.getLastProgressSnapshot(ctx.loadStepId(), true).orElse(null);
-
-		long successCount = snapshot.successSnapshot().count();
-		long failCount = snapshot.failsSnapshot().count();
-		long corruptCount = corruptCount(snapshot);
-		long bytesTotal = snapshot.byteSnapshot().count();
-		double latencyMean = snapshot.latencySnapshot().mean();
-		double durationMean = snapshot.durationSnapshot().mean();
-		long elapsedMillis = snapshot.elapsedTimeMillis();
-
-		boolean cachedProgress = false;
-		if (progressEntry != null) {
-			successCount = Math.max(successCount, progressEntry.successCount);
-			failCount = Math.max(failCount, progressEntry.failedCount);
-			corruptCount = Math.max(corruptCount, progressEntry.corruptCount);
-			bytesTotal = Math.max(bytesTotal, progressEntry.bytesTotal);
-			if (progressEntry.latencyMeanUs > 0.0) {
-				latencyMean = progressEntry.latencyMeanUs;
-			}
-			if (progressEntry.durationMeanUs > 0.0) {
-				durationMean = progressEntry.durationMeanUs;
-			}
-			elapsedMillis = Math.max(elapsedMillis, progressEntry.elapsedTimeMillis);
-			Loggers.MSG.debug(
-							"{}: aggregate metrics using cached progress (success={}, fails={}, bytes={}, elapsed_ms={})",
-							ctx.loadStepId(),
-							successCount,
-							failCount,
-							bytesTotal,
-							elapsedMillis);
-			cachedProgress = true;
-		}
+		final LiveRow live = liveRow(
+						ctx.loadStepId(), "aggregate", snapshot, metricsManager.getLastProgressSnapshot(ctx).orElse(null));
+		final long successCount = live.successCount();
+		final long failCount = live.failCount();
+		final long elapsedMillis = live.elapsedMillis();
 
 		final int testState = calculateTestState(ctx.metadata(), elapsedMillis, snapshot, successCount, failCount);
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
@@ -263,7 +209,7 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addPreparation(jsonObj, ctx.runId(), ctx.loadStepId());
-		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		addMetrics(jsonObj, snapshot, live);
 		addSteady(jsonObj, snapshot.steadyResult());
 		if (snapshot instanceof DistributedAllMetricsSnapshot fleet) {
 			addDriverStatsTotal(jsonObj, fleet.driverStatsTotal());
@@ -291,7 +237,7 @@ final class MetricsJsonResponder {
 		jsonObj.set(MetricsConstants.METRIC_NAME_CONTRIBUTORS_PRESENT, contributorsPresent);
 		jsonObj.put("partial", ctx.partial());
 
-		if (verbose && cachedProgress) {
+		if (verbose && live.cachedProgress()) {
 			jsonObj.put("diag_cached_progress", true);
 		}
 		if (verbose) {
@@ -323,6 +269,91 @@ final class MetricsJsonResponder {
 		jsonObj.set("limit", limit);
 	}
 
+	/**
+	 * A live row's values: its context's own snapshot, raised to that context's own cached progress
+	 * where the snapshot regressed (a worker missing from a fleet read, a refresh that came back
+	 * empty). A row takes the cached latency and duration only with the cached counts, or when its
+	 * own snapshot has no timing yet, so each mean stays within the range the row shows.
+	 */
+	private record LiveRow(
+					long successCount,
+					long failCount,
+					long corruptCount,
+					long bytesTotal,
+					double latencyMean,
+					double durationMean,
+					TimingMetricSnapshot latencyTiming,
+					TimingMetricSnapshot durationTiming,
+					long elapsedMillis,
+					boolean cachedProgress) {}
+
+	private static LiveRow liveRow(
+					final String stepId, final String label, final AllMetricsSnapshot snapshot, final TerminalStepEntry cached) {
+		long successCount = snapshot.successSnapshot().count();
+		long failCount = snapshot.failsSnapshot().count();
+		long corruptCount = corruptCount(snapshot);
+		long bytesTotal = snapshot.byteSnapshot().count();
+		double latencyMean = snapshot.latencySnapshot().mean();
+		double durationMean = snapshot.durationSnapshot().mean();
+		TimingMetricSnapshot latencyTiming = snapshot.latencySnapshot();
+		TimingMetricSnapshot durationTiming = snapshot.durationSnapshot();
+		long elapsedMillis = snapshot.elapsedTimeMillis();
+		if (cached == null) {
+			return new LiveRow(successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean,
+							latencyTiming, durationTiming, elapsedMillis, false);
+		}
+		final boolean regressed = cached.successCount > successCount
+						|| cached.failedCount > failCount
+						|| cached.corruptCount > corruptCount
+						|| cached.bytesTotal > bytesTotal;
+		boolean cachedProgress = regressed || cached.elapsedTimeMillis > elapsedMillis;
+		successCount = Math.max(successCount, cached.successCount);
+		failCount = Math.max(failCount, cached.failedCount);
+		corruptCount = Math.max(corruptCount, cached.corruptCount);
+		bytesTotal = Math.max(bytesTotal, cached.bytesTotal);
+		elapsedMillis = Math.max(elapsedMillis, cached.elapsedTimeMillis);
+		if ((regressed || latencyMean <= 0.0) && cached.latencyMeanUs > 0.0) {
+			latencyMean = cached.latencyMeanUs;
+			if (cached.latencySnapshot != null) {
+				latencyTiming = cached.latencySnapshot;
+			}
+			cachedProgress = true;
+		}
+		if ((regressed || durationMean <= 0.0) && cached.durationMeanUs > 0.0) {
+			durationMean = cached.durationMeanUs;
+			if (cached.durationSnapshot != null) {
+				durationTiming = cached.durationSnapshot;
+			}
+			cachedProgress = true;
+		}
+		if (cachedProgress) {
+			Loggers.MSG.debug(
+							"{}: {} metrics using cached progress (success={}, fails={}, bytes={}, elapsed_ms={})",
+							stepId,
+							label,
+							successCount,
+							failCount,
+							bytesTotal,
+							elapsedMillis);
+		}
+		return new LiveRow(successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean,
+						latencyTiming, durationTiming, elapsedMillis, cachedProgress);
+	}
+
+	private void addMetrics(final ObjectNode jsonObj, final AllMetricsSnapshot snapshot, final LiveRow live) {
+		addMetrics(
+						jsonObj,
+						snapshot,
+						live.successCount(),
+						live.failCount(),
+						live.corruptCount(),
+						live.bytesTotal(),
+						live.latencyMean(),
+						live.durationMean(),
+						live.latencyTiming(),
+						live.durationTiming());
+	}
+
 	private void addMetrics(
 					final ObjectNode jsonObj,
 					final AllMetricsSnapshot snapshot,
@@ -332,6 +363,30 @@ final class MetricsJsonResponder {
 					final long bytesTotal,
 					final double latencyMean,
 					final double durationMean) {
+		addMetrics(
+						jsonObj,
+						snapshot,
+						successCount,
+						failCount,
+						corruptCount,
+						bytesTotal,
+						latencyMean,
+						durationMean,
+						snapshot.latencySnapshot(),
+						snapshot.durationSnapshot());
+	}
+
+	private void addMetrics(
+					final ObjectNode jsonObj,
+					final AllMetricsSnapshot snapshot,
+					final long successCount,
+					final long failCount,
+					final long corruptCount,
+					final long bytesTotal,
+					final double latencyMean,
+					final double durationMean,
+					final TimingMetricSnapshot latencyTiming,
+					final TimingMetricSnapshot durationTiming) {
 		final ObjectNode operations = objectMapper.createObjectNode();
 		operations.put("success_count", successCount);
 		operations.put("failed_count", failCount);
@@ -348,8 +403,8 @@ final class MetricsJsonResponder {
 		final ObjectNode timing = objectMapper.createObjectNode();
 		timing.put("latency_mean_us", latencyMean);
 		timing.put("duration_mean_us", durationMean);
-		timing.set("latency", timingObject(snapshot.latencySnapshot(), latencyMean));
-		timing.set("duration", timingObject(snapshot.durationSnapshot(), durationMean));
+		timing.set("latency", timingObject(latencyTiming, latencyMean));
+		timing.set("duration", timingObject(durationTiming, durationMean));
 		final TimingMetricSnapshot ttfbSnapshot = snapshot.ttfbSnapshot();
 		if (ttfbSnapshot != null && ttfbSnapshot.count() > 0) {
 			timing.set("ttfb", timingObject(ttfbSnapshot, ttfbSnapshot.mean()));
@@ -1053,11 +1108,11 @@ final class MetricsJsonResponder {
 		long maxElapsed = 0L;
 		long timeLimitSec = 0L;
 
+		final java.util.List<MetricsContext> ctxs = new java.util.ArrayList<>();
 		final java.util.List<java.util.Map> metas = new java.util.ArrayList<>();
 		final java.util.List<AllMetricsSnapshot> snaps = new java.util.ArrayList<>();
 		boolean usingDistributed = false;
 
-		final Optional<TerminalStepEntry> distributedProgress = metricsManager.getLastProgressSnapshot(stepId, true);
 		for (DistributedMetricsContext ctx : distributed) {
 			if (!stepId.equals(ctx.loadStepId())) {
 				continue;
@@ -1068,6 +1123,7 @@ final class MetricsJsonResponder {
 				continue;
 			}
 			usingDistributed = true;
+			ctxs.add(ctx);
 			metas.add(ctx.metadata());
 			snaps.add(snapshot);
 		}
@@ -1082,12 +1138,11 @@ final class MetricsJsonResponder {
 				if (snapshot == null) {
 					continue;
 				}
+				ctxs.add(ctx);
 				metas.add(ctx.metadata());
 				snaps.add(snapshot);
 			}
 		}
-
-		final Optional<TerminalStepEntry> localProgress = usingDistributed ? Optional.empty() : metricsManager.getLastProgressSnapshot(stepId);
 
 		for (int i = 0; i < snaps.size(); i++) {
 			final AllMetricsSnapshot snapshot = snaps.get(i);
@@ -1103,15 +1158,9 @@ final class MetricsJsonResponder {
 			long failCount = snapshot.failsSnapshot().count();
 			long elapsedMillis = snapshot.elapsedTimeMillis();
 
-			if (usingDistributed) {
-				if (distributedProgress.isPresent()) {
-					final TerminalStepEntry entry = distributedProgress.get();
-					successCount = Math.max(successCount, entry.successCount);
-					failCount = Math.max(failCount, entry.failedCount);
-					elapsedMillis = Math.max(elapsedMillis, entry.elapsedTimeMillis);
-				}
-			} else if (localProgress.isPresent()) {
-				final TerminalStepEntry entry = localProgress.get();
+			final Optional<TerminalStepEntry> progress = metricsManager.getLastProgressSnapshot(ctxs.get(i));
+			if (progress.isPresent()) {
+				final TerminalStepEntry entry = progress.get();
 				successCount = Math.max(successCount, entry.successCount);
 				failCount = Math.max(failCount, entry.failedCount);
 				elapsedMillis = Math.max(elapsedMillis, entry.elapsedTimeMillis);

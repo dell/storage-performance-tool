@@ -526,6 +526,15 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		return uriPath;
 	}
 
+	/**
+	 * Extension hook for transports which deliver a successful GET body outside HTTP, such as RDMA.
+	 * The HTTP response of such a read carries no body, so a verified read's size is not checked
+	 * against it: the transport checks the length it delivered.
+	 */
+	protected boolean observesReadBodyOutOfBand(final O op) {
+		return false;
+	}
+
 	protected HttpMethod dataHttpMethod(final OpType opType) {
 		switch (opType) {
 		case READ:

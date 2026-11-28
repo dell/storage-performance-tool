@@ -93,9 +93,9 @@ public class FileStorageDriverTest {
 	}
 
 	/**
-	 * A READ of a FIFO with no writer blocks its I/O worker in the file open, inside the open-files
-	 * map's computeIfAbsent, where an interrupt does not reach it (as a stalled mount would). The
-	 * stop warns and goes on, and the close must not wait on the map slot that open holds.
+	 * A READ of a FIFO with no writer blocks its I/O worker in the file open, where an interrupt
+	 * does not reach it (as a stalled mount would). The stop warns and goes on, and the close must
+	 * not wait on that open.
 	 */
 	@Test
 	@Timeout(60)
@@ -155,7 +155,7 @@ public class FileStorageDriverTest {
 	}
 
 	/** A FIFO at {@code fifo}, or the test is skipped where there is no mkfifo or /proc. */
-	private static void mkfifoOrSkip(final Path fifo) throws InterruptedException {
+	static void mkfifoOrSkip(final Path fifo) throws InterruptedException {
 		assumeTrue(File.separatorChar == '/', "POSIX only");
 		assumeTrue(new File("/proc/self/fd").isDirectory(), "/proc/self/fd is not available");
 		final int mkfifo;
@@ -169,7 +169,7 @@ public class FileStorageDriverTest {
 	}
 
 	/** How many descriptors of this process point at {@code path}. */
-	private static int descriptorsOn(final Path path) throws IOException {
+	static int descriptorsOn(final Path path) throws IOException {
 		final Path target = path.toRealPath();
 		final var fds = new File("/proc/self/fd").listFiles();
 		int n = 0;

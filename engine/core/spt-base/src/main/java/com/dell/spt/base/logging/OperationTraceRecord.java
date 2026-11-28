@@ -50,7 +50,9 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		opTypeCode = opResult.type() != null ? opResult.type().name() : "";
 		statusCode = opResult.status() != null ? opResult.status().name() : "";
 		reqTimeStart = opResult.reqTimeStart();
-		duration = opResult.duration();
+		// An attempt that failed before its request was sent has no start, and its duration() is its
+		// end time: leave the duration and the latencies derived from it empty.
+		duration = reqTimeStart > 0 ? opResult.duration() : -1;
 		var t = opResult.latency();
 		respLatency = t <= duration ? t : -1;
 		if (opResult instanceof DataOperation dataIoResult) {

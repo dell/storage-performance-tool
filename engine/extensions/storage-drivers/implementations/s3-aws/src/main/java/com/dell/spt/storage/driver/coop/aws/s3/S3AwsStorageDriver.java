@@ -96,6 +96,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				implements ListDiscoveryProbe, DeleteVerificationProbe, StandaloneDeletePreparable {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
+	/**
+	 * The engine's Errors logger, whose lines go to the step's errors.log. Named here because the
+	 * driver compiles against the SLF4J API only, not the engine's Log4j loggers.
+	 */
+	private static final Logger ERR_LOG = LoggerFactory.getLogger("com.dell.spt.base.logging.Errors");
 
 	/** How often the request watchdog looks at the requests in flight. */
 	static final long WATCHDOG_TICK_MILLIS = 100;
@@ -143,6 +148,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final AtomicBoolean stallFailureReported = new AtomicBoolean();
 	private final AtomicBoolean timeoutFailureReported = new AtomicBoolean();
 	private final AtomicBoolean cancellationReported = new AtomicBoolean();
+	private final AtomicBoolean missingUploadIdReported = new AtomicBoolean();
 	private final S3AwsClientTimeouts timeouts;
 	/** How long a request may take in all before the driver ends it; 0 for no deadline. */
 	private final long requestTimeoutNanos;
@@ -580,6 +586,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			} else if (originalStatus == Status.FAIL_TIMEOUT) {
 				logTimeoutFailure(op, failure);
 				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
+			} else if (failure instanceof MissingUploadIdException) {
+				logUnusableReply(op, originalStatus, failure, missingUploadIdReported);
+				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			} else {
 				LOG.error(
 								"{} {} requested version {} failed: {}: {}",
@@ -788,6 +797,65 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return false;
 	}
 
+	/**
+	 * A target that answers a request 2xx without a field the driver needs, such as a multipart
+	 * initiation without an upload ID, usually answers every such request of the step that way. So
+	 * the first one of each kind, which {@code reported} guards, is logged at WARN to the errors log
+	 * and the driver's log, and later ones at DEBUG. Each such operation fails, and the step's counts
+	 * name them all.
+	 *
+	 * @return whether this was the first of its kind, which is logged as a warning
+	 */
+	boolean logUnusableReply(final O op, final Status status, final Throwable failure, final AtomicBoolean reported) {
+		if (reported.compareAndSet(false, true)) {
+			ERR_LOG.warn("{}: {} (logged once per step)", op, failure.getMessage());
+			LOG.warn(
+							"{} {} requested version {} failed: {}: {}; further occurrences are logged at DEBUG",
+							op.type(), op.item().name(), op.requestedVersionId(), status, failure.getMessage());
+			return true;
+		}
+		ERR_LOG.debug("{}: {}", op, failure.getMessage());
+		LOG.debug(
+						"{} {} requested version {} failed: {}: {}",
+						op.type(), op.item().name(), op.requestedVersionId(), status, failure.getMessage());
+		return false;
+	}
+
+	/**
+	 * A 2xx reply without a field the driver needs to go on, which it cannot use: the request fails
+	 * as {@code RESP_FAIL_NOT_FOUND}, which {@code load.op.retry} does not retry, as on the
+	 * {@code s3} driver. The message names the missing field; a subclass stands for each kind.
+	 */
+	abstract static class UnusableReplyException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		UnusableReplyException(final String message, final Throwable cause) {
+			super(message, cause);
+		}
+	}
+
+	/** A multipart initiation answered 2xx with no usable upload ID, or with a body that is not XML. */
+	static final class MissingUploadIdException extends UnusableReplyException {
+
+		private static final long serialVersionUID = 1L;
+
+		static final String MESSAGE = "Upload id not found in the multipart initiation response";
+
+		MissingUploadIdException(final String detail, final Throwable cause) {
+			super(detail == null ? MESSAGE : MESSAGE + " (" + detail + ")", cause);
+		}
+	}
+
+	private static boolean isXmlParseFailure(final Throwable failure) {
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			if (cause instanceof javax.xml.stream.XMLStreamException) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private void finishStandaloneDeleteOperation(final O op) {
 		final var deleteOperation = (DeleteRequestOperation) op;
 		try {
@@ -888,6 +956,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 		final Exception ex = (Exception) cause;
 
+		if (ex instanceof UnusableReplyException) {
+			return Status.RESP_FAIL_NOT_FOUND;
+		}
 		if (ex instanceof S3Exception) {
 			final int statusCode = ((S3Exception) ex).statusCode();
 			if (statusCode >= 200 && statusCode < 300) {
@@ -2134,7 +2205,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	// -----------------------------------------------------------------------
 
 	/**
-	 * Initiate a multipart upload.
+	 * Initiate a multipart upload. A 2xx reply without a usable upload ID, or whose body the client
+	 * cannot parse as XML, fails the upload with {@link MissingUploadIdException}: no part follows.
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> initiateMultipartUpload(final CompositeDataOperation op) {
@@ -2152,10 +2224,28 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		markIntegrityRequestDispatched();
-		final var response = awaitRequest(s3AsyncClient.createMultipartUpload(reqBuilder.build()));
-		op.put(KEY_UPLOAD_ID, response.uploadId());
-		captureResponseIdentity(
-						op, null, requestId(response));
+		final CreateMultipartUploadResponse response;
+		try {
+			response = awaitRequest(s3AsyncClient.createMultipartUpload(reqBuilder.build()));
+		} catch (final RuntimeException e) {
+			// A reply cut short by its connection fails in the client before its body is parsed and
+			// stays retryable; a whole body that is not XML is the target's answer.
+			if (!Thread.currentThread().isInterrupted() && !(e instanceof S3AwsRequests.RequestStoppedException)
+							&& isXmlParseFailure(e)) {
+				return CompletableFuture.failedFuture(new MissingUploadIdException("the body is not XML", e));
+			}
+			throw e;
+		}
+		if (response == null) {
+			return CompletableFuture.failedFuture(new MissingUploadIdException("no response", null));
+		}
+		captureResponseIdentity(op, null, requestId(response));
+		final String uploadId = response.uploadId();
+		if (uploadId == null || uploadId.isBlank()) {
+			return CompletableFuture.failedFuture(
+							new MissingUploadIdException(uploadId == null ? null : "it is empty or blank", null));
+		}
+		op.put(KEY_UPLOAD_ID, uploadId);
 		return CompletableFuture.completedFuture(null);
 	}
 

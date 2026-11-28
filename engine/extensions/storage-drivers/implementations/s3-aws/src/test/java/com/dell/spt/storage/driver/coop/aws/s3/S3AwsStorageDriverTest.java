@@ -56,6 +56,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 
+import software.amazon.awssdk.awscore.DefaultAwsResponseMetadata;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
@@ -2837,6 +2838,63 @@ public class S3AwsStorageDriverTest {
 			verify(mockS3Client).createMultipartUpload(cap.capture());
 			assertEquals("test-bucket", cap.getValue().bucket());
 			verify(compositeOp).put(KEY_UPLOAD_ID, "test-upload-id-123");
+		}
+
+		/** A client that completes an initiation with no response fails it as not found, not unknown. */
+		@SuppressWarnings({"unchecked", "rawtypes"})
+		@Test
+		void initiateMultipartUpload_withoutAResponseFailsAsNotFound() throws Exception {
+			when(mockS3Client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(null));
+			final CompositeDataOperation compositeOp = mock(CompositeDataOperation.class);
+			final DataItem item = mock(DataItem.class);
+			when(compositeOp.item()).thenReturn(item);
+			when(compositeOp.type()).thenReturn(OpType.CREATE);
+			when(compositeOp.dstPath()).thenReturn("/test-bucket");
+			when(item.name()).thenReturn("test-key");
+
+			Operation.Status status = null;
+			try {
+				drv.execute((Operation) compositeOp).join();
+			} catch (final Exception e) {
+				status = S3AwsStorageDriver.classifyFailure(e);
+			}
+
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, status);
+			verify(compositeOp, never()).put(eq(KEY_UPLOAD_ID), any());
+		}
+
+		/**
+		 * An initiation answered without an upload ID fails as not found and keeps the reply's request
+		 * ID for the failure's record.
+		 */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void initiateMultipartUpload_withoutAnUploadIdKeepsTheRequestId() throws Exception {
+			final var response = (CreateMultipartUploadResponse) CreateMultipartUploadResponse.builder()
+							.bucket("test-bucket").key("test-key")
+							.responseMetadata(DefaultAwsResponseMetadata.create(Map.of("x-amz-request-id", "req-no-upload-id")))
+							.build();
+			when(mockS3Client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(response));
+			final CompositeDataOperation compositeOp = mock(CompositeDataOperation.class);
+			final DataItem item = mock(DataItem.class);
+			when(compositeOp.item()).thenReturn(item);
+			when(compositeOp.type()).thenReturn(OpType.CREATE);
+			when(compositeOp.dstPath()).thenReturn("/test-bucket");
+			when(item.name()).thenReturn("test-key");
+
+			Operation.Status status = null;
+			try {
+				drv.execute((Operation) compositeOp).join();
+			} catch (final Exception e) {
+				status = S3AwsStorageDriver.classifyFailure(e);
+			}
+
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, status);
+			verify(compositeOp).responseRequestId("req-no-upload-id");
+			verify(compositeOp, never()).put(eq(KEY_UPLOAD_ID), any());
 		}
 
 		@SuppressWarnings("unchecked")

@@ -1,6 +1,7 @@
 package com.dell.spt.base.logging;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.DataItem;
@@ -16,8 +17,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The {@code ItemPath} column of {@code op.trace.csv}, for items with and without the bucket in their
- * name. {@code S3OpTraceRequestPathParityTest} checks the manifest rows against the s3 driver's own
- * request paths.
+ * name, and the timing columns of an attempt that failed before its request was sent. {@code
+ * S3OpTraceRequestPathParityTest} checks the manifest rows against the s3 driver's own request
+ * paths.
  */
 class OperationTraceRecordTest {
 
@@ -115,6 +117,115 @@ class OperationTraceRecordTest {
 		final List<String> columns = List.of(row.strip().split(",", -1));
 		assertEquals(9, columns.size(), row);
 		assertEquals(List.of("10.0.0.1:9020", "/bucket-a/key", "READ", "SUCC"), columns.subList(0, 4));
+	}
+
+	@Test
+	void setupFailedRowHasNoStartAndNoDuration() {
+		// NettyStorageDriverBase.complete() on an attempt that failed before startRequest():
+		// finishResponse() records the end, then throws (caught by the driver).
+		final var op = setupFailed();
+
+		final List<String> columns = columns(op);
+
+		assertEquals(List.of("", "/b/k0", "CREATE", "FAIL_IO", "", "", "", "", "7"), columns);
+		assertEquals(columns, batchColumns(op));
+	}
+
+	@Test
+	void setupFailedRowAfterResetTimingKeepsItsNode() {
+		// A composite CREATE's completion request, after resetTiming(), failed before it was sent.
+		final var op = timedOp(Operation.Status.SUCC);
+		op.resetTiming();
+		op.status(Operation.Status.RESP_FAIL_SVC);
+		assertThrows(IllegalStateException.class, op::finishResponse);
+
+		final List<String> columns = columns(op);
+
+		assertEquals(List.of("10.0.0.1:9020", "/b/k0", "CREATE", "RESP_FAIL_SVC", "", "", "", "", "7"), columns);
+		assertEquals(columns, batchColumns(op));
+	}
+
+	@Test
+	void sentAttemptsKeepTheirTimes() {
+		for (final var status : List.of(Operation.Status.FAIL_IO, Operation.Status.SUCC)) {
+			final var op = timedOp(status);
+			final List<String> columns = columns(op);
+			assertEquals(String.valueOf(op.reqTimeStart()), columns.get(4), status.name());
+			assertEquals(String.valueOf(op.duration()), columns.get(5), status.name());
+			assertEquals(String.valueOf(op.latency()), columns.get(6), status.name());
+			assertEquals(String.valueOf(op.dataLatency()), columns.get(7), status.name());
+			assertEquals(columns, batchColumns(op));
+		}
+	}
+
+	@Test
+	void sentAttemptWithNoResponseKeepsItsDuration() {
+		// Started and sent, then dropped before any response: finishResponse() throws, but the
+		// attempt has a start, so its real duration stays.
+		final var op = op();
+		op.nodeAddr("10.0.0.1:9020");
+		op.startRequest();
+		op.finishRequest();
+		pause();
+		op.status(Operation.Status.FAIL_IO);
+		assertThrows(IllegalStateException.class, op::finishResponse);
+
+		final List<String> columns = columns(op);
+
+		assertTrue(op.duration() > 0 && op.duration() < op.reqTimeStart(), op.toString());
+		assertEquals(String.valueOf(op.reqTimeStart()), columns.get(4));
+		assertEquals(String.valueOf(op.duration()), columns.get(5));
+		assertEquals(List.of("", ""), columns.subList(6, 8));
+		assertEquals(columns, batchColumns(op));
+	}
+
+	private static DataOperationImpl<DataItem> op() {
+		final var op = new DataOperationImpl<DataItem>(
+						0, OpType.CREATE, new DataItemImpl("k0", 0, 1024), null, "/b", Credential.NONE, null, 0);
+		op.countBytesDone(7);
+		return op;
+	}
+
+	private static DataOperationImpl<DataItem> setupFailed() {
+		final var op = op();
+		op.status(Operation.Status.FAIL_IO);
+		assertThrows(IllegalStateException.class, op::finishResponse);
+		return op;
+	}
+
+	/** An attempt sent and answered, with every time positive. */
+	private static DataOperationImpl<DataItem> timedOp(final Operation.Status status) {
+		final var op = op();
+		op.nodeAddr("10.0.0.1:9020");
+		op.startRequest();
+		pause();
+		op.finishRequest();
+		pause();
+		op.startResponse();
+		pause();
+		op.startDataResponse();
+		pause();
+		op.finishResponse();
+		op.status(status);
+		return op;
+	}
+
+	/** Lets the microsecond clock advance, so the next time differs from the last. */
+	private static void pause() {
+		final long until = System.nanoTime() + 20_000;
+		while (System.nanoTime() < until) {
+			Thread.onSpinWait();
+		}
+	}
+
+	private static List<String> columns(final DataOperation<DataItem> op) {
+		final String row = new OperationTraceCsvLogMessage<>(op.result()).getFormattedMessage();
+		return List.of(row.strip().split(",", -1));
+	}
+
+	private static List<String> batchColumns(final DataOperation<DataItem> op) {
+		final String rows = new OperationTraceCsvBatchLogMessage<>(List.of(op.result()), 0, 1).getFormattedMessage();
+		return List.of(rows.strip().split(",", -1));
 	}
 
 	private static IntegrityManifestDataItem manifestItem(final String bucket, final String key) {
