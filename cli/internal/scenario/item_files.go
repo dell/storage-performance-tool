@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
+	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
 const containerItemFilesDir = "/spt-input/items"
@@ -72,6 +73,14 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 				FileMount{HostPath: manifest, ContainerPath: params.ItemsFile},
 				FileMount{HostPath: marker, ContainerPath: containerItemFilesDir + "/" + integrity.VerifyInputCompletionName})
 		default:
+			if IgnoresItemsFile(params.WorkloadType) {
+				// The file is still checked, so a wrong path fails as before; it is not mounted or recorded.
+				if _, _, err := prepareItemFileMount(params.ItemsFile, "read-items.csv", nil); err != nil {
+					return params, fmt.Errorf("--items-file: %w", err)
+				}
+				params.ItemsFile = ""
+				break
+			}
 			params.ItemsFile, mounts, err = prepareItemFileMount(params.ItemsFile, "read-items.csv", mounts)
 			if err != nil {
 				return params, fmt.Errorf("--items-file: %w", err)
@@ -96,6 +105,17 @@ func PrepareExternalItemFiles(params Params) (Params, error) {
 
 func hasExternalItemFiles(params Params) bool {
 	return params.ItemsFile != "" || params.ReadItemsFile != "" || params.DeleteItemsFile != ""
+}
+
+// IgnoresItemsFile reports whether a workload accepts --items-file and never reads it: its
+// scenario takes no input file of that flag.
+func IgnoresItemsFile(workloadType string) bool {
+	switch workloadType {
+	case workload.Mixed, workload.Write, workload.Mock, workload.Tables:
+		return true
+	default:
+		return false
+	}
 }
 
 func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (string, []FileMount, error) {

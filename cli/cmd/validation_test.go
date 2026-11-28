@@ -1108,7 +1108,7 @@ func TestValidatePartSize(t *testing.T) {
 			cmd.Flags().Int("mpu-concurrent-objects", tt.mpuObjects, "")
 			cmd.Flags().Int("mpu-concurrent-parts", tt.mpuParts, "")
 
-			err := validatePartSize(cmd)
+			err := validatePartSize(cmd, WorkloadTypeWrite)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validatePartSize() error = %v, wantErr %v", err, tt.wantErr)
 				return
