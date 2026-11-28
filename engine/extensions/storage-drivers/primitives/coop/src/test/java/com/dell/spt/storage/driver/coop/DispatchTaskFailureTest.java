@@ -128,7 +128,7 @@ class DispatchTaskFailureTest {
 			driver.start();
 			generator.start();
 			final var task = dispatchTask(driver);
-			await(task::isStopped);
+			assertTrue(task.awaitStop(5, TimeUnit.SECONDS), "the dispatch task stops");
 			assertEquals(0, task.backlog());
 			assertEquals(0, driver.dispatcherBacklog());
 		} finally {
@@ -182,7 +182,7 @@ class DispatchTaskFailureTest {
 			await(() -> driver.entered);
 			driver.closeAdmission();
 			final var task = dispatchTask(driver);
-			await(task::isStopped);
+			assertTrue(task.awaitStop(5, TimeUnit.SECONDS), "the dispatch task stops");
 			assertNull(driver.terminalFailure());
 			assertEquals(List.of(), err.messagesAbove(Level.DEBUG));
 			assertEquals(List.of(), msg.messagesAbove(Level.DEBUG));
@@ -205,7 +205,7 @@ class DispatchTaskFailureTest {
 			assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
 			assertTrue(failure.getMessage().contains(injected.getClass().getName()), failure.getMessage());
 			final var task = dispatchTask(driver);
-			await(task::isStopped);
+			assertTrue(task.awaitStop(5, TimeUnit.SECONDS), "the dispatch task stops");
 			assertEquals(0, task.backlog());
 			final var errors = err.messagesAbove(Level.WARN);
 			assertEquals(1, errors.size(), errors.toString());
