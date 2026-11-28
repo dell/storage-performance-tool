@@ -273,6 +273,28 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return n;
 	}
 
+	/**
+	 * Records the failure that ended {@link OperationDispatchTask} as the step's terminal failure
+	 * while admission is open. A failure while admission closes, such as a transport refusing work
+	 * as it shuts down, does not fail a step that ends normally. Runs on the dispatch thread, so it
+	 * must not close admission or stop the driver: that waits for this thread to stop.
+	 */
+	void dispatchTaskFailed(final Throwable t) {
+		if (!admissionOpen || !isStarted()) {
+			Loggers.MSG.debug("{}: dispatch task ended on {} while admission closes", stepId, t.toString());
+			return;
+		}
+		final var found = IntegrityTerminalException.find(t);
+		recordTerminalFailure(found != null
+						? found
+						: new IntegrityTerminalException(
+										IntegrityTerminalException.Category.EXECUTION,
+										stepId,
+										"Storage driver dispatch stopped on an unexpected " + t.getClass().getName(),
+										t));
+		LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: dispatch stopped on an unexpected failure", stepId);
+	}
+
 	private boolean offerIncomingOperation(final O op) {
 		dispatchLock.lock();
 		try {

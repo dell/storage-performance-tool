@@ -33,6 +33,23 @@ public class ResponseContentUtilTest {
 			dataInput.close();
 	}
 
+	/** A verified READ whose expected size cannot be read is not passed: it fails as corrupt. */
+	@Test
+	@SuppressWarnings("unchecked")
+	public void verifyFinishFailsAReadWhoseItemSizeCannotBeRead() throws Exception {
+		final DataItem item = org.mockito.Mockito.mock(DataItem.class);
+		org.mockito.Mockito.when(item.size()).thenReturn(1024L);
+		org.mockito.Mockito.when(item.name()).thenReturn("unknown-size");
+		final var op = new DataOperationImpl<DataItem>(0, OpType.READ, item, null, null, null, null, 0);
+		op.status(Operation.Status.SUCC);
+		// the size is known when the read starts, and cannot be read when its body ends
+		org.mockito.Mockito.when(item.size()).thenThrow(new java.io.IOException("size unknown"));
+
+		ResponseContentUtil.verifyFinish(op);
+
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, op.status());
+	}
+
 	@Test
 	public void verifiesFixedRangesViaList() throws Exception {
 		final int itemSize = 4096;

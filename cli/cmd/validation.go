@@ -428,7 +428,7 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	// Validate part-size if specified
-	if err := validatePartSize(cmd); err != nil {
+	if err := validatePartSize(cmd, workloadType); err != nil {
 		cmd.SilenceUsage = false
 		return err
 	}
@@ -654,8 +654,9 @@ func collectNormalizedEndpoints(cmd *cobra.Command) []string {
 // size and is smaller than --object-size (multipart with a single part is pointless).
 // We intentionally do NOT enforce a minimum part size here — different S3-compatible
 // storage systems have varying constraints, so we let the storage system reject
-// invalid values at runtime rather than blocking up front.
-func validatePartSize(cmd *cobra.Command) error {
+// invalid values at runtime rather than blocking up front. A read of an items file ignores a part
+// size from SPT_PART_SIZE, so that value is not compared with --object-size.
+func validatePartSize(cmd *cobra.Command, workloadType string) error {
 	partSize, _ := cmd.Flags().GetString("part-size")
 
 	mpuObjects, _ := cmd.Flags().GetInt("mpu-concurrent-objects")
@@ -688,7 +689,8 @@ func validatePartSize(cmd *cobra.Command) error {
 
 	// If object size is set, part size must be smaller (otherwise MPU is pointless)
 	objectSize, _ := cmd.Flags().GetString("object-size")
-	if objectSize != "" {
+	ignoredEnvValue := workloadType == WorkloadTypeRead && ignoredPartSizeSource(cmd, workloadType) == constants.EnvPartSize
+	if objectSize != "" && !ignoredEnvValue {
 		objBytes, err := sizeparse.Parse(objectSize)
 		if err == nil && objBytes > 0 && partBytes >= objBytes {
 			return fmt.Errorf("--part-size (%s) must be smaller than --object-size (%s)", partSize, objectSize)

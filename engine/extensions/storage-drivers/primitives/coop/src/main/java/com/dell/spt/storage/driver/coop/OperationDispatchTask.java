@@ -285,10 +285,18 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 							Level.TRACE, e,
 							"{}: failed to submit some load operations due to the illegal storage driver state ({})",
 							storageDriver.toString(), storageDriver.state());
+		} catch (final Error e) {
+			storageDriver.dispatchTaskFailed(e);
+			throw e;
 		} finally {
 			tempInOps.clear();
 			publishBacklog();
 		}
+	}
+
+	@Override
+	protected final void handleError(final Exception e) {
+		storageDriver.dispatchTaskFailed(e);
 	}
 
 	private void drainIncomingOperations(final int maxCount) {
@@ -450,5 +458,6 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		while (!deferredMpuQueue.isEmpty()) {
 			deferredMpuQueue.poll();
 		}
+		publishBacklog();
 	}
 }

@@ -182,6 +182,8 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	workloadType, _ := cmd.Flags().GetString("workload")
+	writeIgnoredVerifyFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 
 	// Warn if using bridge mode with multiple hosts (distributed testing)
 	if networkMode == constants.BridgeNetworkMode && len(hosts) > 1 {

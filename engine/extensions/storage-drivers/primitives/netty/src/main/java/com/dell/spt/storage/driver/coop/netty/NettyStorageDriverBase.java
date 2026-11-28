@@ -821,7 +821,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 							}
 						}
 					}
-					dataItem.commitUpdatedRanges(dataOp.markedRangesMaskPair());
+					// The item records the ranges as updated in complete(), once the UPDATE succeeds.
 					dataOp.countBytesDone(dataOp.markedRangesSize());
 				} else { // fixed byte ranges case
 					// Overwrite and size-relative ranges address the size before the request.
@@ -884,33 +884,37 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	/**
-	 * A successful UPDATE that queued its fixed ranges ({@code countBytesDone() > 0}, set only by
-	 * {@link #sendRequestData}) grows the item by the sum of its appends. Only this success grows it,
-	 * so a failed attempt never changes the size and its retry starts from the same one; a tagging
-	 * UPDATE queues no body and grows nothing.
+	 * Records what a successful UPDATE that queued its body ({@code countBytesDone() > 0}, set only by
+	 * {@link #sendRequestData}) changed in the item: a random-range UPDATE commits its marked ranges,
+	 * and a fixed-range UPDATE grows the item by the sum of its appends. Only this success changes the
+	 * item, so a failed attempt leaves it as it was and its retry sends the same ranges from the same
+	 * state; a tagging UPDATE queues no body and changes nothing.
 	 */
-	private static void commitAppendedSize(final Operation<?> op) {
-		if (op instanceof DataOperation<?> dataOp) {
-			// A random-range UPDATE has no fixed ranges: skip the volatile countBytesDone() read.
-			final List<Range> fixedRanges = dataOp.fixedRanges();
-			if (fixedRanges == null
-							|| dataOp.countBytesDone() <= 0
-							|| !(op.item() instanceof DataItem dataItem)) {
-				return;
+	private static void commitUpdate(final Operation<?> op) {
+		if (!(op instanceof DataOperation<?> dataOp)
+						|| dataOp.countBytesDone() <= 0
+						|| !(op.item() instanceof DataItem dataItem)) {
+			return;
+		}
+		final List<Range> fixedRanges = dataOp.fixedRanges();
+		if (fixedRanges == null || fixedRanges.isEmpty()) {
+			if (dataOp.hasMarkedRanges()) {
+				dataItem.commitUpdatedRanges(dataOp.markedRangesMaskPair());
 			}
-			long appended = 0;
-			for (final var fixedRange : fixedRanges) {
-				final long size = fixedRange.getSize();
-				if (size != -1) {
-					appended += size;
-				}
+			return;
+		}
+		long appended = 0;
+		for (final var fixedRange : fixedRanges) {
+			final long size = fixedRange.getSize();
+			if (size != -1) {
+				appended += size;
 			}
-			if (appended > 0) {
-				try {
-					dataItem.size(dataItem.size() + appended);
-				} catch (final IOException e) {
-					throw new AssertionError(e);
-				}
+		}
+		if (appended > 0) {
+			try {
+				dataItem.size(dataItem.size() + appended);
+			} catch (final IOException e) {
+				throw new AssertionError(e);
 			}
 		}
 	}
@@ -964,7 +968,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			}
 		} else if (transportHeld && OpType.UPDATE.equals(op.type())) {
 			// Once per attempt: a second complete() finds the transport released.
-			commitAppendedSize(op);
+			commitUpdate(op);
 		}
 		if (transportHeld && directDispatchEnabled()
 						&& !failed

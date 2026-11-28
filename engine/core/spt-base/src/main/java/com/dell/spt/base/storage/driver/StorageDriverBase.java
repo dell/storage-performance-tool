@@ -321,7 +321,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 
 	/** Publishes a failure detected by an asynchronous response handler to the step lifecycle. */
 	protected final void recordTerminalFailure(final IntegrityTerminalException failure) {
-		if (failure != null) {
+		if (failure != null && terminalFailure != null) {
 			terminalFailure.compareAndSet(null, failure.withStepId(stepId));
 		}
 	}
