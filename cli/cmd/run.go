@@ -2386,6 +2386,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 		}()
 		params = prepared.Params()
+		writeIgnoredFlagWarnings(cmd.ErrOrStderr(), cmd, workloadType)
 		scenarioContent := string(prepared.ScenarioJS())
 		expectedStepIDs := prepared.ExpectedStepIDs()
 		verificationRun := scenario.IsIntegrityWorkload(params)
@@ -3414,9 +3415,15 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.RangeSize, _ = cmd.Flags().GetString("range-size")
 	params.RangeOffset, _ = cmd.Flags().GetString("range-offset")
 	params.RangeAlign, _ = cmd.Flags().GetString("range-align")
+	// An ignored SPT_PART_SIZE does not conflict with --range-size; a typed --part-size still does.
+	partSizeSource := ignoredPartSizeSource(cmd, workloadType)
+	if partSizeSource == constants.EnvPartSize {
+		params.PartSize = ""
+	}
 	if _, err := scenario.ParseRangePolicy(params); err != nil {
 		return params, err
 	}
+	dropIgnoredRunFlags(&params, partSizeSource)
 	if err := scenario.ValidateEndpointSelection(params.EndpointSelection, scenario.EndpointSelectionTarget{
 		RawEndpoints:   rawEndpointFlags(cmd),
 		S3Driver:       params.S3Driver,
