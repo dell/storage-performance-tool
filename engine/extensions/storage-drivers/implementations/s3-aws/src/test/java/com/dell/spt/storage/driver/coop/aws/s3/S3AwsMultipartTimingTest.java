@@ -39,6 +39,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
 import java.util.function.Predicate;
 import org.apache.logging.log4j.Level;
@@ -337,11 +338,15 @@ final class S3AwsMultipartTimingTest {
 	/**
 	 * A loopback S3 that answers multipart uploads: their initiation, parts, completion and abort,
 	 * and every other request with an empty 200. Each initiation gets an upload ID of its own, from
-	 * {@code upload-1}. It answers with {@link #failureStatus} the parts {@link #failPart} picks,
-	 * counted from 1 over every part request it receives, and every part of the uploads
-	 * {@link #failUpload} picks by ID. The default 400 is one the client does not retry itself.
+	 * {@code upload-1}, unless {@link #initiationBody} scripts its reply. It answers with
+	 * {@link #failureStatus} the parts {@link #failPart} picks, counted from 1 over every part
+	 * request it receives, and every part of the uploads {@link #failUpload} picks by ID. The
+	 * default 400 is one the client does not retry itself.
 	 */
 	static final class MultipartStub implements AutoCloseable {
+
+		/** How many bytes a truncated initiation reply declares beyond its body. */
+		private static final int TRUNCATED_BYTES = 100;
 
 		private final HttpServer server;
 		private final ExecutorService threads = Executors.newCachedThreadPool();
@@ -372,6 +377,17 @@ final class S3AwsMultipartTimingTest {
 		/** Part requests numbered from {@link #partGateFrom} wait for this gate before they are answered. */
 		volatile CountDownLatch partGate = new CountDownLatch(0);
 		volatile int partGateFrom = 1;
+		/**
+		 * The body of the reply to each initiation, by its number from 1, answered with
+		 * {@link #initiationStatus}; {@code null} for the normal reply with an upload ID of its own.
+		 */
+		volatile IntFunction<String> initiationBody = n -> null;
+		volatile int initiationStatus = 200;
+		/**
+		 * Whether a reply from {@link #initiationBody} declares more bytes than its body in its
+		 * {@code Content-Length}, then closes the connection after the body.
+		 */
+		volatile boolean truncateInitiation;
 
 		MultipartStub() {
 			try {
@@ -411,7 +427,13 @@ final class S3AwsMultipartTimingTest {
 					exchange.getResponseHeaders().set("ETag", "\"etag-" + n + "\"");
 					empty(exchange, 200);
 				} else if ("POST".equals(method) && query.contains("uploads")) {
-					final var uploadId = "upload-" + initiations.incrementAndGet();
+					final var n = initiations.incrementAndGet();
+					final var body = initiationBody.apply(n);
+					if (body != null) {
+						initiationReply(exchange, initiationStatus, body, truncateInitiation);
+						return;
+					}
+					final var uploadId = "upload-" + n;
 					openUploads.add(uploadId);
 					maxOpenUploads.accumulateAndGet(openUploads.size(), Math::max);
 					respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
@@ -484,6 +506,24 @@ final class S3AwsMultipartTimingTest {
 		private static void empty(final HttpExchange exchange, final int status) throws IOException {
 			exchange.getResponseHeaders().set("Content-Length", "0");
 			exchange.sendResponseHeaders(status, -1);
+		}
+
+		/**
+		 * Answers an initiation with {@code body}: an empty one with {@code Content-Length: 0}, and a
+		 * truncated one with a length {@link #TRUNCATED_BYTES} above the body's, so that the server
+		 * closes the connection once the body is written.
+		 */
+		private static void initiationReply(final HttpExchange exchange, final int status, final String body,
+						final boolean truncated) throws IOException {
+			if (body.isEmpty() && !truncated) {
+				empty(exchange, status);
+				return;
+			}
+			final var bytes = body.getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().set("Content-Type", "application/xml");
+			exchange.sendResponseHeaders(status, bytes.length + (truncated ? TRUNCATED_BYTES : 0));
+			exchange.getResponseBody().write(bytes);
+			exchange.getResponseBody().flush();
 		}
 
 		private static void respond(final HttpExchange exchange, final int status, final String xml) throws IOException {

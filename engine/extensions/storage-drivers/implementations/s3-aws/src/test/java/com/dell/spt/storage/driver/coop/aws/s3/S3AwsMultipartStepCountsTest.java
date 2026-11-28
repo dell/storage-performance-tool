@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,10 +13,12 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationRetryPolicy;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -23,19 +26,32 @@ import com.dell.spt.storage.driver.coop.aws.s3.S3AwsMultipartTimingTest.Multipar
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * Multipart writes on the {@code s3-aws} driver against a loopback S3 that fails chosen part
@@ -74,6 +90,10 @@ final class S3AwsMultipartStepCountsTest {
 	 */
 	private static final int WAIT_LIMIT_SECONDS = 160;
 	private static final long RESULT_TIMEOUT_SECONDS = 60;
+	/** An initiation reply, with the upload ID element to put in it. */
+	private static final String INITIATION_RESULT = "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>%s</InitiateMultipartUploadResult>";
+	/** How the driver names the cause of an upload failed for want of an upload ID. */
+	private static final String MISSING_UPLOAD_ID = "upload id not found in the multipart initiation response";
 
 	private final MultipartStub stub = new MultipartStub();
 	private long stepMillis;
@@ -249,12 +269,197 @@ final class S3AwsMultipartStepCountsTest {
 	}
 
 	/**
-	 * Runs a recycling CREATE step over {@code items} saved items of three 1 KB parts, up to {@code count}
-	 * results (0: no count limit) or {@code timeLimit}, and returns its successes and failures as
-	 * {@link #write} does.
+	 * Initiation replies of a target that does not conform: 200 with no upload ID, an empty or blank
+	 * one, no body, or a body that is not XML.
 	 */
+	enum UnusableInitiationReply {
+		NO_UPLOAD_ID, EMPTY_UPLOAD_ID, BLANK_UPLOAD_ID, EMPTY_BODY, MALFORMED_XML, HTML5, PLAIN_TEXT;
+
+		String body() {
+			return switch (this) {
+			case NO_UPLOAD_ID -> INITIATION_RESULT.formatted("");
+			case EMPTY_UPLOAD_ID -> INITIATION_RESULT.formatted("<UploadId/>");
+			case BLANK_UPLOAD_ID -> INITIATION_RESULT.formatted("<UploadId> </UploadId>");
+			case EMPTY_BODY -> "";
+			case MALFORMED_XML -> "<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult>"
+							+ "<Bucket>bucket</Bucket><UploadId>upload-x</Upl";
+			case HTML5 -> "<!DOCTYPE html><meta charset=utf-8><title>Proxy</title>";
+			case PLAIN_TEXT -> "OK";
+			};
+		}
+	}
+
+	/**
+	 * At driver level: an initiation answered 200 without a usable upload ID fails its upload at
+	 * once as {@code RESP_FAIL_NOT_FOUND}, which is not retryable, as on the {@code s3} driver. No
+	 * part, completion or abort follows, and the client does not send the initiation again.
+	 */
+	@ParameterizedTest
+	@EnumSource(UnusableInitiationReply.class)
+	void anInitiationWithoutAUsableUploadIdFailsItsUploadAsNotFound(final UnusableInitiationReply reply) throws Exception {
+		stub.initiationBody = n -> reply.body();
+
+		final var upload = upload("unusable-initiation");
+
+		assertEquals(1, upload.size(), upload::toString);
+		final var parent = upload.get(0);
+		assertTrue(parent instanceof CompositeDataOperation<?>, upload::toString);
+		assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, parent.status(), upload::toString);
+		assertFalse(OperationRetryPolicy.isRetryableStatus(parent.status()));
+		assertEquals(0, stub.partRequests.get(), "no part sent");
+		assertRequests(1, 0, 0);
+	}
+
+	@ParameterizedTest
+	@EnumSource(UnusableInitiationReply.class)
+	void uploadsWhoseInitiationHasNoUsableUploadIdAreEachOneFailure(final UnusableInitiationReply reply) throws Exception {
+		uploadsWhoseInitiationHasNoUsableUploadIdAreEachOneFailure(reply, false);
+	}
+
+	@ParameterizedTest
+	@EnumSource(UnusableInitiationReply.class)
+	void uploadsWhoseInitiationHasNoUsableUploadIdAreEachOneFailureWithRetry(final UnusableInitiationReply reply)
+					throws Exception {
+		uploadsWhoseInitiationHasNoUsableUploadIdAreEachOneFailure(reply, true);
+	}
+
+	/**
+	 * Every initiation is answered 200 without a usable upload ID: each upload is initiated once and
+	 * counted once as a failure, with no part, completion or abort; with {@code load-op-retry} it is
+	 * not started again.
+	 */
+	private void uploadsWhoseInitiationHasNoUsableUploadIdAreEachOneFailure(final UnusableInitiationReply reply,
+					final boolean retry) throws Exception {
+		stub.initiationBody = n -> reply.body();
+
+		final var outcomes = write(2, retry);
+
+		assertEquals(List.of(0L, 2L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertEquals(0, stub.partRequests.get(), "no part sent");
+		assertRequests(2, 0, 0);
+		assertEnded();
+	}
+
+	/**
+	 * Several uploads of a step fail for want of an upload ID: the errors log names the cause once at
+	 * WARN and then at DEBUG, the driver's log warns once, and neither logs an ERROR per upload or
+	 * the {@code NullPointerException} the driver used to fail with.
+	 */
+	@ParameterizedTest
+	@EnumSource(value = UnusableInitiationReply.class, names = {"NO_UPLOAD_ID", "HTML5"
+	})
+	void aStepsUploadsWithoutAnUploadIdAreWarnedOfOnce(final UnusableInitiationReply reply) throws Exception {
+		stub.initiationBody = n -> reply.body();
+		final var uploads = 3;
+		final List<String> errorLines;
+		final List<String> driverLines;
+		try (final var errors = new LogCapture(Loggers.ERR.getName());
+						final var driverLog = new LogCapture(S3AwsStorageDriver.class.getName())) {
+			final var outcomes = write(uploads, false);
+			assertEquals(List.of(0L, (long) uploads), outcomes.get("CREATE-1"), outcomes::toString);
+			errorLines = errors.lines();
+			driverLines = driverLog.lines();
+		}
+
+		final var cause = errorLines.stream().filter(line -> line.contains(MISSING_UPLOAD_ID)).toList();
+		assertEquals(1, cause.stream().filter(line -> line.startsWith("WARN ")).count(), errorLines::toString);
+		assertEquals(uploads - 1, cause.stream().filter(line -> line.startsWith("DEBUG ")).count(), errorLines::toString);
+		assertEquals(1, driverLines.stream().filter(line -> line.startsWith("WARN ") && line.contains(MISSING_UPLOAD_ID)).count(),
+						driverLines::toString);
+		assertEquals(List.of(), driverLines.stream().filter(line -> line.startsWith("ERROR ")).toList());
+		final var npe = "nullpointerexception";
+		assertEquals(List.of(), errorLines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(npe)).toList());
+		assertEquals(List.of(), driverLines.stream().filter(line -> line.toLowerCase(Locale.ROOT).contains(npe)).toList());
+	}
+
+	/** A valid upload ID with spaces around it is used as the target sent it, not trimmed. */
+	@Test
+	void aPaddedUploadIdIsUsedUnchanged() throws Exception {
+		stub.initiationBody = n -> INITIATION_RESULT.formatted("<UploadId> abc </UploadId>");
+
+		final var upload = upload("padded");
+
+		assertEquals(Operation.Status.SUCC, upload.get(upload.size() - 1).status(), upload::toString);
+		assertEquals(PARTS, stub.partRequests.get());
+		assertEquals(List.of(" abc "), stub.completedUploads.stream()
+						.map(id -> URLDecoder.decode(id, StandardCharsets.UTF_8)).toList());
+	}
+
+	/**
+	 * An initiation reply cut short by its connection, against the length it declares, fails in the
+	 * client before its body is parsed, and stays a retryable {@code FAIL_UNKNOWN}: it may be
+	 * transient.
+	 */
+	@Test
+	void aTruncatedInitiationReplyStaysRetryable() throws Exception {
+		stub.initiationBody = n -> INITIATION_RESULT.formatted("<UploadId>upload-cut</UploadId>");
+		stub.truncateInitiation = true;
+
+		final var upload = upload("truncated");
+
+		final var parent = upload.get(upload.size() - 1);
+		assertEquals(Operation.Status.FAIL_UNKNOWN, parent.status(), upload::toString);
+		assertTrue(OperationRetryPolicy.isRetryableStatus(parent.status()));
+		assertEquals(0, stub.partRequests.get(), "no part sent");
+		assertEquals(0, stub.completions.get());
+		assertEquals(List.of(), stub.aborts);
+	}
+
+	/**
+	 * Initiation refusals keep their own status: an HTML 403 is {@code RESP_FAIL_AUTH}, an HTML 503
+	 * {@code RESP_FAIL_SVC} once the client has retried it, and a 200 with an S3 {@code <Error>}
+	 * coded {@code AccessDenied} {@code RESP_FAIL_CLIENT}.
+	 */
+	@ParameterizedTest
+	@CsvSource(delimiter = '|', value = {
+			"403|<!DOCTYPE html><title>Forbidden</title>|RESP_FAIL_AUTH",
+			"503|<!DOCTYPE html><title>Unavailable</title>|RESP_FAIL_SVC",
+			"200|<Error><Code>AccessDenied</Code><Message>denied</Message></Error>|RESP_FAIL_CLIENT"
+	})
+	void aRefusedInitiationKeepsItsStatus(final int status, final String body, final Operation.Status expected)
+					throws Exception {
+		stub.initiationStatus = status;
+		stub.initiationBody = n -> body;
+
+		final var upload = upload("refused-initiation");
+
+		assertEquals(expected, upload.get(upload.size() - 1).status(), upload::toString);
+		assertEquals(0, stub.partRequests.get(), "no part sent");
+		assertEquals(0, stub.completions.get());
+		assertEquals(List.of(), stub.aborts);
+	}
+
+	/**
+	 * A recycled upload that completes, then on its next circulation gets an initiation without an
+	 * upload ID, fails that circulation once as not found: none of its requests carries the first
+	 * circulation's upload ID, and {@code load-op-retry} does not start it again.
+	 */
+	@Test
+	void aRecycledUploadWhoseNextInitiationHasNoUploadIdFailsCleanly() throws Exception {
+		stub.initiationBody = n -> n == 1 ? null : UnusableInitiationReply.NO_UPLOAD_ID.body();
+
+		final var outcomes = recycle(1, 2, TIME_LIMIT, 1, 0, true);
+
+		assertEquals(List.of(1L, 1L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertEquals(PARTS, stub.partRequests.get(), "the first circulation's parts only");
+		assertRequests(2, 1, 0);
+		assertEquals(List.of("upload-1"), stub.completedUploads);
+		assertEquals(List.of(), stub.nullUploadIdRequests);
+		assertEnded();
+	}
+
 	private Map<String, List<Long>> recycle(final int items, final int count, final String timeLimit,
 					final int concurrency, final int multipartObjects) throws Exception {
+		return recycle(items, count, timeLimit, concurrency, multipartObjects, false);
+	}
+
+	/**
+	 * Runs a recycling CREATE step over {@code items} saved items of three 1 KB parts, up to {@code count}
+	 * results (0: no count limit) or {@code timeLimit}, with {@code load-op-retry} as {@code retry}
+	 * and a retry limit of 1, and returns its successes and failures as {@link #write} does.
+	 */
+	private Map<String, List<Long>> recycle(final int items, final int count, final String timeLimit,
+					final int concurrency, final int multipartObjects, final boolean retry) throws Exception {
 		final var itemsFile = home.resolve("items.csv");
 		final var lines = new StringBuilder();
 		for (var i = 0; i < items; i++) {
@@ -266,12 +471,13 @@ final class S3AwsMultipartStepCountsTest {
 						Load.config({
 							"load": {
 								"step": {"limit": {"time": "%s"}},
-								"op": {"limit": {"count": %d}, "recycle": {"mode": true}, "wait": {"limit": %d}}
+								"op": {"limit": {"count": %d}, "recycle": {"mode": true}, "retry": %s, "retryLimit": 1,
+									"wait": {"limit": %d}}
 							},
 							"storage": {"driver": {"limit": {"concurrency": %d, "multipart": {"objects": %d}}}},
 							"item": {"input": {"file": "%s"}, "data": {"size": "%dKB", "ranges": {"threshold": "%dKB"}}}
 						}).run();
-						""".formatted(timeLimit, count, WAIT_LIMIT_SECONDS, concurrency, multipartObjects,
+						""".formatted(timeLimit, count, retry, WAIT_LIMIT_SECONDS, concurrency, multipartObjects,
 						itemsFile.toString().replace("\\", "/"), PARTS, PART_SIZE / 1024);
 		return run("s3-aws-multipart-recycle-", scenario);
 	}
@@ -370,6 +576,56 @@ final class S3AwsMultipartStepCountsTest {
 	/** The step ended by its count, not its time limit or a wait for an unresolved operation. */
 	private void assertEnded() {
 		assertTrue(stepMillis < ENDS_WITHIN_MILLIS, () -> "the step took " + stepMillis + " ms");
+	}
+
+	/**
+	 * Captures a logger's lines, down to DEBUG, from every thread, each as its level, a space, and
+	 * its message in lower case, followed by its exception if it has one.
+	 */
+	private static final class LogCapture extends AbstractAppender implements AutoCloseable {
+
+		private final List<String> captured = new CopyOnWriteArrayList<>();
+		private final org.apache.logging.log4j.core.Logger logger;
+		private final Level previousLevel;
+		private volatile String marker = "";
+		private volatile CountDownLatch flushed = new CountDownLatch(0);
+
+		LogCapture(final String loggerName) {
+			super("s3-aws-multipart-counts-capture-" + loggerName, null, null, true, Property.EMPTY_ARRAY);
+			logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(loggerName);
+			previousLevel = logger.getLevel();
+			start();
+			logger.addAppender(this);
+			logger.setLevel(Level.DEBUG);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			final var message = event.getMessage().getFormattedMessage();
+			if (message.equals(marker)) {
+				flushed.countDown();
+			} else {
+				captured.add(event.getLevel() + " " + message.toLowerCase(Locale.ROOT)
+								+ (event.getThrown() == null ? "" : " " + event.getThrown()));
+			}
+		}
+
+		/** The lines logged so far, once a marker logged after them has arrived: the loggers are asynchronous. */
+		List<String> lines() throws InterruptedException {
+			final var latch = new CountDownLatch(1);
+			flushed = latch;
+			marker = "flush-" + System.nanoTime();
+			logger.debug(marker);
+			assertTrue(latch.await(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS), "the logged lines were not delivered");
+			return List.copyOf(captured);
+		}
+
+		@Override
+		public void close() {
+			logger.setLevel(previousLevel);
+			logger.removeAppender(this);
+			stop();
+		}
 	}
 
 	private static final class ResultOutput implements Output<Operation<DataItem>> {
